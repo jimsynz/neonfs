@@ -1,7 +1,7 @@
 defmodule NeonFS.Containerd.ContentServerWriteTest do
   @moduledoc """
   Tests for the `Write` bidi-streaming RPC dispatch state machine
-  (#729). Goes through the test entry point
+  . Goes through the test entry point
   `ContentServer.process_write_stream/2` so a real
   `GRPC.Server.Stream` isn't required.
 
@@ -63,7 +63,7 @@ defmodule NeonFS.Containerd.ContentServerWriteTest do
     end
   end
 
-  describe "process_write_stream — WRITE action (#729)" do
+  describe "process_write_stream — WRITE action" do
     test "sends a WRITE response per frame so the client doesn't block", %{ref: ref} do
       payload = "first batch of bytes"
 
@@ -106,7 +106,7 @@ defmodule NeonFS.Containerd.ContentServerWriteTest do
     end
   end
 
-  describe "process_write_stream — STAT carries total and expected (#741)" do
+  describe "process_write_stream — STAT carries total and expected" do
     test "STAT request's `total` populates the session", %{ref: ref} do
       [reply] =
         capture_replies([
@@ -130,7 +130,7 @@ defmodule NeonFS.Containerd.ContentServerWriteTest do
     end
   end
 
-  describe "process_write_stream — telemetry (#741)" do
+  describe "process_write_stream — telemetry" do
     setup do
       tel_ref =
         :telemetry_test.attach_event_handlers(self(), [
@@ -191,7 +191,7 @@ defmodule NeonFS.Containerd.ContentServerWriteTest do
     end
   end
 
-  describe "process_write_stream — multi-blob session sequencing (#741)" do
+  describe "process_write_stream — multi-blob session sequencing" do
     # Simulates containerd's per-descriptor ref sequence: each blob in
     # an image-pull session opens its own bidi `Write` stream with a
     # distinct `ref` (`MakeRefKey` produces `"manifest-"+digest`,
@@ -330,7 +330,7 @@ defmodule NeonFS.Containerd.ContentServerWriteTest do
     end
   end
 
-  describe "process_write_stream — ref binding (#741)" do
+  describe "process_write_stream — ref binding" do
     # Containerd's `WriteContentRequest` proto: "once a write stream
     # has started, it may only write to a single ref, thus once a
     # stream is started, the ref may be omitted on subsequent
@@ -437,7 +437,7 @@ defmodule NeonFS.Containerd.ContentServerWriteTest do
     end
   end
 
-  describe "process_write_stream — retried ingest (#1354)" do
+  describe "process_write_stream — retried ingest" do
     test "a second stream for the same ref resumes from the offset and commits", %{ref: ref} do
       part1 = "the first half of the layer"
       part2 = "the second half of the layer"

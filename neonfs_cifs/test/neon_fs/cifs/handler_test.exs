@@ -262,7 +262,7 @@ defmodule NeonFS.CIFS.HandlerTest do
     end
 
     # `O_EXCL | O_CREAT` (0o300) routes through `write_file_at` with
-    # `create_only: true` (sub-issue #595 of #303). The interface-side
+    # `create_only: true`. The interface-side
     # get_file_meta precheck only catches the trivial case where the
     # file is already on disk; concurrent creates on different CIFS
     # nodes are fenced by the `claim_create` primitive on the core
@@ -302,7 +302,7 @@ defmodule NeonFS.CIFS.HandlerTest do
 
         NeonFS.Core, :write_file_at, ["vol-a", "/raced", 0, <<>>, opts] ->
           # The peer-cluster integration test for the underlying
-          # primitive lives in #592; here we just verify the
+          # primitive lives elsewhere; here we just verify the
           # interface-level translation.
           assert Keyword.get(opts, :create_only) == true
           {:error, AlreadyExists.from_reason(:exists)}
@@ -506,7 +506,7 @@ defmodule NeonFS.CIFS.HandlerTest do
     # smbd's atomic mkdir opens the tmp-named directory, renames it to
     # the final name, then fstats the still-open handle
     # (open.c mkdir_internal → open_directory's vfs_stat_fsp). The
-    # handle's stored path must follow the rename (#1555).
+    # handle's stored path must follow the rename.
     # The handle carries the file's identity, so a rename needs no
     # bookkeeping on the handler's side at all: the fd keeps addressing the
     # same object under its new name, which is what POSIX and SMB both
@@ -653,7 +653,7 @@ defmodule NeonFS.CIFS.HandlerTest do
     end
   end
 
-  describe "path normalisation (#1550)" do
+  describe "path normalisation" do
     test "the share root '.' maps to the volume root '/'" do
       expect(NeonFS.Client, :core_call, fn NeonFS.Core, :get_file_meta, ["vol-a", "/"] ->
         {:ok, file_meta("/", mode: 0o40777, accessed_at: 1, modified_at: 1, changed_at: 1)}
@@ -713,7 +713,7 @@ defmodule NeonFS.CIFS.HandlerTest do
 
     # smbd stats the synthesised "." and ".." entries of a directory
     # listing by opening `<dir>/.` verbatim (smbd_dirptr_get_entry) —
-    # the path arrives uncanonicalised (#1555).
+    # the path arrives uncanonicalised.
     test "a trailing '.' segment resolves to the directory itself" do
       expect(NeonFS.Client, :core_call, fn NeonFS.Core, :get_file_meta, ["vol-a", "/d"] ->
         {:ok, file_meta("/d", mode: 0o40755)}

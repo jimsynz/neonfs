@@ -7,7 +7,7 @@ defmodule NeonFS.S3.Supervisor do
   - Service registration with the core cluster
   - Bandit HTTP server running Firkin.Plug
 
-  Multipart upload bookkeeping lives in the cluster KV store (#1177),
+  Multipart upload bookkeeping lives in the cluster KV store,
   so there is no node-local store process to supervise.
   """
 
@@ -18,7 +18,7 @@ defmodule NeonFS.S3.Supervisor do
 
   # On shutdown ThousandIsland stops accepting new connections and drains
   # in-flight requests for up to `shutdown_timeout`. The default leaves
-  # headroom under the systemd `TimeoutStopSec=45` budget (#1377, #1385).
+  # headroom under the systemd `TimeoutStopSec=45` budget.
   @default_drain_deadline_ms 25_000
 
   @spec start_link(keyword()) :: Supervisor.on_start()
@@ -31,7 +31,7 @@ defmodule NeonFS.S3.Supervisor do
     HealthCheck.register_checks()
 
     # Registrar last so it terminates first on shutdown: it deregisters the
-    # service (stopping new client work) before the listener drains (#1386).
+    # service (stopping new client work) before the listener drains.
     children = [
       MultipartReaper,
       listener_child_spec(),

@@ -4,8 +4,8 @@ defmodule NeonFS.CSI.ControllerServer do
   control-plane bridge between Kubernetes PersistentVolumeClaims and
   NeonFS volumes.
 
-  Sub-issue #314 of the CSI driver epic (#244). The Identity service
-  (#313) declares this plugin's `CONTROLLER_SERVICE` capability so the
+  The Identity service
+  declares this plugin's `CONTROLLER_SERVICE` capability so the
   external-provisioner sidecar routes CreateVolume / DeleteVolume
   here.
 
@@ -392,7 +392,7 @@ defmodule NeonFS.CSI.ControllerServer do
   CSI `Controller.GetCapacity` — reports cluster-wide available
   bytes. Capability filters (`accessible_topology`,
   `volume_capabilities`, `parameters`) are accepted but not used
-  yet — accessibility constraints land with #316.
+  yet — accessibility constraints arrive with topology support.
   """
   @spec get_capacity(GetCapacityRequest.t(), term()) :: GetCapacityResponse.t()
   def get_capacity(%GetCapacityRequest{}, _stream) do

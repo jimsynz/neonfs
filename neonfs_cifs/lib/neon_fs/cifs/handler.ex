@@ -12,7 +12,7 @@ defmodule NeonFS.CIFS.Handler do
   volume ids, authorises, and routes to a volume-affine core node.
   Calling id-keyed internals (`NeonFS.Core.FileIndex` /
   `NeonFS.Core.WriteOperation`) with the name instead resolves
-  nothing and surfaces as `ENOENT` on every mutating op (#1555).
+  nothing and surfaces as `ENOENT` on every mutating op.
 
   Every handler returns `{reply, new_state}`. State threading lets
   ops like `openat` and `fdopendir` mint synthetic 64-bit handles
@@ -21,8 +21,7 @@ defmodule NeonFS.CIFS.Handler do
 
   ## "Must implement" Samba VFS ops
 
-  See [`#116`'s "Must implement" list][issue-116]. The first slice
-  covers all 20:
+  The "must implement" Samba VFS ops, all 20 of which are covered:
 
   | Bucket      | Op                                                                   |
   |-------------|----------------------------------------------------------------------|
@@ -34,15 +33,14 @@ defmodule NeonFS.CIFS.Handler do
   | Mutations   | `unlinkat`, `renameat`                                               |
   | Filesystem  | `disk_free`, `fstatvfs`                                              |
 
-  Anything outside this set surfaces as `{:error, :enosys}`. The
-  follow-up sub-issue (#280-equivalent for Samba) covers xattrs,
-  locks, and async I/O.
+  Anything outside this set surfaces as `{:error, :enosys}`. Xattrs,
+  locks, and async I/O are follow-up work.
 
-  `fsync` (#1503) resolves the open handle to its `{volume, path}` and
+  `fsync` resolves the open handle to its `{volume, path}` and
   drives the shared `NeonFS.Client.sync_file/2` durability barrier, so
   a CIFS `SMB2_FLUSH` blocks until the file's chunks reach the volume's
   `min_copies` durable replicas — identical semantics to FUSE fsync and
-  NFS COMMIT (#1455).
+  NFS COMMIT.
 
   [issue-116]: https://harton.dev/project-neon/neonfs/issues/116
   """
@@ -81,9 +79,9 @@ defmodule NeonFS.CIFS.Handler do
   # rooted at "/", so normalise every path argument at ingress — otherwise the
   # share root resolves to `get_by_path(volume, ".")`, which core can't map to
   # the volume root, and every operation fails with OBJECT_PATH_NOT_FOUND
-  # (#1550). Dot segments also arrive uncanonicalised when smbd stats the
+  # Dot segments also arrive uncanonicalised when smbd stats the
   # synthesised "." / ".." entries of a directory listing
-  # (`smbd_dirptr_get_entry` opens `<dir>/.` verbatim — #1555), so resolve
+  # (`smbd_dirptr_get_entry` opens `<dir>/.` verbatim), so resolve
   # those here too.
   @path_keys ~w(path old_path new_path)
   defp normalise_paths(args) do
@@ -156,7 +154,7 @@ defmodule NeonFS.CIFS.Handler do
 
   defp do_handle(:fchown, _args, state) do
     # NeonFS volumes do not yet honour POSIX uid/gid ownership; ACLs
-    # ride on the IAM principal model (#135). Returning `:enosys`
+    # ride on the IAM principal model. Returning `:enosys`
     # keeps Samba from mis-applying inherited ACLs based on a
     # spoofed uid/gid until the IAM bridge lands.
     {{:error, :enosys}, state}
@@ -283,7 +281,7 @@ defmodule NeonFS.CIFS.Handler do
   # `NeonFS.Core.mkdir/3` is the canonical directory create (the same
   # entry point NFS MKDIR uses): it takes the plain permission bits and
   # stores a `dir:` record under a namespace-coordinator claim, so
-  # concurrent mkdirs across interface nodes serialise (#305).
+  # concurrent mkdirs across interface nodes serialise.
   defp do_handle(:mkdirat, %{"path" => path} = args, state) do
     mode = Map.get(args, "mode", 0o755)
 
@@ -309,7 +307,7 @@ defmodule NeonFS.CIFS.Handler do
   end
 
   # `rename_file/3` handles same-parent renames, cross-parent moves, and
-  # combined move-and-rename under a rename claim (#304), so no
+  # combined move-and-rename under a rename claim, so no
   # decomposition happens here.
   #
   # Open handles track paths, so a successful rename must not strand
@@ -318,7 +316,7 @@ defmodule NeonFS.CIFS.Handler do
   # No handle rewriting: file handles are keyed by `{volume, file_id}` in the
   # node-wide registry, so a rename does not move what they refer to. The
   # rewriting this used to do only ever fixed the single-connection case
-  # anyway (#1609).
+  # anyway.
   defp do_handle(:renameat, %{"old_path" => old, "new_path" => new}, state) do
     with_volume(state, fn volume, state ->
       case core_call(NeonFS.Core, :rename_file, [volume, old, new]) do
@@ -334,7 +332,7 @@ defmodule NeonFS.CIFS.Handler do
   # cluster's drives, not the volume), so report a large synthetic capacity —
   # enough that SMB clients don't refuse writes against a "full" share. The
   # FUSE backend punts on statfs the same way. Accurate per-volume/cluster
-  # accounting is a follow-up (#1554-class work), not a correctness blocker.
+  # accounting is follow-up work, not a correctness blocker.
   @synthetic_capacity 1024 * 1024 * 1024 * 1024 * 1024
   defp do_handle(:disk_free, _args, state) do
     with_volume(state, fn _volume, state ->
@@ -358,11 +356,11 @@ defmodule NeonFS.CIFS.Handler do
 
   ## Helpers
 
-  # The identity pin (#1605) keeps the file reachable through this handle
+  # The identity pin keeps the file reachable through this handle
   # across a rename and survives an unlink until every handle closes. A
   # coordinator that cannot issue one is not a reason to refuse the open —
-  # the handle simply carries no pin, matching how FUSE behaved before #1612
-  # tightened it. Recorded rather than silently dropped so the registry can
+  # the handle simply carries no pin, which is how FUSE behaved before
+  # it gained pins. Recorded rather than silently dropped so the registry can
   # tell "no pin" from "pin to release".
   defp pin_file(volume, path) do
     case core_call(NeonFS.Core, :pin_file, [volume, path, self()]) do
@@ -378,7 +376,7 @@ defmodule NeonFS.CIFS.Handler do
 
   # Every fd-bearing op resolves through the node-wide registry, so a handle
   # opened on one connection works on another and none of them re-resolve a
-  # path that a concurrent rename or unlink may have moved (#1609).
+  # path that a concurrent rename or unlink may have moved.
   defp with_handle(handle, state, fun) do
     case HandleRegistry.fetch(handle) do
       {:ok, entry} -> fun.(entry)
@@ -387,7 +385,7 @@ defmodule NeonFS.CIFS.Handler do
   end
 
   # Directory handles only — file handles are minted by the node-wide
-  # registry. Directory-handle pinning is out of scope on #1590.
+  # registry. Directory-handle pinning is not part of that work.
   defp mint_handle(state) do
     handle = state.next_handle
     {handle, %{state | next_handle: handle + 1}}
@@ -418,9 +416,9 @@ defmodule NeonFS.CIFS.Handler do
   # POSIX-style open call).
   #
   # Exclusive create routes through `WriteOperation`'s `create_only:
-  # true` (sub-issue #595 of #303) so two CIFS interface nodes that
+  # true` so two CIFS interface nodes that
   # both observe `:not_found` can't both win the create — the
-  # namespace coordinator's `claim_create` primitive (#591) lets
+  # namespace coordinator's `claim_create` primitive lets
   # exactly one through and surfaces `{:error, :exists}` to the
   # other, which we map back to `:eexist`.
   defp open_or_create(volume, path, flags, mode) do

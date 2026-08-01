@@ -54,7 +54,7 @@ defmodule NeonFS.S3.HealthPlug do
     end
   end
 
-  # A write reaching a `:frozen` cluster (#1378) surfaces as a raised
+  # A write reaching a `:frozen` cluster surfaces as a raised
   # ClusterFrozenError from the backend; return the same 503 + Retry-After
   # as proactive degraded-mode gating.
   defp forward(conn, opts) do

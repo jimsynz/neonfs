@@ -39,7 +39,7 @@ defmodule NeonFS.CIFS.Supervisor do
 
     # The handle registry is node-wide and outlives any one connection, so it
     # starts whether or not the listener does — a handle opened through one
-    # connection has to remain usable through another (#1609).
+    # connection has to remain usable through another.
     children =
       case listener_child_spec() do
         {:ok, listener} ->

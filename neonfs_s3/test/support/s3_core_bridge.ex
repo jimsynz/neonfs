@@ -76,7 +76,7 @@ defmodule NeonFS.S3.IntegrationTest.CoreBridge do
 
   # Single-drive integration harness: pin replicate:1 for buckets the
   # S3 backend creates implicitly. Mirrors `WebDAVCoreBridge`'s default
-  # — `Volume.MetadataWriter`'s post-#835 lazy-provision can't satisfy
+  # — `Volume.MetadataWriter`'s lazy provisioning can't satisfy
   # the default `replicate:3, min_copies:2` against one drive.
   def call(:create_volume, [name]) do
     opts = [durability: %{type: :replicate, factor: 1, min_copies: 1}]
@@ -88,7 +88,7 @@ defmodule NeonFS.S3.IntegrationTest.CoreBridge do
     rpc(core_node, NeonFS.Core, function, args)
   end
 
-  # `:ship_chunks_fn` hook for the S3 integration harness (#488).
+  # `:ship_chunks_fn` hook for the S3 integration harness.
   # The test runner has no TLS pool to the peer core nodes so the
   # real `ChunkWriter.write_file_stream/4` can't ship chunks. Drain
   # the body into a single synthetic ref, stash the bytes in an ETS

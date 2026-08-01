@@ -465,7 +465,7 @@ defmodule NeonFS.WebDAV.BackendTest do
       assert log =~ "get_content"
     end
 
-    test "a chunk failure mid-body raises rather than truncating the response (#1353)" do
+    test "a chunk failure mid-body raises rather than truncating the response" do
       MockCore.create_volume("docs")
       MockCore.write_file("docs", "/trunc.bin", "stored content")
       {:ok, resource} = Backend.resolve(@auth, ["docs", "trunc.bin"])
@@ -619,7 +619,7 @@ defmodule NeonFS.WebDAV.BackendTest do
                Backend.put_content_stream(@auth, [], ["data"], %{})
     end
 
-    test "a frozen cluster raises ClusterFrozenError (503) on PUT (#1443)" do
+    test "a frozen cluster raises ClusterFrozenError (503) on PUT" do
       MockCore.create_volume("docs")
 
       Application.put_env(:neonfs_webdav, :core_call_fn, fn
@@ -640,8 +640,6 @@ defmodule NeonFS.WebDAV.BackendTest do
   # dictionary; `Backend.put_content_stream/4` reads it and forwards
   # `create_only: true` to `WriteOperation`. `{:error, :exists}` from
   # core comes back as `412 Precondition Failed`.
-  #
-  # See sub-issue #593 of #303.
   describe "put_content_stream/4 — If-None-Match: * (create_only)" do
     setup do
       key = NeonFS.WebDAV.HealthPlug.if_none_match_star_key()

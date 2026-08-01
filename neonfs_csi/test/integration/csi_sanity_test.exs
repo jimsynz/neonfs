@@ -3,8 +3,9 @@ defmodule NeonFS.CSI.CsiSanityTest do
   Runs the upstream [csi-sanity](https://github.com/kubernetes-csi/csi-test)
   conformance suite against the real `neonfs_csi` gRPC endpoint.
 
-  This is the CI-runnable slice of #319: it exercises the Identity and
-  Controller services over a real Unix-socket gRPC connection, against
+  This is the CI-runnable slice of the conformance work: it exercises
+  the Identity and Controller services over a real Unix-socket gRPC
+  connection, against
   the actual `NeonFS.CSI.Endpoint`, with the NeonFS core RPCs served by
   an in-memory stateful stub (`NeonFS.CSI.TestSupport.CoreStub`). It
   proves the driver's wire behaviour conforms to the CSI spec —
@@ -12,9 +13,9 @@ defmodule NeonFS.CSI.CsiSanityTest do
   the in-process unit tests don't check.
 
   Only the **Node service** specs are skipped — they need a real FUSE
-  mount on a kubelet host, the job of the full kind end-to-end test
-  still outstanding on #319 / #995. Every Identity and Controller spec
-  runs and gates conformance.
+  mount on a kubelet host, which is the job of the full kind end-to-end
+  test and still outstanding. Every Identity and Controller spec runs
+  and gates conformance.
 
   Tagged `:requires_csi_sanity`; `test/test_helper.exs` excludes the tag
   unless a `csi-sanity` binary is found (on `PATH` or via the

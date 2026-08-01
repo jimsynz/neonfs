@@ -42,7 +42,7 @@ defmodule NeonFS.WebDAV.IntegrationTest.CoreBridge do
   # caller already supplied opts. Default-durability volumes
   # (`replicate: factor=3, min_copies=2`) can't satisfy the gate's
   # `min_copies` against one drive, and once `Volume.MetadataWriter`
-  # is wired into FileIndex (#835) lazy provisioning surfaces that
+  # is wired into FileIndex lazy provisioning surfaces that
   # mismatch as a test failure rather than a silent skip.
   def call(:create_volume, [name]) do
     opts = [durability: %{type: :replicate, factor: 1, min_copies: 1}]

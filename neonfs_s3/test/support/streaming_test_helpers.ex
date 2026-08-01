@@ -1,6 +1,6 @@
 defmodule NeonFS.S3.IntegrationTest.StreamingHelpers do
   @moduledoc """
-  Helpers for the streaming-upload peak-RSS integration test (#499).
+  Helpers for the streaming-upload peak-RSS integration test.
 
   These functions are invoked on peer nodes via `PeerCluster.rpc/4`, so
   they must live in `lib/` (not `test/`) to be loadable on a peer's

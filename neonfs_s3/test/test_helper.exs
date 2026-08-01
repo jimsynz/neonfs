@@ -13,9 +13,9 @@ Application.put_env(:kernel, :prevent_overlapping_partitions, false)
 Mimic.copy(NeonFS.Client.ChunkReader)
 Mimic.copy(NeonFS.Client.KV)
 
-# Exclude diagnostic profile tests by default (e.g. #534's
-# process-heap profile). Match with `--include profile` to run them
+# Exclude diagnostic profile tests by default (e.g. the process-heap
+# profile). Match with `--include profile` to run them
 # explicitly. Mirrors the exclusion that lived in
 # `neonfs_integration/test/test_helper.exs` before the per-interface
-# split (#582) moved these tests into `neonfs_s3`.
+# split moved these tests into `neonfs_s3`.
 ExUnit.start(exclude: [:profile])

@@ -4,9 +4,9 @@ defmodule NeonFS.CSI.NodeServer do
   pod (one per worker node) and performs the actual mount lifecycle
   on the host so pods can read/write NeonFS volumes.
 
-  Sub-issue #315 of the CSI driver epic (#244). The Identity service
-  (#313) advertises this plugin to the kubelet via the per-node socket;
-  the Controller service (#314) handles cluster-wide volume lifecycle.
+  The Identity service
+  advertises this plugin to the kubelet via the per-node socket;
+  the Controller service handles cluster-wide volume lifecycle.
 
   ## RPCs implemented
 
@@ -408,7 +408,7 @@ defmodule NeonFS.CSI.NodeServer do
   # A capped volume reports its quota as `total`, so kubelet shows real
   # remaining space (`available = total - used`). A thin volume has no
   # ceiling, so `total = used` → `available = 0` rather than a misleading
-  # negative from the `total - used` arithmetic (#1476).
+  # negative from the `total - used` arithmetic.
   defp usage_entry(unit, used, nil) do
     %VolumeUsage{available: 0, total: used, used: used, unit: unit}
   end

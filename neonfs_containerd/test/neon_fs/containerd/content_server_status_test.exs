@@ -1,6 +1,6 @@
 defmodule NeonFS.Containerd.ContentServerStatusTest do
   @moduledoc """
-  Tests for the `Status` / `ListStatuses` / `Abort` RPCs (#552)
+  Tests for the `Status` / `ListStatuses` / `Abort` RPCs
   driven against live `WriteSession` GenServers. Stubs the
   ChunkWriter via `StubChunkWriter` and the core RPC plane via
   `:core_call_fn` so the tests don't need a running cluster.

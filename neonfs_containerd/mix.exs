@@ -8,10 +8,8 @@ defmodule NeonFS.Containerd.MixProject do
   over a Unix domain socket so containerd's `[proxy_plugins]` config
   can dial NeonFS as a content store.
 
-  This package provides the scaffold (#548). The streaming Read /
-  Write RPCs land in #549 / #550 and the metadata Info / List /
-  Update / Delete RPCs in #551 — see the `#196` tracking issue for
-  the full breakdown.
+  Provides the content-store service: streaming Read / Write plus the
+  metadata Info / List / Update / Delete RPCs.
   """
   @version "0.5.1"
 

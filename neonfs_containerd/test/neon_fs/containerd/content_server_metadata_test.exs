@@ -1,7 +1,7 @@
 defmodule NeonFS.Containerd.ContentServerMetadataTest do
   @moduledoc """
-  Tests for the metadata RPCs (Info / List / Update / Delete) added
-  in #551. Stubs the core RPC plane via the `:core_call_fn`
+  Tests for the metadata RPCs (Info / List / Update / Delete). Stubs
+  the core RPC plane via the `:core_call_fn`
   Application env so the tests don't need a running cluster.
   """
 

@@ -1,7 +1,7 @@
 defmodule NeonFS.S3.IntegrationTest.ProcessMemoryProfile do
   @moduledoc """
   Per-process memory snapshot helper used by the streaming-upload
-  process-heap profile (#534).
+  process-heap profile.
 
   `snapshot/0` walks `Process.list/0` and grabs `:memory`,
   `:initial_call`, `:registered_name`, and `:current_function` for

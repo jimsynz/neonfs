@@ -1,7 +1,6 @@
 defmodule NeonFS.S3.IntegrationTest.ProcessHeapProfileTest do
   @moduledoc """
-  Diagnostic profile for the streaming-write process-heap growth
-  surfaced in #534.
+  Diagnostic profile for the streaming-write process-heap growth.
 
   Tagged `:profile` so it doesn't run on every check pass — invoke
   with `mix test --include profile test/integration/process_heap_profile_test.exs`
@@ -116,7 +115,7 @@ defmodule NeonFS.S3.IntegrationTest.ProcessHeapProfileTest do
 
   defp header do
     String.duplicate("=", 60) <>
-      "\nProcess heap profile for streaming write (#534)\n" <>
+      "\nProcess heap profile for streaming write\n" <>
       String.duplicate("=", 60)
   end
 

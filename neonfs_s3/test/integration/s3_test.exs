@@ -349,8 +349,7 @@ defmodule NeonFS.S3.IntegrationTest do
     # `Volume.MetadataWriter` only fans out the volume's *root segment*
     # via `ChunkReplicator`; index-tree chunks are written through a
     # single local `store_handle`. Cross-node metadata reads land on a
-    # peer that has the root pointer but not the tree leaves. Tracked
-    # in #903.
+    # peer that has the root pointer but not the tree leaves.
     @tag :skip
     test "data written via S3 is readable from another core node", %{
       cluster: cluster,

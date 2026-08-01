@@ -1,7 +1,7 @@
 defmodule NeonFS.S3.IntegrationTest.StreamingUploadPeakRSSTest do
   @moduledoc """
   Peak-RSS integration test for the cross-node streaming-write
-  pipeline (#499).
+  pipeline.
 
   Spawns a three-peer cluster — `:neonfs_core`, `:neonfs_s3`,
   `:neonfs_webdav` — uploads a multi-hundred-MiB synthetic stream
@@ -33,14 +33,14 @@ defmodule NeonFS.S3.IntegrationTest.StreamingUploadPeakRSSTest do
   to cover the present `~6% × upload_size` overhead while still
   failing dramatically on a regression that buffers the full body.
 
-  Follow-up #534 tracks investigating why process-heap delta is
-  proportional to upload size at all — the writer's accumulator
-  shouldn't account for that much growth on its own.
+  Why the process-heap delta is proportional to upload size at all is
+  still open — the writer's accumulator shouldn't account for that much
+  growth on its own.
 
   ## Why this test exists
 
   Every interface-side write callsite was migrated to chunked
-  streaming in #411 / #412, but unit tests run with small fixtures
+  streaming, but unit tests run with small fixtures
   and can't catch a regression where someone accidentally drains a
   stream into a binary. The pre-migration baseline
   (`call_core(:write_file, ...)` with a full body) would push the
@@ -68,8 +68,8 @@ defmodule NeonFS.S3.IntegrationTest.StreamingUploadPeakRSSTest do
   @chunk_max_bytes 1_048_576
 
   # Bound on `:processes_used` delta. The chunk writer's accumulator
-  # currently grows ~6% of the upload size on the interface peer (see
-  # follow-up #534), so the bound is set well above that observed
+  # currently grows ~6% of the upload size on the interface peer, so
+  # the bound is set well above that observed
   # ceiling but well below `25%` of the upload — pre-migration
   # whole-file buffering would put process-heap delta at ~100% of the
   # upload, so a `25%` ceiling cleanly distinguishes the two regimes.

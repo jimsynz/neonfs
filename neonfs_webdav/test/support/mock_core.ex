@@ -137,7 +137,7 @@ defmodule NeonFS.WebDAV.Test.MockCore do
           {:ok, FileMeta.t()} | {:error, term()}
   def write_file_at(volume_name, path, 0, content, write_opts) do
     # Production callers only use offset: 0 for whole-file writes via the
-    # post-#365 WebDAV fallback path. The backend_test uses `write_file/4`
+    # WebDAV fallback path. The backend_test uses `write_file/4`
     # directly as a test helper; both routes converge here.
     write_file(volume_name, path, content, write_opts)
   end

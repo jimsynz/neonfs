@@ -5,10 +5,9 @@ defmodule NeonFS.Containerd.Endpoint do
   Two services are registered:
 
     * `containerd.services.content.v1.Content` — image-layer content
-      store. The streaming Read / Write RPCs land in #549 / #550;
-      metadata RPCs in #551. This scaffold (#548) wires every RPC to
-      a skeleton handler — most return `UNIMPLEMENTED`, with `Status`
-      / `ListStatuses` returning empty in-progress lists.
+      store: streaming Read / Write plus the metadata RPCs. Anything
+      outside that set returns `UNIMPLEMENTED`, with `Status` /
+      `ListStatuses` returning empty in-progress lists.
     * `grpc.health.v1.Health` — standard gRPC Health Checking
       Protocol so `grpc_health_probe` can verify the plugin is
       reachable and the underlying NeonFS cluster has quorum.

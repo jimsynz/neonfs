@@ -87,9 +87,9 @@ defmodule NeonFS.S3.MixProject do
       # (and its helper `streaming_test_helpers.ex`) to verify
       # cross-protocol byte identity — the test writes through S3
       # and reads back through WebDAV. The test moved here from
-      # `neonfs_integration` under #604; if a more idiomatic home
-      # for cross-protocol assertions emerges, this dep is the
-      # natural follow-up to revisit.
+      # `neonfs_integration`; if a more idiomatic home for
+      # cross-protocol assertions emerges, this dep is the natural
+      # follow-up to revisit.
       {:neonfs_webdav, path: "../neonfs_webdav", only: :test, runtime: false},
       {:ex_aws, "~> 2.6", only: :test},
       {:ex_aws_s3, "~> 2.5", only: :test},
@@ -98,7 +98,7 @@ defmodule NeonFS.S3.MixProject do
       # the mix.exs consistency check (same gotcha as `jason` below).
       {:req, "~> 0.6", only: [:dev, :test]},
       # `:only` dropped because `rustler` — pulled in transitively via
-      # neonfs_client's chunker NIF (#449) — declares jason as a
+      # neonfs_client's chunker NIF — declares jason as a
       # runtime dep. Narrower `:only` bounds here fail the mix.exs
       # consistency check (same shape as the `stream_data` / `ash`
       # gotcha in the Codebase Patterns wiki).

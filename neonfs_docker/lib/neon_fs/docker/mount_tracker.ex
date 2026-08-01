@@ -42,7 +42,7 @@ defmodule NeonFS.Docker.MountTracker do
   # Lives under /var/lib/neonfs: that directory is created and chowned to the
   # neonfs user by packaging (pre-install.sh) and is the only path the daemon's
   # systemd unit lists in ReadWritePaths. A sibling like /var/lib/neonfs-docker
-  # is neither created nor writable, so Mount fails with :eacces (#1063).
+  # is neither created nor writable, so Mount fails with :eacces.
   @default_mount_root "/var/lib/neonfs/docker/mounts"
 
   ## Client API

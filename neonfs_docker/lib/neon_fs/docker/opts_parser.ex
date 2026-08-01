@@ -5,8 +5,8 @@ defmodule NeonFS.Docker.OptsParser do
 
   Docker passes `-o` as a JSON map of stringly-typed values; threading
   that map straight through to `Volume.new/2` crashed
-  `Keyword.get(%{}, :owner, nil)` (the original bug from #583). This
-  module bridges the wire shape to the typed shape:
+  `Keyword.get(%{}, :owner, nil)`. This module bridges the wire shape
+  to the typed shape:
 
     * Whitelists known keys against `@safe_keys` so untrusted user
       input can't blow the atom table — `String.to_existing_atom/1`

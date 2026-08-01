@@ -1,11 +1,11 @@
 defmodule NeonFS.S3.PeakRSSTest do
   @moduledoc """
-  Peak memory regression test for the S3 multipart upload path (#490).
+  Peak memory regression test for the S3 multipart upload path.
 
   Uploads #{8} parts of 64 MiB through `NeonFS.S3.Backend.upload_part_stream/6`
   and `complete_multipart_upload/5` and asserts that BEAM `:erlang.memory(:total)`
   never grows by more than `2 × part_size` (128 MiB) above the post-setup
-  baseline. The pre-migration code (#411) buffered every staged part in
+  baseline. The pre-migration code buffered every staged part in
   `complete_multipart_upload` before writing the assembled file, pushing
   peak memory to the full upload size (8 × 64 MiB = 512 MiB); this test
   fails on that baseline.

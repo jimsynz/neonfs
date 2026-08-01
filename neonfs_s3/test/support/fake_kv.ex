@@ -1,7 +1,7 @@
 defmodule NeonFS.S3.Test.FakeKV do
   @moduledoc """
   ETS-backed stand-in for `NeonFS.Client.KV` in unit tests, so the
-  KV-backed `MultipartStore` (#1177) runs without a cluster. Call
+  KV-backed `MultipartStore` runs without a cluster. Call
   `stub!/0` in setup after `use Mimic` — it resets the table (creating
   it under a suite-lifetime owner on first use) and stubs the four KV
   functions the store uses.

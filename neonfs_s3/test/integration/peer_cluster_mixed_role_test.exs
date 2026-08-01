@@ -1,7 +1,7 @@
 defmodule NeonFS.S3.IntegrationTest.PeerClusterMixedRoleTest do
   @moduledoc """
   Smoke tests for `NeonFS.TestSupport.PeerCluster.start_cluster!/2`'s
-  mixed-role peer spawning (#498).
+  mixed-role peer spawning.
 
   Starts a three-peer cluster where one peer runs `:neonfs_core`, one
   runs `:neonfs_s3` (interface-only, no Ra membership), and one runs
@@ -13,11 +13,11 @@ defmodule NeonFS.S3.IntegrationTest.PeerClusterMixedRoleTest do
   - each interface peer's allocated port is reachable (Bandit is up);
   - `PeerCluster.stop_cluster/1` tears everything down cleanly.
 
-  This test is deliberately scoped to the harness change itself.
-  Substantive coverage for the streaming-write path ships in #499,
-  which depends on this harness landing. Uses plain `ExUnit.Case`
-  rather than `ClusterCase` so the per-test auto-starter doesn't
-  spawn a second cluster alongside the one we test.
+  This test is deliberately scoped to the harness itself; substantive
+  coverage for the streaming-write path lives with the peak-RSS tests.
+  Uses plain `ExUnit.Case` rather than `ClusterCase` so the per-test
+  auto-starter doesn't spawn a second cluster alongside the one we
+  test.
   """
 
   use ExUnit.Case, async: false

@@ -1,12 +1,12 @@
 defmodule NeonFS.WebDAV.Test.FakeKV do
   @moduledoc """
   ETS-backed stand-in for `NeonFS.Client.KV` in unit tests, so the
-  KV-backed `LockStore` (#1178) runs without a cluster. Call `stub!/0`
+  KV-backed `LockStore` runs without a cluster. Call `stub!/0`
   in setup — it clears the table and installs itself via the
   `:kv_call_fn` injection point, matching this package's `*_call_fn`
   convention.
 
-  Mirrors `NeonFS.S3.Test.FakeKV` (#1177); kept per-package until a
+  Mirrors `NeonFS.S3.Test.FakeKV`; kept per-package until a
   third consumer justifies promoting a shared fake into
   `neonfs_test_support`.
 

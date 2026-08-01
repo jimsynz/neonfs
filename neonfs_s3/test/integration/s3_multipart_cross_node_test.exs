@@ -1,6 +1,6 @@
 defmodule NeonFS.S3.MultipartCrossNodeTest do
   @moduledoc """
-  Cluster-shared multipart upload state (#1177): bookkeeping lives in
+  Cluster-shared multipart upload state: bookkeeping lives in
   the Ra-backed cluster KV store, so a load balancer can route each
   request of a multipart upload to a different S3 node.
 

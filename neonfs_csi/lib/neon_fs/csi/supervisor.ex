@@ -43,7 +43,7 @@ defmodule NeonFS.CSI.Supervisor do
   def init(_opts) do
     register? = Application.get_env(:neonfs_csi, :register_service, true)
 
-    # Node staged/published state (#315) lives in public ETS tables the
+    # Node staged/published state lives in public ETS tables the
     # gRPC handler processes read/write directly. Initialise them
     # regardless of mode so the tables exist before the gRPC layer
     # accepts the first request.

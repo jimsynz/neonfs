@@ -254,7 +254,7 @@ defmodule NeonFS.S3.Test.MockCore do
       normalised = normalise_path(path)
 
       # Mirror NeonFS.Core.list_files_recursive: a pure prefix match (a
-      # prefix that exactly equals an object key returns that object — #1034).
+      # prefix that exactly equals an object key returns that object).
       entries =
         files
         |> Enum.filter(fn {{vol, file_path}, _} ->
