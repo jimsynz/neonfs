@@ -228,7 +228,8 @@ defmodule NeonFS.Core.LockManager.FileLock do
   @impl true
   def init(opts) do
     file_id = Keyword.fetch!(opts, :file_id)
-    timer = schedule_ttl_check()
+    ttl_check_interval_ms = Keyword.get(opts, :ttl_check_interval_ms, @ttl_check_interval_ms)
+    timer = schedule_ttl_check(ttl_check_interval_ms)
 
     :telemetry.execute(
       [:neonfs, :lock_manager, :file_lock, :started],
@@ -244,7 +245,8 @@ defmodule NeonFS.Core.LockManager.FileLock do
        leases: [],
        wait_queue: :queue.new(),
        write_wait_queue: :queue.new(),
-       ttl_timer: timer
+       ttl_timer: timer,
+       ttl_check_interval_ms: ttl_check_interval_ms
      }, @idle_timeout_ms}
   end
 
@@ -472,7 +474,7 @@ defmodule NeonFS.Core.LockManager.FileLock do
     new_state = purge_expired(state, now)
     new_state = process_wait_queue(new_state)
     new_state = process_write_wait_queue(new_state)
-    timer = schedule_ttl_check()
+    timer = schedule_ttl_check(state.ttl_check_interval_ms)
     new_state = %{new_state | ttl_timer: timer}
 
     if empty?(new_state) do
@@ -721,8 +723,10 @@ defmodule NeonFS.Core.LockManager.FileLock do
     end
   end
 
-  defp schedule_ttl_check do
-    Process.send_after(self(), :ttl_check, @ttl_check_interval_ms)
+  # Injectable so tests that need a lock to actually expire can do so without
+  # waiting out a production sweep interval. Nothing in production passes it.
+  defp schedule_ttl_check(interval_ms) do
+    Process.send_after(self(), :ttl_check, interval_ms)
   end
 
   defp sanitise_entry(entry, now) do

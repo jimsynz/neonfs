@@ -347,18 +347,25 @@ defmodule NeonFS.Core.LockManager.FileLockTest do
       assert :ok = Task.await(task)
     end
 
-    @tag timeout: 20_000
-    test "unblocks after conflicting lock expires", %{pid: pid} do
-      # Lock TTL is 50ms but the TTL check interval is 10s, so the blocking
-      # call needs a timeout that spans at least one TTL check cycle.
+    test "unblocks after conflicting lock expires" do
+      # Expiry is only observed when the TTL sweep runs, so this needs its own
+      # lock process with a sweep interval it can actually wait for. Against
+      # the production 10s interval the test spent 10 seconds sleeping — on
+      # its own about 5% of the package's suite.
+      {:ok, pid} =
+        start_supervised(
+          {FileLock, file_id: "ttl-expiry-test", ttl_check_interval_ms: 25},
+          id: :ttl_expiry_test
+        )
+
       assert :ok = FileLock.lock(pid, :client_a, {0, 100}, :exclusive, mode: :mandatory, ttl: 50)
 
       task =
         Task.async(fn ->
-          FileLock.check_write_blocking(pid, :client_b, {0, 100}, timeout: 15_000)
+          FileLock.check_write_blocking(pid, :client_b, {0, 100}, timeout: 5_000)
         end)
 
-      assert :ok = Task.await(task, 15_000)
+      assert :ok = Task.await(task, 5_000)
     end
 
     test "times out when conflict is not released", %{pid: pid} do
