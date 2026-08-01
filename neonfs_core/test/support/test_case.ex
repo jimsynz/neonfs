@@ -147,7 +147,7 @@ defmodule NeonFS.TestCase do
     start_supervised!(DriveManager, restart: :temporary)
     start_ra()
 
-    ClusterInit.init_cluster(cluster_name, drive_config)
+    ClusterInit.init_cluster(cluster_name, drive_config, Keyword.get(opts, :init_opts, []))
   end
 
   @doc """

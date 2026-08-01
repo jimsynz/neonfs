@@ -35,6 +35,11 @@ defmodule NeonFS.Core.VolumeRegistry do
   @system_volume_name "_system"
   @system_volume_protected_fields [:encryption, :nfs_export, :owner, :system]
 
+  # Past three copies the extra cost outweighs what they buy for a volume
+  # this small. `DriveManager` raises an existing volume towards the same
+  # ceiling as drives arrive.
+  @system_volume_factor_cap 3
+
   # Client API
 
   @doc """
@@ -654,32 +659,53 @@ defmodule NeonFS.Core.VolumeRegistry do
   # tier value is inconsequential in that case. Same default applies
   # when DriveRegistry's ETS table doesn't exist (unit tests that
   # exercise the volume registry in isolation).
-  defp pick_system_volume_tier do
-    present_tiers =
-      try do
-        DriveRegistry.list_drives() |> Enum.map(& &1.tier)
-      rescue
-        ArgumentError -> []
-      end
+  defp present_drive_tiers do
+    DriveRegistry.list_drives() |> Enum.map(& &1.tier)
+  rescue
+    ArgumentError -> []
+  end
 
+  defp pick_system_volume_tier(present_tiers) do
     Enum.find([:hot, :warm, :cold], :hot, &(&1 in present_tiers))
   end
 
-  # Defaults to factor=1 when the caller doesn't specify, matching the
-  # historical single-node bootstrap. `neonfs cluster init
-  # --system-replicas N` plumbs `N` through here so operators can seed a
-  # multi-replica system volume on a cluster they intend to scale up.
-  # Any value < 1 falls back to 1.
-  defp system_volume_factor(opts) do
-    case Keyword.get(opts, :replicas, 1) do
-      n when is_integer(n) and n >= 1 -> n
-      _ -> 1
+  # `neonfs cluster init --system-replicas N` plumbs `N` through here and is
+  # authoritative — the operator asked for a number, and a drive count is not
+  # a reason to override it. Any value < 1 falls back to 1.
+  #
+  # Without one, seed the factor from the drives the volume can actually land
+  # on: those in the tier it will live on, capped at #{@system_volume_factor_cap}.
+  # Counting every drive regardless of tier would ask for more copies than
+  # there are places to put them — a cluster with one hot and one cold drive
+  # would want two and have one — and the identity write that follows creation
+  # fails outright on the missing quorum rather than degrading.
+  #
+  # Drives are registered before this runs, so a cluster initialised with
+  # several drives in one shot now gets the same durability as one that gained
+  # them through `drive add`, instead of sitting at factor 1 until the next one
+  # arrives. That matters because the CA key and cluster identity are written
+  # here moments later and their loss is unrecoverable.
+  defp system_volume_factor(opts, present_tiers, tier) do
+    case Keyword.get(opts, :replicas, :from_drives) do
+      n when is_integer(n) and n >= 1 ->
+        n
+
+      :from_drives ->
+        present_tiers
+        |> Enum.count(&(&1 == tier))
+        |> max(1)
+        |> min(@system_volume_factor_cap)
+
+      _ ->
+        1
     end
   end
 
   defp build_system_volume(cluster_name, opts) do
     now = DateTime.utc_now()
-    factor = system_volume_factor(opts)
+    tiers = present_drive_tiers()
+    tier = pick_system_volume_tier(tiers)
+    factor = system_volume_factor(opts, tiers, tier)
 
     %Volume{
       id: system_volume_id(cluster_name),
@@ -688,7 +714,7 @@ defmodule NeonFS.Core.VolumeRegistry do
       durability: %{type: :replicate, factor: factor, min_copies: factor},
       write_ack: :quorum,
       tiering: %{
-        initial_tier: pick_system_volume_tier(),
+        initial_tier: tier,
         promotion_threshold: 1,
         demotion_delay: 1
       },

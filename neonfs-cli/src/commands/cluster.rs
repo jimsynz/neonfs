@@ -139,10 +139,10 @@ pub enum ClusterCommand {
         tier: String,
 
         /// Replication factor to seed the `_system` volume with.
-        /// Defaults to 1; raise it on a cluster you plan to scale so
-        /// the system volume isn't pinned to single-copy storage.
-        #[arg(long = "system-replicas", default_value = "1")]
-        system_replicas: u32,
+        /// Defaults to the number of drives the cluster is initialised
+        /// with, capped at 3. Pass a value to override that.
+        #[arg(long = "system-replicas")]
+        system_replicas: Option<u32>,
     },
 
     /// Join an existing cluster
@@ -494,10 +494,10 @@ impl ClusterCommand {
         name: &str,
         drive: &str,
         tier: &str,
-        system_replicas: u32,
+        system_replicas: Option<u32>,
         format: OutputFormat,
     ) -> Result<()> {
-        if system_replicas < 1 {
+        if system_replicas == Some(0) {
             return Err(crate::error::CliError::InvalidArgument(
                 "--system-replicas must be >= 1".to_string(),
             ));
@@ -516,12 +516,18 @@ impl ClusterCommand {
                     Term::Binary(Binary::from(tier.as_bytes().to_vec())),
                 ),
             ]));
-            let opts = Term::Map(Map::from([(
-                Term::Binary(Binary::from(b"system_replicas".to_vec())),
-                Term::FixInteger(FixInteger {
-                    value: system_replicas as i32,
-                }),
-            )]));
+            // Omitted rather than defaulted, so the daemon can tell "the
+            // operator said nothing" from "the operator said 1" and seed the
+            // factor from the drive count in the first case.
+            let opts = match system_replicas {
+                Some(replicas) => Term::Map(Map::from([(
+                    Term::Binary(Binary::from(b"system_replicas".to_vec())),
+                    Term::FixInteger(FixInteger {
+                        value: replicas as i32,
+                    }),
+                )])),
+                None => Term::Map(Map::from([] as [(Term, Term); 0])),
+            };
             conn.call(
                 "Elixir.NeonFS.CLI.Handler",
                 "cluster_init",

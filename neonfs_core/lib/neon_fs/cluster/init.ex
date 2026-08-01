@@ -53,8 +53,11 @@ defmodule NeonFS.Cluster.Init do
   path used by tests and pre-configured deployments).
 
   `opts` may carry `:system_replicas` (positive integer) to seed the
-  `_system` volume with a replication factor greater than `1`. Defaults
-  to `1` (the historical single-node bootstrap).
+  `_system` volume's replication factor. An explicit value is
+  authoritative. Without one the factor tracks the number of drives the
+  cluster was initialised with, capped at 3 — the same target a later
+  `drive add` raises an existing volume to, so a cluster ends up equally
+  durable whether its drives arrived together or one at a time.
 
   ## Errors
   - `{:error, :already_initialised}` - cluster state already exists
@@ -254,13 +257,32 @@ defmodule NeonFS.Cluster.Init do
     _ -> :ok
   end
 
+  # Drives are registered before this runs, so the drive-registration hook
+  # that raises `_system` towards the drive count finds no volume to raise
+  # and does nothing. Seeding the factor here instead means a cluster
+  # initialised with several drives in one shot gets the same durability as
+  # one that gained them through `drive add`, rather than sitting at factor
+  # 1 until the next one arrives — which matters because the CA key and
+  # cluster identity are written to `_system` moments later, and their loss
+  # is unrecoverable.
+  #
+  # An explicit `--system-replicas` stays authoritative: the operator asked
+  # for a number, and a drive count is not a reason to override it.
   defp create_system_volume(opts) do
-    replicas = Keyword.get(opts, :system_replicas, 1)
-
-    case VolumeRegistry.create_system_volume(replicas: replicas) do
+    case VolumeRegistry.create_system_volume(system_volume_opts(opts)) do
       {:ok, volume} -> {:ok, volume}
       {:error, %NeonFS.Error.AlreadyExists{}} -> VolumeRegistry.get_system_volume()
       {:error, reason} -> {:error, {:system_volume_failed, reason}}
+    end
+  end
+
+  # Pass `:replicas` through only when the operator actually gave one, so
+  # `VolumeRegistry` can tell "unspecified" from "1" and seed the factor
+  # from the drives instead.
+  defp system_volume_opts(opts) do
+    case Keyword.fetch(opts, :system_replicas) do
+      {:ok, replicas} -> [replicas: replicas]
+      :error -> []
     end
   end
 
