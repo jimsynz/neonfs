@@ -12,7 +12,7 @@ defmodule NeonFS.CIFS.HandlerTest do
   setup :verify_on_exit!
 
   # File handles live in the node-wide registry now, so it has to be running
-  # and Mimic has to reach the calls it makes on the caller's behalf (#1609).
+  # and Mimic has to reach the calls it makes on the caller's behalf.
   setup do
     start_supervised!(HandleRegistry)
     Mimic.allow(NeonFS.Client, self(), Process.whereis(HandleRegistry))

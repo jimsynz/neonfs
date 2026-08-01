@@ -7,10 +7,10 @@ defmodule NeonFS.CIFS.HandleRegistry do
   another connection, so a handle opened through one connection could not be
   used through another — and every fd operation re-resolved the stored path,
   so a rename or unlink between open and use changed or broke what the handle
-  referred to (#1609).
+  referred to.
 
   An entry holds the immutable `{volume, file_id}` identity and the identity
-  pin taken at open (#1605), so the file survives an unlink for as long as the
+  pin taken at open, so the file survives an unlink for as long as the
   handle is open and a rename does not move the pin off it.
 
   ## Releasing the pin exactly once
@@ -25,7 +25,7 @@ defmodule NeonFS.CIFS.HandleRegistry do
   the same arrangement FUSE relies on.
 
   Directory handles stay in per-connection state: directory-handle pinning is
-  out of scope on #1590.
+  not part of the identity-pinned handle work.
   """
 
   use GenServer
