@@ -2,7 +2,7 @@ defmodule NeonFS.NFS.ExportManager do
   @moduledoc """
   Manages the NFS server lifecycle and mirrors the cluster's export set.
 
-  Exports are cluster state (#1175): a volume is exported when its
+  Exports are cluster state: a volume is exported when its
   `nfs_export` flag is set via `neonfs nfs export`, which writes the
   core volume registry. Every NFS node serves every export, so any node
   behind a load balancer can answer for any exported volume. This
@@ -257,8 +257,8 @@ defmodule NeonFS.NFS.ExportManager do
   end
 
   # On shutdown the RPC listener lets in-flight RPCs settle for up to this
-  # long before connection processes are killed (#1383). Default leaves
-  # headroom under the systemd `TimeoutStopSec=45` budget (#1385).
+  # long before connection processes are killed. Default leaves
+  # headroom under the systemd `TimeoutStopSec=45` budget.
   defp drain_deadline_ms do
     Application.get_env(:neonfs_nfs, :drain_deadline_ms, 25_000)
   end

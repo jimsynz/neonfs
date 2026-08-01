@@ -1,6 +1,6 @@
 defmodule NeonFS.NFS.IpAllowList do
   @moduledoc """
-  Per-export client IP allow-list matching for NFS (#1217).
+  Per-export client IP allow-list matching for NFS.
 
   An export carries `allowed_ips` — a list of IP or CIDR strings
   (`"10.0.0.0/8"`, `"192.168.1.5"`, `"2001:db8::/32"`). A client's source

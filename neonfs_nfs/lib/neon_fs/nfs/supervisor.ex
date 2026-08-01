@@ -32,7 +32,7 @@ defmodule NeonFS.NFS.Supervisor do
       NeonFS.NFS.NLM.Server,
       # Service registration (unique name — each service registers its own).
       # Last so it terminates first on shutdown, deregistering before the
-      # listener and NLM server stop (#1386).
+      # listener and NLM server stop.
       {NeonFS.Client.Registrar,
        metadata: registration_metadata(), type: :nfs, name: NeonFS.Client.Registrar.NFS}
     ]

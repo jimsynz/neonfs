@@ -28,7 +28,7 @@ defmodule NeonFS.NFS.MixProject do
     [
       # `:neonfs_core` is a test-only transitive dep (via
       # `:neonfs_test_support`) used by the BEAM NFSv3 read-path
-      # smoke test (#587). PLT it explicitly so dialyzer can see
+      # smoke test. PLT it explicitly so dialyzer can see
       # `NeonFS.Core.read_file_stream/3` referenced by
       # `test/support/beam_read_test_hooks.ex`.
       plt_add_apps: [:neonfs_core]
@@ -79,7 +79,7 @@ defmodule NeonFS.NFS.MixProject do
       {:stream_data, "~> 1.0", only: [:test]},
       # `:neonfs_test_support` pulls `:neonfs_core` transitively for
       # `ClusterCase` / `PeerCluster`. Used by the BEAM NFSv3 read-path
-      # smoke test (#587) which boots a 3-peer cluster and drives
+      # smoke test which boots a 3-peer cluster and drives
       # `Handler.handle_call/4` against a live `NFSv3Backend`.
       {:neonfs_test_support, path: "../neonfs_test_support", only: :test, runtime: false},
       {:credo, "~> 1.6", only: [:dev, :test], runtime: false},

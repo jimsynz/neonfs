@@ -1,6 +1,6 @@
 defmodule NeonFS.Integration.NFSClusterExportsTest do
   @moduledoc """
-  Cluster-state NFS exports (#1175): `nfs export` writes the volume's
+  Cluster-state NFS exports: `nfs export` writes the volume's
   `nfs_export` flag in the core volume registry — no node targeting —
   and every running NFS node mirrors the export set via volume
   lifecycle events (with a periodic resync as a safety net). Any NFS
@@ -56,7 +56,7 @@ defmodule NeonFS.Integration.NFSClusterExportsTest do
     volume_opts = %{durability: %{type: :replicate, factor: 1, min_copies: 1}}
 
     # Volume creation is a Ra-replicated write with a 30 s internal
-    # budget (#1167); give the RPC a slow-runner margin beyond that.
+    # budget; give the RPC a slow-runner margin beyond that.
     {:ok, _} =
       PeerCluster.rpc(
         cluster,

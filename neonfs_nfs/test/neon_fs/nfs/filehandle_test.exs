@@ -49,7 +49,7 @@ defmodule NeonFS.NFS.FilehandleTest do
     end
   end
 
-  describe "decode/1 rejects forged/tampered handles (#1221)" do
+  describe "decode/1 rejects forged/tampered handles" do
     test "rejects a structurally-valid handle whose signed fields were tampered" do
       <<prefix::binary-size(16), b, rest::binary>> =
         Filehandle.encode(@volume_id, @fileid, @generation)

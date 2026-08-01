@@ -106,20 +106,20 @@ defmodule NeonFS.FUSE.Handler do
        # POSIX unlink-while-open: maps an FD-side `fh` to the
        # `file_id` and the `:pinned` namespace claim that keeps
        # the file alive while the handle is open. See sub-issue
-       # #651 of #639. On peer crash the namespace coordinator's
+       # On peer crash the namespace coordinator's
        # holder-DOWN bulk release handles cleanup, so no terminate
        # callback is needed here — the safety net lives at the
        # claim layer.
        fh_table: %{},
        next_fh: 1,
-       # FLOCK lock state (#672). Maps `{lock_owner, ino}` to the
+       # FLOCK lock state. Maps `{lock_owner, ino}` to the
        # `claim_id` this Handler holds in the namespace coordinator.
        # Each entry represents one acquired flock; removed on
        # `LOCK_UN` or RELEASE. Cross-mount enforcement comes for
        # free — the underlying `claim_path` claim is Ra-replicated
        # and visible to every peer's coordinator.
        flock_table: %{},
-       # POSIX byte-range lock state (#674). Maps
+       # POSIX byte-range lock state. Maps
        # `{lock_owner, ino, start, end}` to the byte-range `claim_id`
        # held in the namespace coordinator. Range bounds are taken
        # straight from the FUSE wire request — `end == 0` means
@@ -127,14 +127,14 @@ defmodule NeonFS.FUSE.Handler do
        # out of scope for this slice; UNLCK only matches an exact
        # lock.
        byte_range_table: %{},
-       # Pending blocking-flock waits (#677). Maps the
+       # Pending blocking-flock waits. Maps the
        # `NamespaceCoordinator` `wait_token` to the deferred-reply
        # context: the FUSE Session's `request_id` (so we can route
        # the eventual `{:fuse_op_complete, ...}` back), the original
        # flock key for `flock_table` book-keeping on success, and
        # the requested scope.
        pending_flocks: %{},
-       # Pending blocking byte-range fcntl waits (#681). Same shape
+       # Pending blocking byte-range fcntl waits. Same shape
        # as `pending_flocks` but the `:key` is the four-tuple used
        # by `byte_range_table` (`{lock_owner, ino, start, end}`)
        # and on acquire we write back to that table instead.
@@ -217,7 +217,7 @@ defmodule NeonFS.FUSE.Handler do
     end
   end
 
-  # Wake-up from `claim_byte_range_wait_for/5` (#681). Mirror of
+  # Wake-up from `claim_byte_range_wait_for/5`. Mirror of
   # `:path_acquired` but writes to `byte_range_table` instead of
   # `flock_table`.
   def handle_info({:byte_range_acquired, wait_token, claim_id}, state) do
@@ -255,10 +255,10 @@ defmodule NeonFS.FUSE.Handler do
     end
   end
 
-  # FUSE INTERRUPT cancellation (#675, extended #681). Session has
+  # FUSE INTERRUPT cancellation. Session has
   # resolved the kernel's `target_unique` to our `request_id`. Look
-  # for a parked request in either `pending_flocks` (#677) or
-  # `pending_byte_range` (#681); cancel the wait-queue entry on the
+  # for a parked request in either `pending_flocks` or
+  # `pending_byte_range`; cancel the wait-queue entry on the
   # coordinator, reply `EINTR`, drop the local entry. Unknown
   # targets are silent no-ops per the FUSE protocol.
   @impl true
@@ -319,7 +319,7 @@ defmodule NeonFS.FUSE.Handler do
 
   # Wraps `handle_operation/2` so the few state-mutating ops
   # (`open`, `create`, `release` — the unlink-while-open pin
-  # lifecycle, #651) can return `{reply, new_state}` while every
+  # lifecycle) can return `{reply, new_state}` while every
   # other handler keeps its single-return shape. Read-only ops fall
   # through to the unchanged `handle_operation/2` definition.
   defp dispatch_operation({"open", _params} = op, state), do: handle_stateful(op, state)
@@ -332,14 +332,14 @@ defmodule NeonFS.FUSE.Handler do
     {handle_operation(operation, state), state}
   end
 
-  # Open lifecycle (POSIX unlink-while-open, sub-issue #651 of #639).
+  # Open lifecycle (POSIX unlink-while-open).
   #
   # `open`: resolve inode → path, pin the file by identity through
   # `Core.pin_file/3` with this GenServer's pid as holder, allocate a
   # monotonic `fh`, and remember `{file_id, claim_id, path}` so
   # later `read` / `write` can route through the file_id (which
-  # works for detached files — #638) and so `release` can drop the
-  # claim. The pin is keyed by `{volume_id, file_id}` (#1605), so a
+  # works for detached files) and so `release` can drop the
+  # claim. The pin is keyed by `{volume_id, file_id}`, so a
   # rename doesn't strand it on the old name. The GenServer pid is
   # the holder, which means the coordinator's existing holder-DOWN
   # bulk release is the safety net for FUSE-peer crashes.
@@ -361,12 +361,12 @@ defmodule NeonFS.FUSE.Handler do
 
   # FUSE's `create()` is invoked for both `O_CREAT` and `O_CREAT |
   # O_EXCL`. The `O_EXCL` bit means "fail if the target already
-  # exists" and must be atomic across nodes — sub-issue #594 of
-  # #303 routes this through `WriteOperation`'s `create_only: true`
-  # (#592), which in turn uses the namespace coordinator's
-  # `claim_create` primitive (#591). After creation we additionally
+  # exists" and must be atomic across nodes, so this routes through
+  # `WriteOperation`'s `create_only: true`, which in turn uses the
+  # namespace coordinator's `claim_create` primitive. After creation we
+  # additionally
   # pin the new file by identity so the open-handle half of the
-  # unlink-while-open story (#651) holds.
+  # unlink-while-open story holds.
   defp handle_stateful({"create", params}, state) do
     parent = params["parent"]
     name = params["name"]
@@ -415,7 +415,7 @@ defmodule NeonFS.FUSE.Handler do
     end
   end
 
-  # FLOCK whole-file advisory lock dispatch (#672). Routed here from
+  # FLOCK whole-file advisory lock dispatch. Routed here from
   # `dispatch_operation` because each acquire/release mutates
   # `state.flock_table`. Cross-mount enforcement is provided by
   # `claim_path` — every peer's coordinator sees the same Ra-replicated
@@ -424,7 +424,7 @@ defmodule NeonFS.FUSE.Handler do
   #
   # Blocking SETLKW (without `LOCK_NB`) returns `EAGAIN` in this
   # slice — the wait/wake primitive lives in the byte-range work
-  # tracked under #673 and is wired through to flock by #677. The
+  # tracked separately and wired through to flock. The
   # POSIX rule is: a flock acquired via `flock(2)` is released either
   # by `LOCK_UN` or by the kernel when the last fd referring to the
   # file's open-file-description closes. Both paths come through us
@@ -467,7 +467,7 @@ defmodule NeonFS.FUSE.Handler do
     end
   end
 
-  # POSIX byte-range fcntl lock dispatch (#674). Routed here from
+  # POSIX byte-range fcntl lock dispatch. Routed here from
   # `dispatch_operation` because each acquire/release mutates
   # `state.byte_range_table`. Cross-mount enforcement is provided by
   # `claim_byte_range` — every peer's coordinator sees the same
@@ -475,7 +475,7 @@ defmodule NeonFS.FUSE.Handler do
   #
   # Blocking SETLKW (`LOCK_NB` cleared, `blocking == true`) returns
   # `EAGAIN` in this slice — the wait/wake primitive is built in
-  # #679 and wired through to byte-range fcntl by #681.
+  # separately and wired through to byte-range fcntl.
   defp handle_stateful({"byte_range", params}, state) do
     ino = params["ino"]
     owner = params["owner"]
@@ -532,7 +532,7 @@ defmodule NeonFS.FUSE.Handler do
   # Try to acquire a flock claim. On conflict return EAGAIN — that
   # covers both the non-blocking SETLK case (correct) and the
   # blocking SETLKW case (interim, will become a deferred reply
-  # once #677's wait queue lands). EAGAIN is what `flock -n` tests
+  # once the wait queue lands). EAGAIN is what `flock -n` tests
   # for, so the non-blocking acceptance criteria are met.
   # Non-blocking SETLK: try once, return EAGAIN on conflict.
   # Blocking SETLKW: register a wait via `claim_path_wait_for` —
@@ -793,7 +793,7 @@ defmodule NeonFS.FUSE.Handler do
     {{"error", %{"errno" => errno(:eio)}}, state}
   end
 
-  # Pins the open handle by file identity (#1605) — core resolves the
+  # Pins the open handle by file identity — core resolves the
   # path and takes the claim under namespace coordination, so a
   # rename can't strand the pin on the old name. This GenServer's pid
   # is the holder, which keeps the coordinator's holder-DOWN bulk
@@ -899,9 +899,9 @@ defmodule NeonFS.FUSE.Handler do
   # Handle read operation: read file data.
   #
   # When the FUSE-side `fh` is one we allocated at `open` /
-  # `create` (#651), route through `Core.read_file_by_id` so the
+  # `create`, route through `Core.read_file_by_id` so the
   # cached `file_id` keeps working even if another peer has
-  # detached the path (#638). Falls back to the path-based
+  # detached the path. Falls back to the path-based
   # `ChunkReader` flow for legacy callers that read without an
   # explicit open (e.g. some readdir-then-read sequences).
   defp handle_operation({"read", params}, state) do
@@ -937,7 +937,7 @@ defmodule NeonFS.FUSE.Handler do
   # Handle write operation: write file data. Mirrors `read` —
   # registered `fh` → `Core.write_file_at_by_id`, else path-based
   # fallback. See `read` docstring for the unlink-while-open
-  # rationale (#651).
+  # rationale.
   defp handle_operation({"write", params}, state) do
     ino = params["ino"]
     offset = params["offset"]
@@ -970,7 +970,7 @@ defmodule NeonFS.FUSE.Handler do
     end
   end
 
-  # `FSYNC` / `FLUSH` / `FSYNCDIR` durability barrier (#1502): drive the
+  # `FSYNC` / `FLUSH` / `FSYNCDIR` durability barrier: drive the
   # shared `sync_file` barrier for the fd's file so its chunks reach the
   # volume's `min_copies` durable replicas before we ack. Keyed by the
   # tracked `file_id` so it works across an unlink-while-open. An untracked
@@ -1010,7 +1010,7 @@ defmodule NeonFS.FUSE.Handler do
   end
 
   # `create` is stateful — it allocates a file handle and pins the
-  # path so the unlink-while-open story (#651) works. Lives in
+  # path so the unlink-while-open story works. Lives in
   # `handle_stateful/2` alongside `open` / `release`.
 
   # Handle mkdir operation: create a new directory
@@ -1215,12 +1215,12 @@ defmodule NeonFS.FUSE.Handler do
     end
   end
 
-  # ─── xattr ops (#671) ─────────────────────────────────────────────
+  # ─── xattr ops ─────────────────────────────────────────────
   #
   # The `user.*` namespace is the only one we currently permit.
   # `system.*` and `security.*` carry POSIX ACL / capability semantics
   # that aren't modelled in NeonFS yet — refusing them with EPERM is
-  # the documented "not supported" reply (see #280's xattr slice).
+  # the documented "not supported" reply.
   # `trusted.*` is also rejected — it'd require CAP_SYS_ADMIN
   # enforcement we don't have a hook for. Everything outside those
   # namespaces (no dot, or unknown prefix) is rejected to keep the
@@ -1324,7 +1324,7 @@ defmodule NeonFS.FUSE.Handler do
     end
   end
 
-  # POSIX `GETLK` byte-range probe (#674). Read-only — calls
+  # POSIX `GETLK` byte-range probe. Read-only — calls
   # `query_byte_range/4` and formats the reply for Session.
   # Returns either `getlk_unlocked` (no conflict) or `getlk_conflict`
   # carrying the conflicting range / scope / holder pid info that
@@ -1741,7 +1741,7 @@ defmodule NeonFS.FUSE.Handler do
   # Volume-scoped metadata WRITES through id-keyed core APIs
   # (`WriteOperation` / `FileIndex`) go to a node holding the volume's root
   # segment, so the core-side `MetadataWriter` performs them locally instead
-  # of remote-dispatching on every op (#1046 / #1087). Resolution is by volume
+  # of remote-dispatching on every op. Resolution is by volume
   # id and falls back to cost-based routing if the volume can't be resolved.
   defp write_call(volume_id, module, function, args) do
     NeonFS.Client.write_call_by_id(volume_id, module, function, args)
@@ -1822,8 +1822,8 @@ defmodule NeonFS.FUSE.Handler do
     ChunkReader.read_file(volume_id, path, opts)
   end
 
-  # Read / write dispatch helpers for the unlink-while-open story
-  # (#651): if the FUSE-side `fh` is one we allocated at `open` /
+  # Read / write dispatch helpers for the unlink-while-open story: if
+  # the FUSE-side `fh` is one we allocated at `open` /
   # `create` and tracked in `state.fh_table`, route through
   # `Core.read_file_by_id` / `write_file_at_by_id` — which work
   # against detached files. Otherwise fall back to the path-based

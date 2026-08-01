@@ -75,7 +75,7 @@ defmodule NeonFS.NFS.WriteThrottleTest do
         end)
 
       # Wait until the waiter has actually parked in the throttle's queue,
-      # rather than sleeping a fixed interval (#1208).
+      # rather than sleeping a fixed interval.
       assert_receive {[:neonfs, :nfs, :write_throttle, :queued], ^ref, _measurements, _meta},
                      1_000
 

@@ -108,7 +108,7 @@ defmodule NeonFS.FUSE.SessionTest do
       entry = Session.build_entry(%{"ino" => 99, "size" => 1024, "kind" => "file"})
       assert entry.nodeid == 99
       # No positive dentry/attr caching — peers can change paths at any time, so
-      # the kernel must re-LOOKUP/GETATTR (#1034).
+      # the kernel must re-LOOKUP/GETATTR.
       assert entry.entry_valid == 0
       assert entry.attr_valid == 0
       assert entry.attr.ino == 99
@@ -363,7 +363,7 @@ defmodule NeonFS.FUSE.SessionTest do
     end
   end
 
-  # ——— Mutation metadata opcodes (#575) ——————————————————————————
+  # ——— Mutation metadata opcodes ——————————————————————————
 
   describe "SETATTR" do
     setup do
@@ -567,7 +567,7 @@ defmodule NeonFS.FUSE.SessionTest do
 
   # ——— End mutation metadata opcodes —————————————————————————————
 
-  # ——— Data-path opcodes (#576) ————————————————————————————————————
+  # ——— Data-path opcodes ————————————————————————————————————
 
   describe "WRITE" do
     setup do
@@ -738,9 +738,9 @@ defmodule NeonFS.FUSE.SessionTest do
 
   # ——— End data-path opcodes ——————————————————————————————————————
 
-  # ——— Cache flushers + FALLOCATE (#577) ————————————————————————————
+  # ——— Cache flushers + FALLOCATE ————————————————————————————
 
-  describe "FLUSH / FSYNC / FSYNCDIR (shared sync_file barrier, #1502)" do
+  describe "FLUSH / FSYNC / FSYNCDIR (shared sync_file barrier)" do
     setup do
       ctx = setup_session()
       _ = handshake!(ctx)

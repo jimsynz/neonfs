@@ -1,14 +1,14 @@
 defmodule NeonFS.Integration.NFSv3BeamReadTest do
   @moduledoc """
   Local-only end-to-end smoke test of the BEAM-native NFSv3 read stack
-  (sub-issue #587 of #533, itself part of #284 / #113).
+  Part of the native-BEAM NFSv3 work.
 
   Boots a 3-node cluster, writes a multi-chunk file via `NeonFS.Core`,
   then drives `Tahr.NFSv3.Handler.handle_call/4` directly on
   `:node1` with the live `NeonFS.NFS.NFSv3Backend`. No socket, no
   `ExportManager` — production wiring through ExportManager is tracked
-  under #286 and lands separately. This is the foundation slice; the
-  cross-node-via-`ChunkReader` path (#588) and peak-RSS bound (#589)
+  separately. This is the foundation slice; the
+  cross-node-via-`ChunkReader` path and peak-RSS bound
   build on the same harness.
 
   ## What's exercised
@@ -24,9 +24,9 @@ defmodule NeonFS.Integration.NFSv3BeamReadTest do
 
   ## Out of scope (later slices)
 
-    * Cross-node reads via `ChunkReader` streaming path — #588 uses a
+    * Cross-node reads via `ChunkReader` streaming path — covered by a
       mixed-role peer cluster so the harness shape differs.
-    * Peak-RSS memory bound — #589, separate slice for tuning headroom.
+    * Peak-RSS memory bound — a separate slice for tuning headroom.
   """
 
   use NeonFS.TestSupport.ClusterCase, async: false
@@ -46,7 +46,7 @@ defmodule NeonFS.Integration.NFSv3BeamReadTest do
 
   # Root AUTH_SYS mount (uid 0) — bypasses volume ACL checks, the
   # realistic posture for a default-owned export. Per-uid enforcement
-  # (#1215) holds non-root callers to the volume ACL.
+  # holds non-root callers to the volume ACL.
   @auth %Auth.Sys{uid: 0, gid: 0, gids: []}
 
   # FastCDC default `max` chunk size. Choosing a 16-MiB payload (16
@@ -67,7 +67,7 @@ defmodule NeonFS.Integration.NFSv3BeamReadTest do
 
     # Stamp the cutover flag on `:node1` for the test's lifetime. The
     # flag is not yet load-bearing for the procedure path this test
-    # uses, but it's the contract `#286` will gate on.
+    # uses, but it's the contract the mount path gates on.
     :ok =
       PeerCluster.rpc(cluster, :node1, Application, :put_env, [
         :neonfs_nfs,
@@ -90,7 +90,7 @@ defmodule NeonFS.Integration.NFSv3BeamReadTest do
     # peer's data-plane shim. When the BEAM stack runs on a core peer
     # (the smoke-test setup), short-circuit straight to
     # `NeonFS.Core.read_file_stream/3`. The cross-node-via-ChunkReader
-    # variant is the explicit subject of #588.
+    # variant is the explicit subject of the cross-node test.
     :ok =
       PeerCluster.rpc(cluster, :node1, Application, :put_env, [
         :neonfs_nfs,
@@ -123,7 +123,7 @@ defmodule NeonFS.Integration.NFSv3BeamReadTest do
     # 1. Volume + multi-chunk file. Pin `replicate:1` because in this
     # cluster only `node1`'s drive is in the bootstrap layer
     # (`Cluster.Init.do_init_cluster/1` registers local drives via
-    # #890; joining nodes' drives don't get registered there) — so
+    # joining nodes' drives don't get registered there) — so
     # `Volume.MetadataWriter`'s lazy provisioning sees just one drive
     # and can't satisfy the default `replicate:3, min_copies:2`.
     {:ok, _} =
@@ -162,7 +162,7 @@ defmodule NeonFS.Integration.NFSv3BeamReadTest do
     end
 
     # 2. InodeTable on `:node1` — not in the core supervisor; boot it
-    # explicitly per #587. Use `GenServer.start/3` (no link) so the
+    # explicitly. Use `GenServer.start/3` (no link) so the
     # table survives the rpc-handler's exit; name registration lets
     # later rpc calls find it by module name.
     case PeerCluster.rpc(cluster, :node1, GenServer, :start, [
@@ -210,7 +210,7 @@ defmodule NeonFS.Integration.NFSv3BeamReadTest do
     {:ok, expected_inode} =
       PeerCluster.rpc(cluster, :node1, InodeTable, :allocate_inode, [volume, file_path])
 
-    # Decode on the node that minted the handle: the HMAC (#1221) is keyed
+    # Decode on the node that minted the handle: the HMAC is keyed
     # by that node's cluster master_key, which the test/controller node
     # (no cluster.json) can't reproduce. In production every NFS node
     # derives the same key, so cross-node verification holds.

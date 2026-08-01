@@ -18,7 +18,7 @@ defmodule NeonFS.NFS.Filehandle do
   Total: exactly 64 bytes.
 
   The 32-byte HMAC-SHA256 over the `volume_id|fileid|generation` prefix
-  (#1221) gives handles integrity: without it a client that learns volume
+  gives handles integrity: without it a client that learns volume
   ids could forge handles for arbitrary inodes without mounting. `decode/1`
   recomputes the HMAC and constant-time compares it, returning
   `{:error, :stale}` (→ `NFS3ERR_STALE`) on mismatch. The key is per-cluster
@@ -27,7 +27,7 @@ defmodule NeonFS.NFS.Filehandle do
 
   The 4 reserved trailing bytes are forward-compatibility padding —
   anything other than zeros today also decodes as `{:error, :stale}`. Sub-
-  issue #532; cf. #284 (NFSv3 epic) and #113 (native-BEAM NFS epic).
+  Part of the native-BEAM NFSv3 work.
 
   ## Why pack like this
 

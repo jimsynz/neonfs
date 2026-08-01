@@ -4,7 +4,7 @@ defmodule NeonFS.FUSE.Session do
   against `NeonFS.FUSE.Handler`.
 
   This is the first end-to-end layer of the native-BEAM FUSE stack
-  (issue #277): a single-mount GenServer that registers for
+  : a single-mount GenServer that registers for
   `enif_select` notifications, decodes incoming kernel frames via
   `Wick.Protocol`, dispatches to the existing Handler's business
   logic, and writes the encoded reply back to the kernel.
@@ -68,7 +68,7 @@ defmodule NeonFS.FUSE.Session do
 
   # FUSE init capability flags (see include/uapi/linux/fuse.h).
   # We start with a minimal set for read-path correctness and
-  # READDIRPLUS perf. Write-path flags arrive in #278.
+  # READDIRPLUS perf. Write-path flags arrive later.
   @fuse_async_read 0x00000001
   @fuse_atomic_o_trunc 0x00000010
   @fuse_big_writes 0x00000020
@@ -76,13 +76,13 @@ defmodule NeonFS.FUSE.Session do
   # locks to us via SETLK / SETLKW / GETLK with
   # `lk_flags & FUSE_LK_FLOCK == 0`. Without this advertised the
   # kernel handles fcntl locks locally per-mount, defeating the
-  # cross-mount DLM enforcement (#674).
+  # cross-mount DLM enforcement.
   @fuse_posix_locks 0x00000200
   # FUSE_FLOCK_LOCKS (1 << 10): kernel routes `flock(2)` system
   # calls to us via SETLK / SETLKW with `lk_flags & FUSE_LK_FLOCK`.
   # Without this bit advertised the kernel handles flock locally,
   # which doesn't propagate to other FUSE peers — defeating the
-  # whole point of the DLM (#672).
+  # whole point of the DLM.
   @fuse_flock_locks 0x00000400
   @fuse_do_readdirplus 0x00002000
 
@@ -113,7 +113,7 @@ defmodule NeonFS.FUSE.Session do
   # file, so every read/write is forwarded to us and lands in the shared core
   # FileIndex/chunk store. Without it the kernel serves reads and absorbs writes
   # from its per-mount cache, so FUSE-written data never reaches the backend and
-  # is invisible to NFS/S3/WebDAV (#1034). Correct for a distributed filesystem;
+  # is invisible to NFS/S3/WebDAV. Correct for a distributed filesystem;
   # the cost is no kernel-side read caching.
   @fopen_direct_io 0x00000001
 
@@ -472,7 +472,7 @@ defmodule NeonFS.FUSE.Session do
     enqueue({:readdirplus, r.offset, r.size}, header.unique, op, state)
   end
 
-  # ——— Mutation metadata opcodes (#575) —————————————————————————————
+  # ——— Mutation metadata opcodes —————————————————————————————
 
   defp handle_opcode(:setattr, header, %Request.SetAttr{} = req, state) do
     op = {"setattr", build_setattr_params(header.nodeid, req)}
@@ -541,7 +541,7 @@ defmodule NeonFS.FUSE.Session do
 
   # ——— End mutation metadata opcodes —————————————————————————————
 
-  # ——— Data-path opcodes (#576) ————————————————————————————————————
+  # ——— Data-path opcodes ————————————————————————————————————
 
   # `WRITE` is single-frame-bounded: the kernel splits longer writes
   # into multiple frames each capped at the negotiated `max_write`
@@ -577,12 +577,12 @@ defmodule NeonFS.FUSE.Session do
 
   # ——— End data-path opcodes ——————————————————————————————————————
 
-  # ——— Cache flushers + FALLOCATE (#577) ————————————————————————————
+  # ——— Cache flushers + FALLOCATE ————————————————————————————
 
   # `FLUSH` (close-time) and `FSYNC` (op 20) both run the shared `sync_file`
   # durability barrier for the fd's file: they block until the file's
   # outstanding chunk placements reach the volume's `min_copies` durable
-  # replicas (#1502). A committed write is disk-durable locally, but on a
+  # replicas. A committed write is disk-durable locally, but on a
   # `write_ack: :local` volume the extra replicas are placed in the
   # background — so the barrier is what makes a read (or a cold restart)
   # immediately after fsync/close see durable data. Enqueue to the Handler,
@@ -614,7 +614,7 @@ defmodule NeonFS.FUSE.Session do
 
   # ——— End cache flushers + FALLOCATE ——————————————————————————————
 
-  # ——— xattr opcodes (#671) ———————————————————————————————————————
+  # ——— xattr opcodes ———————————————————————————————————————
 
   defp handle_opcode(:setxattr, header, %Request.SetXattr{} = r, state) do
     op =
@@ -646,13 +646,13 @@ defmodule NeonFS.FUSE.Session do
 
   # ——— End xattr opcodes ——————————————————————————————————————————
 
-  # ——— Lock opcodes (#672) ————————————————————————————————————————
+  # ——— Lock opcodes ————————————————————————————————————————
   #
   # SETLK / SETLKW carry `fuse_lk_in` with `lk_flags & FUSE_LK_FLOCK`
   # = 1 distinguishing flock from byte-range fcntl. We route by that
   # bit:
-  #   - FLOCK set → forward to Handler's `flock` op (#672).
-  #   - FLOCK clear (byte-range fcntl) → reply ENOSYS until #674.
+  #   - FLOCK set → forward to Handler's `flock` op.
+  #   - FLOCK clear (byte-range fcntl) → reply ENOSYS, not yet supported.
   # GETLK is byte-range only (the kernel never sends GETLK with FLOCK
   # set when FUSE_FLOCK_LOCKS is advertised) — reply ENOSYS for now.
 
@@ -676,7 +676,7 @@ defmodule NeonFS.FUSE.Session do
     end
   end
 
-  # FUSE INTERRUPT (#675). The kernel sent us a unique it wants
+  # FUSE INTERRUPT. The kernel sent us a unique it wants
   # cancelled — most commonly a queued SETLKW that userspace gave
   # up on. Look the unique up in our `pending` map; if found, ask
   # the Handler to cancel via `cast`. INTERRUPT itself has no
@@ -717,7 +717,7 @@ defmodule NeonFS.FUSE.Session do
 
   # Catch-all for opcodes we accept in the codec but don't route here
   # (INTERRUPT — not yet handled by this session, tracked under
-  # the remaining sub-issues of #280).
+  # the remaining xattr work).
   defp handle_opcode(_other, header, _req, state) do
     write_frame(state.fd, Protocol.encode_error(header.unique, -38))
     state
@@ -812,7 +812,7 @@ defmodule NeonFS.FUSE.Session do
     state
   end
 
-  # ——— Mutation metadata reply translations (#575) —————————————————
+  # ——— Mutation metadata reply translations —————————————————
 
   defp handle_handler_reply(:setattr, kernel_unique, {"attr_ok", payload}, state) do
     reply = %Response.AttrReply{
@@ -850,7 +850,7 @@ defmodule NeonFS.FUSE.Session do
     state
   end
 
-  # GETLK reply (#674). The Handler returns either a `getlk_unlocked`
+  # GETLK reply. The Handler returns either a `getlk_unlocked`
   # tag (no conflict — kernel sees F_UNLCK) or a `getlk_conflict` tag
   # carrying the conflict's range and scope.
   defp handle_handler_reply(:getlk, kernel_unique, {"getlk_unlocked", payload}, state) do
@@ -881,7 +881,7 @@ defmodule NeonFS.FUSE.Session do
 
   # ——— End mutation metadata reply translations —————————————————
 
-  # ——— xattr reply translations (#671) ————————————————————————————
+  # ——— xattr reply translations ————————————————————————————
   #
   # GETXATTR / LISTXATTR follow the size-probe convention: the
   # request's `size == 0` asks for the buffer-size we'd need; `size > 0`
@@ -925,7 +925,7 @@ defmodule NeonFS.FUSE.Session do
 
   # ——— End xattr reply translations ——————————————————————————————
 
-  # ——— Data-path reply translations (#576) ————————————————————————
+  # ——— Data-path reply translations ————————————————————————
 
   defp handle_handler_reply(:write, kernel_unique, {"write_ok", %{"size" => size}}, state) do
     write_reply(state.fd, kernel_unique, %Response.Write{size: size}, 0)
@@ -1065,7 +1065,7 @@ defmodule NeonFS.FUSE.Session do
       # mount) can change this path at any time, so the kernel must re-LOOKUP /
       # re-GETATTR rather than serve a stale cached entry. Caching positive
       # entries also let the kernel skip CREATE for a path it thinks exists,
-      # which is how FUSE-created files failed to reach the backend (#1034).
+      # which is how FUSE-created files failed to reach the backend.
       entry_valid: 0,
       attr_valid: 0,
       entry_valid_nsec: 0,
@@ -1169,7 +1169,7 @@ defmodule NeonFS.FUSE.Session do
           nodeid: entry["ino"] || 0,
           generation: 0,
           # See build_entry/1: no positive caching for cross-interface
-          # consistency (#1034).
+          # consistency.
           entry_valid: 0,
           attr_valid: 0,
           entry_valid_nsec: 0,

@@ -1,7 +1,7 @@
 defmodule NeonFS.FUSE.IntegrationTest.WritePathTest do
   @moduledoc """
   End-to-end integration test for the native-BEAM FUSE write path
-  (#278 / #575 / #576 / #577) against a real FUSE mount served by a
+  against a real FUSE mount served by a
   remote core node.
 
   Mounts a volume via `fusermount3`, starts a `Session` in the test

@@ -73,7 +73,7 @@ defmodule NeonFS.NFS.MountBackendTest do
       assert {:ok, ^vol_id_bin} = Filehandle.volume_uuid_to_binary(@volume_id)
     end
 
-    test "volume root resolution populates InodeTable.lookup_volume_name (issue #761)", %{
+    test "volume root resolution populates InodeTable.lookup_volume_name", %{
       manager: manager
     } do
       export_volumes(manager, ["photos"])
@@ -82,7 +82,7 @@ defmodule NeonFS.NFS.MountBackendTest do
       assert {:ok, %{volume_id: vol_id_bin}} = Filehandle.decode(fhandle)
       # NFSv3Backend.resolve_handle/1 reads back through this index
       # to recover the volume name from the filehandle's `volume_id`,
-      # which is the actual #761 fix.
+      # which is the actual fix.
       assert {:ok, "photos"} = InodeTable.lookup_volume_name(vol_id_bin)
     end
 
@@ -90,7 +90,7 @@ defmodule NeonFS.NFS.MountBackendTest do
       assert {:error, :noent} = MountBackend.resolve("/unknown-volume", %{})
     end
 
-    test "permits a client whose source IP is on the export's allow-list (#1217)", %{
+    test "permits a client whose source IP is on the export's allow-list", %{
       manager: manager
     } do
       export_volume_with_allow(manager, "photos", ["10.0.0.0/8"])
@@ -99,7 +99,7 @@ defmodule NeonFS.NFS.MountBackendTest do
                MountBackend.resolve("/photos", %{peer: {10, 1, 2, 3}})
     end
 
-    test "rejects a client whose source IP is not on the allow-list with :acces (#1217)", %{
+    test "rejects a client whose source IP is not on the allow-list with :acces", %{
       manager: manager
     } do
       export_volume_with_allow(manager, "photos", ["10.0.0.0/8"])
@@ -108,7 +108,7 @@ defmodule NeonFS.NFS.MountBackendTest do
                MountBackend.resolve("/photos", %{peer: {192, 168, 1, 1}})
     end
 
-    test "rejects when the peer is unknown and the allow-list is non-empty (#1217)", %{
+    test "rejects when the peer is unknown and the allow-list is non-empty", %{
       manager: manager
     } do
       export_volume_with_allow(manager, "photos", ["10.0.0.0/8"])

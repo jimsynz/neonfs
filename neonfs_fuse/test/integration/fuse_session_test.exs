@@ -1,7 +1,7 @@
 defmodule NeonFS.FUSE.IntegrationTest.SessionTest do
   @moduledoc """
   End-to-end integration test for `NeonFS.FUSE.Session` against a real
-  FUSE mount served by a remote core node (issue #277).
+  FUSE mount served by a remote core node.
 
   Mounts a volume via `fusermount3`, starts a `Session` in the test
   runner BEAM, then drives `ls`, `stat`, `cat`, and `readdir` through
@@ -135,7 +135,7 @@ defmodule NeonFS.FUSE.IntegrationTest.SessionTest do
     end
   end
 
-  describe "real-FUSE fsync barrier (#1502)" do
+  describe "real-FUSE fsync barrier" do
     # `dd conv=fsync` writes the file then calls `fsync(2)` on the fd before
     # closing it, so this drives the FUSE WRITE → FSYNC → FLUSH opcodes
     # end-to-end through /dev/fuse. On this single-node factor-1 volume the
@@ -159,7 +159,7 @@ defmodule NeonFS.FUSE.IntegrationTest.SessionTest do
     end
   end
 
-  describe "real-FUSE xattr round-trip (#671)" do
+  describe "real-FUSE xattr round-trip" do
     # Tagged so `test_helper.exs` can exclude these on hosts where
     # the `attr` package's `setfattr` / `getfattr` aren't installed.
     @describetag :xattr_tools

@@ -1,13 +1,13 @@
 defmodule NeonFS.NFS.IntegrationTest.BeamReadTestHooks do
   @moduledoc """
   App-env hook implementations for the BEAM NFSv3 read-path smoke
-  test (sub-issue #587 of #533). The test runs the BEAM stack on a
+  test. The test runs the BEAM stack on a
   *core* peer; `core_call_fn` and `read_file_stream_fn` are
   short-circuited to local apply / `NeonFS.Core.read_file_stream/3`
   rather than going through `NeonFS.Client.Router` and
   `NeonFS.Client.ChunkReader` (which are the non-core-peer
   abstractions; the cross-node-via-ChunkReader path is the explicit
-  subject of #588).
+  subject of the cross-node test).
 
   Lives in `test/support` so it compiles into `_build/test/lib/.../ebin`
   on the test runner; peer nodes inherit the same code paths via
@@ -27,7 +27,7 @@ defmodule NeonFS.NFS.IntegrationTest.BeamReadTestHooks do
     end
   end
 
-  ## Cross-node-read telemetry collection (#588)
+  ## Cross-node-read telemetry collection
   #
   # The cross-node read smoke test attaches a handler on the
   # interface peer that records every conn-pool checkout (one per

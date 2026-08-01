@@ -292,7 +292,7 @@ defmodule NeonFS.NFS.NLM.HandlerTest do
     end
   end
 
-  describe "credential binding (#1193)" do
+  describe "credential binding" do
     setup do
       test_pid = self()
 

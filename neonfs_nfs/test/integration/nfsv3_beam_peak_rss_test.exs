@@ -1,20 +1,20 @@
 defmodule NeonFS.Integration.NFSv3BeamPeakRSSTest do
   @moduledoc """
   Peak-`:processes_used` bound for the BEAM NFSv3 read path
-  (sub-issue #589 of #533). The cross-node read test (#588) proves
+  The cross-node read test proves
   correctness; this test proves the streaming property the rest of
-  the codebase has invariant-asserted (cf. #534, #499).
+  the codebase has invariant-asserted.
 
   ## What's exercised
 
     * 16-MiB file (16 × 1 MiB chunks) on a 1-core / 1-interface
-      mixed-role cluster — same shape as #588 so the harness
+      mixed-role cluster — same shape as the cross-node read test so the harness
       assumptions are stable.
     * `READ` loop covering the whole file, one per chunk-cap window.
       `:erlang.memory(:processes_used)` sampled before each call;
       peak − baseline must stay under `4 × chunk_max_bytes` (4 MiB).
       The 4× multiplier covers two in-flight chunks plus the OTP
-      `:ssl_gen_statem` term per the analysis in #534.
+      `:ssl_gen_statem` term.
 
   Tagged `:peak_rss` so CI can exclude it cheaply if the bound proves
   platform-sensitive.
@@ -43,7 +43,7 @@ defmodule NeonFS.Integration.NFSv3BeamPeakRSSTest do
   @moduletag :nfs
   @moduletag :peak_rss
 
-  # Root AUTH_SYS mount (uid 0) bypasses the volume ACL; #1215 holds
+  # Root AUTH_SYS mount (uid 0) bypasses the volume ACL; a follow-up holds
   # non-root callers to it.
   @auth %Auth.Sys{uid: 0, gid: 0, gids: []}
 
@@ -53,7 +53,7 @@ defmodule NeonFS.Integration.NFSv3BeamPeakRSSTest do
   @payload_size 16 * @chunk_max
 
   # Bound on `:processes_used` delta during the READ loop. 4 × chunk
-  # size — see the moduledoc and #589's tuning notes.
+  # size — see the moduledoc.
   @peak_bound_bytes 4 * @chunk_max
 
   test "READ loop on the interface peer keeps process heap under 4× chunk size" do
@@ -93,7 +93,7 @@ defmodule NeonFS.Integration.NFSv3BeamPeakRSSTest do
     end)
 
     # Compression off + durability=1 so chunks ride the TLS data
-    # plane rather than the Erlang-RPC fallback (see #588 for the
+    # plane rather than the Erlang-RPC fallback (see the cross-node read test for the
     # `needs_server_processing?` rationale).
     volume_opts = %{
       compression: %{algorithm: :none, level: 0, min_size: 0},
