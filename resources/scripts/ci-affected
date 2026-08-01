@@ -26,6 +26,7 @@ run_cli=false
 run_wire=false
 run_vfs=false
 run_all=false
+all_packages=false
 
 mark() {
   local unit
@@ -58,8 +59,13 @@ classify() {
     # The C module sources feed the wire harness and the Samba build.
     neonfs_cifs/native/*) mark neonfs_cifs neonfs_omnibus wire vfs ;;
 
-    # Everything depends on neonfs_client.
-    neonfs_client/*) run_all=true ;;
+    # Every Elixir package depends on neonfs_client — but the two C jobs do
+    # not. `vfs_neonfs` builds the Samba VFS module inside the distro's samba
+    # source package and `vfs_neonfs_wire` runs a C harness; neither compiles
+    # Elixir, and the contract they implement lives in `neonfs_cifs/native/`,
+    # which has its own rule. Marking them here cost every neonfs_client PR an
+    # hour on the Samba build for no coverage (#1690).
+    neonfs_client/*) all_packages=true; mark integration cli ;;
 
     # test_support's build dep on core puts core on every consumer's path.
     neonfs_core/*)
@@ -100,23 +106,24 @@ else
 fi
 
 if $run_all; then
-  echo "packages=$(jq -c '[.[].name]' "$matrix_file")"
-  echo "run_integration=true"
-  echo "run_cli=true"
-  echo "run_wire=true"
-  echo "run_vfs=true"
+  packages=$(jq -c '[.[].name]' "$matrix_file")
+  run_integration=true
+  run_cli=true
+  run_wire=true
+  run_vfs=true
+elif $all_packages; then
+  # Every Elixir package, but the run_* flags stay as classify/1 left them.
+  packages=$(jq -c '[.[].name]' "$matrix_file")
 elif [ "${#affected[@]}" -eq 0 ]; then
-  echo "packages=[]"
-  echo "run_integration=$run_integration"
-  echo "run_cli=$run_cli"
-  echo "run_wire=$run_wire"
-  echo "run_vfs=$run_vfs"
+  packages='[]'
 else
   names=$(printf '%s\n' "${!affected[@]}" | jq -R . | jq -cs .)
-  echo "packages=$(jq -c --argjson names "$names" \
-    '[.[].name | select(. as $n | $names | index($n))]' "$matrix_file")"
-  echo "run_integration=$run_integration"
-  echo "run_cli=$run_cli"
-  echo "run_wire=$run_wire"
-  echo "run_vfs=$run_vfs"
+  packages=$(jq -c --argjson names "$names" \
+    '[.[].name | select(. as $n | $names | index($n))]' "$matrix_file")
 fi
+
+echo "packages=$packages"
+echo "run_integration=$run_integration"
+echo "run_cli=$run_cli"
+echo "run_wire=$run_wire"
+echo "run_vfs=$run_vfs"
