@@ -2,6 +2,7 @@ import Config
 
 config :logger, :default_formatter,
   metadata: [
+    :claim_id,
     :component,
     :core_node,
     :handle,

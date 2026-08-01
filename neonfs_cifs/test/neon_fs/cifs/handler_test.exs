@@ -2,7 +2,7 @@ defmodule NeonFS.CIFS.HandlerTest do
   use ExUnit.Case, async: false
   use Mimic
 
-  alias NeonFS.CIFS.Handler
+  alias NeonFS.CIFS.{Handler, HandleRegistry}
   alias NeonFS.Client.ChunkReader
   alias NeonFS.Error.{AlreadyExists, FileNotFound}
 
@@ -11,8 +11,16 @@ defmodule NeonFS.CIFS.HandlerTest do
 
   setup :verify_on_exit!
 
+  # File handles live in the node-wide registry now, so it has to be running
+  # and Mimic has to reach the calls it makes on the caller's behalf (#1609).
+  setup do
+    start_supervised!(HandleRegistry)
+    Mimic.allow(NeonFS.Client, self(), Process.whereis(HandleRegistry))
+    :ok
+  end
+
   defp blank_state do
-    %{volume: nil, next_handle: 1, files: %{}, dirs: %{}}
+    %{volume: nil, next_handle: 1, dirs: %{}}
   end
 
   defp connected do
@@ -43,6 +51,11 @@ defmodule NeonFS.CIFS.HandlerTest do
                                          :write_file_at,
                                          ["vol-a", ^path, 0, <<>>, [mode: 420]] ->
       {:ok, file_meta(path)}
+    end)
+
+    # `openat` takes the identity pin before registering the handle.
+    expect(NeonFS.Client, :core_call, fn NeonFS.Core, :pin_file, ["vol-a", ^path, _holder] ->
+      {:ok, %{claim_id: "claim:" <> path, file_id: "object:" <> path}}
     end)
 
     {{:ok, %{handle: handle}}, state} =
@@ -149,7 +162,9 @@ defmodule NeonFS.CIFS.HandlerTest do
     test "fstat resolves through the open-files table" do
       {handle, state} = open_file(connected(), "/foo")
 
-      expect(NeonFS.Client, :core_call, fn NeonFS.Core, :get_file_meta, ["vol-a", "/foo"] ->
+      expect(NeonFS.Client, :core_call, fn NeonFS.Core,
+                                           :get_file_meta_by_id,
+                                           ["vol-a", "object:/foo"] ->
         {:ok, file_meta("/foo", size: 99)}
       end)
 
@@ -166,8 +181,8 @@ defmodule NeonFS.CIFS.HandlerTest do
       {handle, state} = open_file(connected(), "/p")
 
       expect(NeonFS.Client, :core_call, fn NeonFS.Core,
-                                           :update_file_meta,
-                                           ["vol-a", "/p", [mode: 0o600]] ->
+                                           :update_file_meta_by_id,
+                                           ["vol-a", "object:/p", [mode: 0o600]] ->
         {:ok, %{}}
       end)
 
@@ -193,8 +208,8 @@ defmodule NeonFS.CIFS.HandlerTest do
       {handle, state} = open_file(connected(), "/p")
 
       stub(NeonFS.Client, :core_call, fn NeonFS.Core,
-                                         :update_file_meta,
-                                         ["vol-a", "/p", updates] ->
+                                         :update_file_meta_by_id,
+                                         ["vol-a", "object:/p", updates] ->
         send(self(), {:times, updates})
         {:ok, %{}}
       end)
@@ -216,17 +231,20 @@ defmodule NeonFS.CIFS.HandlerTest do
           {:error, not_found("/new")}
 
         NeonFS.Core, :write_file_at, ["vol-a", "/new", 0, <<>>, [mode: 420]] ->
-          {:ok, %{path: "/new"}}
+          {:ok, file_meta("/new")}
+
+        NeonFS.Core, :pin_file, ["vol-a", "/new", _holder] ->
+          {:ok, %{claim_id: "claim:/new"}}
       end)
 
-      {reply, state} =
+      {reply, _state} =
         Handler.handle(
           {:openat, %{"path" => "/new", "flags" => 0o100, "mode" => 0o644}},
           connected()
         )
 
-      assert {:ok, %{handle: 1}} = reply
-      assert Map.has_key?(state.files, 1)
+      assert {:ok, %{handle: handle}} = reply
+      assert {:ok, %{volume: "vol-a", file_id: "object:/new"}} = HandleRegistry.fetch(handle)
     end
 
     test "openat with O_EXCL on an existing file is :eexist" do
@@ -259,17 +277,20 @@ defmodule NeonFS.CIFS.HandlerTest do
 
         NeonFS.Core, :write_file_at, ["vol-a", "/atomic", 0, <<>>, opts] ->
           send(test_pid, {:write_opts, opts})
-          {:ok, %{path: "/atomic"}}
+          {:ok, file_meta("/atomic")}
+
+        NeonFS.Core, :pin_file, ["vol-a", "/atomic", _holder] ->
+          {:ok, %{claim_id: "claim:/atomic"}}
       end)
 
-      {reply, state} =
+      {reply, _state} =
         Handler.handle(
           {:openat, %{"path" => "/atomic", "flags" => 0o300, "mode" => 0o644}},
           connected()
         )
 
-      assert {:ok, %{handle: 1}} = reply
-      assert Map.has_key?(state.files, 1)
+      assert {:ok, %{handle: handle}} = reply
+      assert {:ok, %{file_id: "object:/atomic"}} = HandleRegistry.fetch(handle)
       assert_receive {:write_opts, opts}, 500
       assert Keyword.get(opts, :create_only) == true
     end
@@ -305,7 +326,10 @@ defmodule NeonFS.CIFS.HandlerTest do
 
         NeonFS.Core, :write_file_at, ["vol-a", "/plain", 0, <<>>, opts] ->
           send(test_pid, {:write_opts, opts})
-          {:ok, %{path: "/plain"}}
+          {:ok, file_meta("/plain")}
+
+        NeonFS.Core, :pin_file, ["vol-a", "/plain", _holder] ->
+          {:ok, %{claim_id: "claim:/plain"}}
       end)
 
       {reply, _} =
@@ -314,22 +338,26 @@ defmodule NeonFS.CIFS.HandlerTest do
           connected()
         )
 
-      assert {:ok, %{handle: 1}} = reply
+      assert {:ok, %{handle: _}} = reply
       assert_receive {:write_opts, opts}, 500
       refute Keyword.get(opts, :create_only)
     end
 
     test "close releases the handle" do
       {handle, state} = open_file(connected(), "/p")
-      {reply, state2} = Handler.handle({:close, %{"handle" => handle}}, state)
+
+      # Closing releases the identity pin exactly once.
+      expect(NeonFS.Client, :core_call, fn NeonFS.Core, :unpin_file, ["claim:/p"] -> :ok end)
+
+      {reply, _state} = Handler.handle({:close, %{"handle" => handle}}, state)
       assert {:ok, %{}} == reply
-      refute Map.has_key?(state2.files, handle)
+      assert :error = HandleRegistry.fetch(handle)
     end
 
     test "pread routes through ChunkReader.read_file" do
       {handle, state} = open_file(connected(), "/p")
 
-      expect(ChunkReader, :read_file, fn "vol-a", "/p", opts ->
+      expect(ChunkReader, :read_file_by_id, fn "vol-a", "object:/p", opts ->
         assert Keyword.get(opts, :offset) == 16
         assert Keyword.get(opts, :length) == 32
         {:ok, :binary.copy("x", 32)}
@@ -346,8 +374,8 @@ defmodule NeonFS.CIFS.HandlerTest do
       {handle, state} = open_file(connected(), "/p")
 
       expect(NeonFS.Client, :core_call, fn NeonFS.Core,
-                                           :write_file_at,
-                                           ["vol-a", "/p", 0, "hello"] ->
+                                           :write_file_at_by_id,
+                                           ["vol-a", "object:/p", 0, "hello"] ->
         {:ok, %{path: "/p", size: 5}}
       end)
 
@@ -360,7 +388,9 @@ defmodule NeonFS.CIFS.HandlerTest do
     test "ftruncate routes through truncate_file" do
       {handle, state} = open_file(connected(), "/p")
 
-      expect(NeonFS.Client, :core_call, fn NeonFS.Core, :truncate_file, ["vol-a", "/p", 0] ->
+      expect(NeonFS.Client, :core_call, fn NeonFS.Core,
+                                           :truncate_file_by_id,
+                                           ["vol-a", "object:/p", 0] ->
         {:ok, %{}}
       end)
 
@@ -371,7 +401,7 @@ defmodule NeonFS.CIFS.HandlerTest do
     test "fsync drives the shared sync_file barrier for the open handle" do
       {handle, state} = open_file(connected(), "/p")
 
-      expect(NeonFS.Client, :sync_file, fn "vol-a", "/p" -> :ok end)
+      expect(NeonFS.Client, :sync_file_by_id, fn "vol-a", "object:/p" -> :ok end)
 
       {reply, _} = Handler.handle({:fsync, %{"handle" => handle}}, state)
       assert {:ok, %{}} == reply
@@ -380,7 +410,7 @@ defmodule NeonFS.CIFS.HandlerTest do
     test "fsync maps a barrier failure to an errno" do
       {handle, state} = open_file(connected(), "/p")
 
-      expect(NeonFS.Client, :sync_file, fn "vol-a", "/p" -> {:error, :io_error} end)
+      expect(NeonFS.Client, :sync_file_by_id, fn "vol-a", "object:/p" -> {:error, :io_error} end)
 
       {reply, _} = Handler.handle({:fsync, %{"handle" => handle}}, state)
       assert {:error, :eio} == reply
@@ -477,34 +507,40 @@ defmodule NeonFS.CIFS.HandlerTest do
     # the final name, then fstats the still-open handle
     # (open.c mkdir_internal → open_directory's vfs_stat_fsp). The
     # handle's stored path must follow the rename (#1555).
-    test "renameat rewrites open handle paths" do
-      {handle, state} = open_file(connected(), "/.::TMPNAME:D:1%2:d")
+    # The handle carries the file's identity, so a rename needs no
+    # bookkeeping on the handler's side at all: the fd keeps addressing the
+    # same object under its new name, which is what POSIX and SMB both
+    # require.
+    test "a rename does not disturb an open handle" do
+      {handle, state} = open_file(connected(), "/old.txt")
 
-      stub(NeonFS.Client, :core_call, fn
-        NeonFS.Core, :rename_file, ["vol-a", "/.::TMPNAME:D:1%2:d", "/d"] ->
-          :ok
-
-        NeonFS.Core, :get_file_meta, ["vol-a", "/d"] ->
-          {:ok, file_meta("/d", mode: 0o040755)}
+      expect(NeonFS.Client, :core_call, fn NeonFS.Core,
+                                           :rename_file,
+                                           ["vol-a", "/old.txt", "/new.txt"] ->
+        :ok
       end)
 
       {reply, state} =
-        Handler.handle(
-          {:renameat, %{"old_path" => "/.::TMPNAME:D:1%2:d", "new_path" => "/d"}},
-          state
-        )
+        Handler.handle({:renameat, %{"old_path" => "/old.txt", "new_path" => "/new.txt"}}, state)
 
       assert {:ok, %{}} == reply
-      assert {_, "/d", _} = Map.fetch!(state.files, handle)
+
+      expect(NeonFS.Client, :core_call, fn NeonFS.Core,
+                                           :get_file_meta_by_id,
+                                           ["vol-a", "object:/old.txt"] ->
+        {:ok, file_meta("/new.txt", size: 7)}
+      end)
 
       {reply, _} = Handler.handle({:fstat, %{"handle" => handle}}, state)
-      assert {:ok, %{stat: %{kind: :directory}}} = reply
+      assert {:ok, %{stat: %{size: 7}}} = reply
     end
 
-    test "renameat rewrites handles beneath a renamed directory" do
+    test "a rename beneath an open handle's directory does not disturb it" do
       {handle, state} = open_file(connected(), "/dir/sub/f.txt")
 
-      stub(NeonFS.Client, :core_call, fn NeonFS.Core, :rename_file, ["vol-a", "/dir", "/moved"] ->
+      expect(NeonFS.Client, :core_call, fn NeonFS.Core,
+                                           :rename_file,
+                                           ["vol-a", "/dir", "/moved"] ->
         :ok
       end)
 
@@ -512,7 +548,93 @@ defmodule NeonFS.CIFS.HandlerTest do
         Handler.handle({:renameat, %{"old_path" => "/dir", "new_path" => "/moved"}}, state)
 
       assert {:ok, %{}} == reply
-      assert {_, "/moved/sub/f.txt", _} = Map.fetch!(state.files, handle)
+
+      assert {:ok, %{file_id: "object:/dir/sub/f.txt"}} = HandleRegistry.fetch(handle)
+
+      expect(NeonFS.Client, :core_call, fn NeonFS.Core,
+                                           :get_file_meta_by_id,
+                                           ["vol-a", "object:/dir/sub/f.txt"] ->
+        {:ok, file_meta("/moved/sub/f.txt", size: 3)}
+      end)
+
+      {reply, _} = Handler.handle({:fstat, %{"handle" => handle}}, state)
+      assert {:ok, %{stat: %{size: 3}}} = reply
+    end
+
+    test "a handle opened on one connection works on another, across rename and unlink" do
+      {handle, state_a} = open_file(connected(), "/shared.txt")
+
+      expect(NeonFS.Client, :core_call, fn NeonFS.Core,
+                                           :rename_file,
+                                           ["vol-a", "/shared.txt", "/renamed.txt"] ->
+        :ok
+      end)
+
+      {{:ok, %{}}, state_a} =
+        Handler.handle(
+          {:renameat, %{"old_path" => "/shared.txt", "new_path" => "/renamed.txt"}},
+          state_a
+        )
+
+      expect(NeonFS.Client, :core_call, fn NeonFS.Core, :delete_file, ["vol-a", "/renamed.txt"] ->
+        :ok
+      end)
+
+      {{:ok, %{}}, _state_a} =
+        Handler.handle({:unlinkat, %{"path" => "/renamed.txt", "flags" => 0}}, state_a)
+
+      # A second connection, which never saw the open, reaches the same
+      # bytes through the same handle. The pin keeps the unlinked object
+      # readable.
+      state_b = connected()
+
+      expect(ChunkReader, :read_file_by_id, fn "vol-a", "object:/shared.txt", _opts ->
+        {:ok, "still here"}
+      end)
+
+      {reply, _} =
+        Handler.handle(
+          {:pread, %{"handle" => handle, "offset" => 0, "size" => 9}},
+          state_b
+        )
+
+      assert {:ok, %{data: "still here"}} = reply
+    end
+
+    test "a dead connection releases its own pins and no others" do
+      {mine, _state} = open_file(connected(), "/mine.txt")
+
+      test_pid = self()
+
+      # A second connection process opens its own file, then dies.
+      other =
+        spawn(fn ->
+          receive do
+            {:open, from} ->
+              {:ok, handle} =
+                HandleRegistry.open("vol-a", "object:/theirs.txt", 0, "claim:/theirs.txt")
+
+              send(from, {:opened, handle})
+              receive do: (:die -> :ok)
+          end
+        end)
+
+      Mimic.allow(NeonFS.Client, self(), other)
+      send(other, {:open, self()})
+      assert_receive {:opened, theirs}, 500
+
+      expect(NeonFS.Client, :core_call, fn NeonFS.Core, :unpin_file, ["claim:/theirs.txt"] ->
+        send(test_pid, :released)
+        :ok
+      end)
+
+      ref = Process.monitor(other)
+      send(other, :die)
+      assert_receive {:DOWN, ^ref, :process, ^other, _}, 500
+      assert_receive :released, 500
+
+      assert :error = HandleRegistry.fetch(theirs)
+      assert {:ok, %{file_id: "object:/mine.txt"}} = HandleRegistry.fetch(mine)
     end
   end
 
