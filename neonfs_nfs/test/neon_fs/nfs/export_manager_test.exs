@@ -107,7 +107,7 @@ defmodule NeonFS.NFS.ExportManagerTest do
   end
 
   # The native-BEAM stack starts an `Tahr.RPC.Server` listener
-  # under `ExportManager`. (NIF cutover landed in #657 of #286.)
+  # under `ExportManager`. (The NIF cutover has since landed.)
   test "starts an Tahr.RPC.Server listener" do
     state = :sys.get_state(ExportManager)
     assert is_pid(state.nfs_server)

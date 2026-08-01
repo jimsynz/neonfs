@@ -141,7 +141,7 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
       assert {:error, :noent} = NFSv3Backend.getattr(valid_fh(), :auth, %{})
     end
 
-    test "normalises unmapped core error atoms to :io (issue #760)" do
+    test "normalises unmapped core error atoms to :io" do
       put_inode_table(%{@file_inode => {@volume_name, @file_path}})
       # `:totally_unknown` is not a NFSv3 wire-status atom; without the
       # normaliser the dispatcher's `Map.fetch!(@stat_codes, status)`
@@ -164,7 +164,7 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
     end
   end
 
-  ## AUTH_SYS enforcement (#1215)
+  ## AUTH_SYS enforcement
 
   describe "AUTH_SYS identity threading" do
     test "threads the caller's uid and gids into core authorisation opts" do
@@ -241,7 +241,7 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
     end
   end
 
-  ## Per-request IP allow-list (#1228)
+  ## Per-request IP allow-list
 
   describe "per-request IP allow-list" do
     setup do
@@ -293,7 +293,7 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
     end
   end
 
-  ## Root-squash (#1216)
+  ## Root-squash
 
   describe "root-squash" do
     setup do
@@ -460,7 +460,7 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
       :ok
     end
 
-    test "fsstat returns sane fixed capacity values until #321 lands" do
+    test "fsstat returns sane fixed capacity values pending real accounting" do
       assert {:ok, reply, %Fattr3{}} = NFSv3Backend.fsstat(valid_fh(), :auth, %{})
       assert reply.tbytes > 0
       assert reply.fbytes > 0
@@ -480,7 +480,7 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
     end
   end
 
-  ## create (#622)
+  ## create
 
   describe "create/5 — UNCHECKED" do
     setup do
@@ -539,7 +539,7 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
     end
   end
 
-  ## create/write authorisation (#1230)
+  ## create/write authorisation
 
   describe "create authorisation" do
     setup do
@@ -734,7 +734,7 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
     end
   end
 
-  ## symlink / mknod / link (#626)
+  ## symlink / mknod / link
 
   describe "symlink/6" do
     setup do
@@ -828,7 +828,7 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
     end
   end
 
-  ## rename (#625)
+  ## rename
 
   describe "rename/6" do
     setup do
@@ -894,7 +894,7 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
           {:ok, pre_from}
 
         # `Core.rename_file` returns a structured `Invalid` for cycles per
-        # the namespace coordinator's `claim_rename` check (#304).
+        # the namespace coordinator's `claim_rename` check.
         NeonFS.Core, :rename_file, _ ->
           {:error, Invalid.exception(message: "rename target must not be a descendant")}
 
@@ -928,7 +928,7 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
     end
   end
 
-  ## write / commit (#624)
+  ## write / commit
 
   describe "write/6" do
     setup do
@@ -936,7 +936,7 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
       :ok
     end
 
-    test "a write_ack: :local volume reports :unstable so the client COMMITs (#1509)" do
+    test "a write_ack: :local volume reports :unstable so the client COMMITs" do
       pre = file_meta(%{size: 0})
       post = file_meta(%{size: 11})
       data = "hello-write"
@@ -961,7 +961,7 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
       assert_received :write_called
     end
 
-    test "a write_ack: :quorum volume reports :file_sync without a COMMIT barrier (#1509)" do
+    test "a write_ack: :quorum volume reports :file_sync without a COMMIT barrier" do
       test_pid = self()
       put_export(%{write_ack: :quorum})
 
@@ -982,7 +982,7 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
       refute_received :synced
     end
 
-    test "a FILE_SYNC request on a :local volume runs the barrier inline (#1509)" do
+    test "a FILE_SYNC request on a :local volume runs the barrier inline" do
       test_pid = self()
       put_export(%{write_ack: :local})
 
@@ -1003,7 +1003,7 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
       assert_received :synced
     end
 
-    test "a FILE_SYNC request fails with :io when the barrier can't reach min_copies (#1509)" do
+    test "a FILE_SYNC request fails with :io when the barrier can't reach min_copies" do
       # RFC 1813 §3.3.7: achieved stability must be >= requested, so a
       # FILE_SYNC write we can't make durable errors rather than downgrading.
       put_export(%{write_ack: :local})
@@ -1042,7 +1042,7 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
                NFSv3Backend.write(valid_fh(), 0, "x", :file_sync, :auth, %{})
     end
 
-    test "a frozen cluster maps to NFS3ERR_JUKEBOX (#1438)" do
+    test "a frozen cluster maps to NFS3ERR_JUKEBOX" do
       pre = file_meta(%{size: 0})
 
       put_core(fn
@@ -1061,7 +1061,7 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
       :ok
     end
 
-    test "runs the sync_file barrier and returns wcc + per-instance verf, no re-write (#1509)" do
+    test "runs the sync_file barrier and returns wcc + per-instance verf, no re-write" do
       meta = file_meta()
       test_pid = self()
 
@@ -1078,7 +1078,7 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
       assert_received :synced
     end
 
-    test "maps a barrier failure to NFS3ERR_IO + wcc (#1509)" do
+    test "maps a barrier failure to NFS3ERR_IO + wcc" do
       meta = file_meta()
 
       put_core(fn
@@ -1132,7 +1132,7 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
     end
   end
 
-  ## mkdir / remove / rmdir (#623)
+  ## mkdir / remove / rmdir
 
   describe "mkdir/5" do
     setup do
@@ -1295,7 +1295,7 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
     end
   end
 
-  ## setattr (#621)
+  ## setattr
 
   describe "setattr/5" do
     setup do
@@ -1443,9 +1443,9 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
     end
   end
 
-  ## Regression — #761 (mount filehandle with `fileid: 1`)
+  ## Regression — mount filehandle with `fileid: 1`
 
-  describe "synthetic-root filehandle (issue #761)" do
+  describe "synthetic-root filehandle" do
     # `MountBackend.resolve/2` issues every per-volume mount handle
     # with `fileid: 1`, whose `inode_table` mapping is
     # `{nil, "/"}`. Without the volume-id index lookup the resolved

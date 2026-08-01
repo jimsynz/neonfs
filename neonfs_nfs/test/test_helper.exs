@@ -13,9 +13,9 @@ end
 # config.exs runs.
 Application.put_env(:kernel, :prevent_overlapping_partitions, false)
 
-# The peer-cluster BEAM NFSv3 read-path smoke test (#587) lives at
+# The peer-cluster BEAM NFSv3 read-path smoke test lives at
 # `test/integration/nfsv3_beam_read_test.exs`. Other interface packages
-# moved their integration tests in via the same pattern under #582.
+# moved their integration tests in via the same pattern.
 
 Mimic.copy(NeonFS.Client.ChunkReader)
 Mimic.copy(NeonFS.Client.Router)

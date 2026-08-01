@@ -114,8 +114,8 @@ defmodule NeonFS.FUSE.HandlerTest do
     end
   end
 
-  # `create` opcode atomicity for `O_EXCL | O_CREAT` (sub-issue #594
-  # of #303). The Rust shim now plumbs the `open(2)` flags through to
+  # `create` opcode atomicity for `O_EXCL | O_CREAT`. The Rust shim
+  # now plumbs the `open(2)` flags through to
   # Elixir; the handler routes `O_EXCL` writes through
   # `WriteOperation`'s `create_only: true`. `{:error, :exists}` from
   # core round-trips back to the FUSE caller as `EEXIST` (errno 17).
@@ -205,7 +205,7 @@ defmodule NeonFS.FUSE.HandlerTest do
       parent_inode: parent_inode
     } do
       # `:exists` short-circuits before the pin runs, so a single
-      # `expect` on the write path (routed via write_call_by_id since #1087)
+      # `expect` on the write path (routed via write_call_by_id)
       # still suffices.
       expect(NeonFS.Client, :write_call_by_id, fn _volume_id,
                                                   NeonFS.Core.WriteOperation,
@@ -268,7 +268,7 @@ defmodule NeonFS.FUSE.HandlerTest do
     end
   end
 
-  # POSIX unlink-while-open pin lifecycle (sub-issue #651 of #639).
+  # POSIX unlink-while-open pin lifecycle.
   # The Handler GenServer claims a `:pinned` namespace claim on
   # `open` / `create` and releases it on `release`, so the
   # coordinator's holder-DOWN handler covers FUSE-peer crashes and
@@ -463,7 +463,7 @@ defmodule NeonFS.FUSE.HandlerTest do
       assert_receive :write_by_id_called, 1_000
     end
 
-    test "a frozen cluster maps a write to EAGAIN (#1438)",
+    test "a frozen cluster maps a write to EAGAIN",
          %{handler: handler, file_inode: file_inode} do
       stub(NeonFS.Client, :core_call, fn
         NeonFS.Core.FileIndex, :get_by_path, ["vol", "/data.txt"] ->
@@ -490,7 +490,7 @@ defmodule NeonFS.FUSE.HandlerTest do
     end
   end
 
-  describe "fsync barrier (#1502)" do
+  describe "fsync barrier" do
     setup do
       handler = start_supervised!({Handler, volume: "vol", test_notify: self()})
       Mimic.allow(NeonFS.Client, self(), handler)
@@ -543,11 +543,11 @@ defmodule NeonFS.FUSE.HandlerTest do
   # Helper for the `O_EXCL` create tests: dispatches the two
   # `core_call/3` invocations the pin-on-create path makes — the
   # `WriteOperation.write_file_at` that creates the file, and the
-  # `Core.pin_file` that pins it by identity (#651, #1605). Forwards
+  # `Core.pin_file` that pins it by identity. Forwards
   # the write opts to the test process so the caller can assert on
   # `:create_only`.
   # Only `pin_file` reaches `core_call/3` now — `write_file_at` routes
-  # through `write_call_by_id/4` since #1087 (see `create_test_write_call/6`).
+  # through `write_call_by_id/4` (see `create_test_write_call/6`).
   defp create_test_core_call(NeonFS.Core, :pin_file, [_, _, _], _test_pid, file_id) do
     {:ok, %{file_id: file_id, claim_id: "ns-claim-stub", file: %{}}}
   end

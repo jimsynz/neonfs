@@ -1,8 +1,8 @@
 defmodule NeonFS.Integration.NFSv3BeamWriteTest do
   @moduledoc """
   End-to-end peer-cluster test for the BEAM NFSv3 write path
-  (sub-issue #627 of #285). Closes the loop the read-path tests
-  (#587 / #588 / #589) left open: prove a real write workload
+  Closes the loop the read-path tests
+  left open: prove a real write workload
   round-trips through the BEAM mutation procedures.
 
   ## Cluster shape
@@ -12,19 +12,19 @@ defmodule NeonFS.Integration.NFSv3BeamWriteTest do
     * `node2`: `:neonfs_nfs` — runs the BEAM NFSv3 stack and
       drives `Handler.handle_call/4`.
 
-  Same shape as #588 (the cross-node read-path test).
+  Same shape as the cross-node read-path test.
 
   ## What's exercised
 
     1. CREATE a regular file via proc 8 (UNCHECKED).
     2. WRITE multi-MiB across multiple chunks. On the `write_ack:
-       :local` test volume the backend reports `:unstable` (#1509), so
+       :local` test volume the backend reports `:unstable`, so
        the client must COMMIT to reach durability.
     3. COMMIT; it drives the shared `sync_file` barrier and returns a
        `writeverf3` stable across repeated calls within the same VM.
     4. READ back; assert byte-identity against the source payload.
        This is the cross-cutting check — exercises both the read
-       path from #587-#589 and the write path landing here.
+       read path and the write path landing here.
     5. SETATTR (touch mtime); verify `wcc_data` carries the pre/post
        attrs.
     6. RENAME the file; READ from the new path.
@@ -43,7 +43,7 @@ defmodule NeonFS.Integration.NFSv3BeamWriteTest do
   @moduletag :integration
   @moduletag :nfs
 
-  # Root AUTH_SYS mount (uid 0) bypasses the volume ACL; #1215 holds
+  # Root AUTH_SYS mount (uid 0) bypasses the volume ACL; a follow-up holds
   # non-root callers to it.
   @auth %Auth.Sys{uid: 0, gid: 0, gids: []}
   @chunk_size 1_048_576
@@ -84,7 +84,7 @@ defmodule NeonFS.Integration.NFSv3BeamWriteTest do
     end)
 
     # Compression off + durability=1 so chunk reads come straight off
-    # the data plane, same rationale as #588.
+    # the data plane, same rationale as the cross-node read test.
     volume_opts = %{
       compression: %{algorithm: :none, level: 0, min_size: 0},
       durability: %{type: :replicate, factor: 1, min_copies: 1}
@@ -109,7 +109,7 @@ defmodule NeonFS.Integration.NFSv3BeamWriteTest do
     # WRITE picks a drive via `DriveRegistry.select_drive(initial_tier)` on
     # the core peer — if no drive is registered yet, `:no_drives_in_tier`
     # bubbles up as `{:error, %Unavailable{}}` and the BEAM NFS backend's
-    # catch-all maps it to `NFS3ERR_IO`, which is what #704 caught. The
+    # catch-all maps it to `NFS3ERR_IO`. The
     # volume registering does not imply a drive is selectable; wait for it
     # explicitly. Default tier is `:hot`.
     assert_eventually(
@@ -145,7 +145,7 @@ defmodule NeonFS.Integration.NFSv3BeamWriteTest do
     # Step 4's READ uses the production `ChunkReader.read_file_stream/3`
     # path (no `read_file_stream_fn` override) — node2 is a non-core
     # interface peer, so chunks fetch over the TLS data plane just
-    # like #588.
+    # like the cross-node read test.
     ctx = %{call: nil, nfs_v3_backend: NeonFS.NFS.NFSv3Backend}
     file_name = "lifecycle.bin"
 
@@ -187,7 +187,7 @@ defmodule NeonFS.Integration.NFSv3BeamWriteTest do
     {:ok, ^written, rest} = XDR.decode_uint(rest)
 
     # The test volume is `write_ack: :local` (the peer-cluster default),
-    # so an UNSTABLE WRITE honestly reports `:unstable` (#1509): the extra
+    # so an UNSTABLE WRITE honestly reports `:unstable`: the extra
     # replicas are placed in the background, and the client must COMMIT to
     # reach `min_copies` durability. (A `write_ack: :quorum`/`:all` volume
     # would report `:file_sync` here — covered in the backend unit tests.)

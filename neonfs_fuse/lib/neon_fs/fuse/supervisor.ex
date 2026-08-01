@@ -35,7 +35,7 @@ defmodule NeonFS.FUSE.Supervisor do
         [
           # Service registration (unique name — each service registers its own).
           # Last so it terminates first on shutdown, deregistering before the
-          # rest of the tree stops (#1386).
+          # rest of the tree stops.
           {NeonFS.Client.Registrar,
            metadata: registration_metadata(), type: :fuse, name: NeonFS.Client.Registrar.FUSE}
         ]

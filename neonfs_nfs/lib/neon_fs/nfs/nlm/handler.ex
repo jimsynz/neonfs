@@ -312,7 +312,7 @@ defmodule NeonFS.NFS.NLM.Handler do
   # client-supplied `caller_name`/`svid` (untrusted wire data). Including
   # the credential's identity means a different authenticated principal
   # can't test, release, or cancel another's locks by replaying a forged
-  # `caller_name` (#1193). AUTH_NONE collapses to a single `:anonymous`
+  # `caller_name`. AUTH_NONE collapses to a single `:anonymous`
   # owner.
   defp client_ref(lock, cred) do
     {cred_owner(cred), lock.caller_name, lock.svid}

@@ -7,7 +7,7 @@ defmodule NeonFS.NFS.Application do
   The NFSv3 stack is the native-BEAM `Tahr.NFSv3.Handler` bound
   to `NeonFS.NFS.NFSv3Backend` plus `Tahr.Mount.Handler` bound
   to `NeonFS.NFS.MountBackend`. The legacy `nfs3_server` NIF was
-  removed in sub-issue #657 of #286.
+  since removed.
   """
 
   use Application

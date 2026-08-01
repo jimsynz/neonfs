@@ -1,7 +1,7 @@
 defmodule NeonFS.Integration.NFSv3BeamCrossNodeReadTest do
   @moduledoc """
   Cross-node integration test for the BEAM NFSv3 read stack (sub-issue
-  #588 of #533). Builds on the local-only smoke test (#587) by
+  Builds on the local-only smoke test by
   separating the NFS interface peer from the core peers that hold the
   file's chunks — the streaming RPC path through
   `NeonFS.Client.ChunkReader.read_file_stream/3` is the subject under
@@ -15,7 +15,7 @@ defmodule NeonFS.Integration.NFSv3BeamCrossNodeReadTest do
 
   The 1-core / 1-interface shape is the smallest configuration that
   exercises the cross-node streaming path observably. The issue body
-  (#588) describes a 2-core variant; collapsing to 1 core keeps
+  describes a 2-core variant; collapsing to 1 core keeps
   `init_mixed_role_cluster`'s pool wiring straightforward — the
   helper currently provisions a TLS pool to the first core only, so
   a 2-core variant would need ad-hoc `ensure_pool` plumbing for the
@@ -45,7 +45,7 @@ defmodule NeonFS.Integration.NFSv3BeamCrossNodeReadTest do
   @moduletag :integration
   @moduletag :nfs
 
-  # Root AUTH_SYS mount (uid 0) bypasses the volume ACL; #1215 holds
+  # Root AUTH_SYS mount (uid 0) bypasses the volume ACL; a follow-up holds
   # non-root callers to it.
   @auth %Auth.Sys{uid: 0, gid: 0, gids: []}
   @chunk_max 1_048_576
@@ -80,7 +80,7 @@ defmodule NeonFS.Integration.NFSv3BeamCrossNodeReadTest do
     file_path = "/" <> file_name
 
     # Stamp the cutover flag on the interface peer per the contract
-    # `#286` will gate on. Not load-bearing here yet.
+    # the mount path gates on. Not load-bearing here yet.
     :ok =
       PeerCluster.rpc(cluster, :node2, Application, :put_env, [
         :neonfs_nfs,
@@ -112,7 +112,7 @@ defmodule NeonFS.Integration.NFSv3BeamCrossNodeReadTest do
     }
 
     # Volume creation is a Ra-replicated write with a 30 s internal
-    # budget (#1167); give the RPC a slow-runner margin beyond that.
+    # budget; give the RPC a slow-runner margin beyond that.
     {:ok, _} =
       PeerCluster.rpc(
         cluster,
@@ -142,7 +142,7 @@ defmodule NeonFS.Integration.NFSv3BeamCrossNodeReadTest do
     # The interface peer (node2) has no core role and no local
     # chunks — its READ must traverse the data plane. The write goes
     # through Ra and the blob store, which exceeds the default 30 s
-    # RPC budget on a loaded runner (#1166) — match the 120 s
+    # RPC budget on a loaded runner — match the 120 s
     # slow-runner convention.
     {:ok, _meta} =
       PeerCluster.rpc(
@@ -234,7 +234,7 @@ defmodule NeonFS.Integration.NFSv3BeamCrossNodeReadTest do
     end
 
     # Gate on the data plane actually being exercised before asserting on
-    # it (#1404). `init_mixed_role_cluster` brings the interface→core pool
+    # it. `init_mixed_role_cluster` brings the interface→core pool
     # up, but the minutes-long volume create + write that follow give a
     # contended CI runner time to flap the distribution link / drop the
     # pool, after which reads fall back to per-chunk Erlang RPC — correct

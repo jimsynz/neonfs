@@ -5,7 +5,7 @@ defmodule NeonFS.FUSE.MountManagerTest do
 
   @moduletag :tmp_dir
 
-  describe "build_mount_options/1 (issue #1574)" do
+  describe "build_mount_options/1" do
     test "defaults to auto_unmount only" do
       assert MountManager.build_mount_options([]) == ["auto_unmount"]
     end
@@ -25,7 +25,7 @@ defmodule NeonFS.FUSE.MountManagerTest do
     end
   end
 
-  describe "diagnose_fusermount_no_fd/2 (issue #756)" do
+  describe "diagnose_fusermount_no_fd/2" do
     test "reports a missing mount point", %{tmp_dir: tmp_dir} do
       missing = Path.join(tmp_dir, "does-not-exist")
 
@@ -103,7 +103,7 @@ defmodule NeonFS.FUSE.MountManagerTest do
     end
   end
 
-  describe "mount/3 mount-point validation names the FUSE node (#1358)" do
+  describe "mount/3 mount-point validation names the FUSE node" do
     setup do
       start_supervised!(MountManager)
       :ok
@@ -127,7 +127,7 @@ defmodule NeonFS.FUSE.MountManagerTest do
     end
   end
 
-  describe "get_mount_by_volume_name/1 (issue #1016)" do
+  describe "get_mount_by_volume_name/1" do
     # `MountManager` is a `:name`-registered singleton; the suite that
     # actually spins up the full FUSE stack lives in
     # `neonfs_integration`. These tests prod the `handle_call/3`

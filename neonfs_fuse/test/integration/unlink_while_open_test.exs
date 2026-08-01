@@ -1,14 +1,14 @@
 defmodule NeonFS.FUSE.IntegrationTest.UnlinkWhileOpenTest do
   @moduledoc """
   End-to-end peer-cluster test for the POSIX unlink-while-open story
-  (sub-issue #640 of #306). Composes everything that landed in
+  Composes everything that landed in
   earlier slices:
 
-    * `:pinned` namespace claim primitive (#637).
-    * `FileMeta` `:detached` state + `delete_file` pin-check (#643).
-    * Pin-release-triggered GC (#644).
-    * `Core.read_file_by_id` / `write_file_at_by_id` (#650).
-    * FUSE handler pin lifecycle + `file_id`-keyed read/write (#651).
+    * `:pinned` namespace claim primitive.
+    * `FileMeta` `:detached` state + `delete_file` pin-check.
+    * Pin-release-triggered GC.
+    * `Core.read_file_by_id` / `write_file_at_by_id`.
+    * FUSE handler pin lifecycle + `file_id`-keyed read/write.
 
   ## Cluster shape
 

@@ -3,7 +3,7 @@ defmodule NeonFS.FUSE.IntegrationTest.MetadataCacheInvalidationTest do
   Integration test for `NeonFS.FUSE.MetadataCache` cross-node
   invalidation — splits out of the original `EventNotificationTest`
   in `neonfs_integration` so the FUSE-specific cache assertions live
-  with the FUSE package (#600 / #582). The non-FUSE event-delivery
+  with the FUSE package. The non-FUSE event-delivery
   scenarios stay in `neonfs_integration` where they belong.
   """
   use NeonFS.TestSupport.ClusterCase, async: false

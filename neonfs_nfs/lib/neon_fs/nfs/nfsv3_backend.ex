@@ -7,8 +7,7 @@ defmodule NeonFS.NFS.NFSv3Backend do
   Lives in the `neonfs_nfs` interface package, so its only NeonFS
   dependency is `neonfs_client` — the new BEAM stack stays compatible
   with the orchestration layering rule (interface packages do not
-  depend on `neonfs_core`). Sub-issue #532; cf. #284 (NFSv3 epic) and
-  #113 (native-BEAM NFS epic).
+  depend on `neonfs_core`).
 
   ## Filehandle scheme
 
@@ -273,7 +272,7 @@ defmodule NeonFS.NFS.NFSv3Backend do
     case resolve_meta(fh, squashed_identity(auth, fh), peer(ctx)) do
       {:ok, _vol_name, _path, meta} ->
         # Capacity reporting is per-cluster, not per-volume; return
-        # generous fixed values until #321 lands a Prometheus-backed
+        # generous fixed values until a Prometheus-backed
         # forecaster the NFS layer can query.
         reply = %{
           tbytes: 1 <<< 50,
@@ -453,7 +452,7 @@ defmodule NeonFS.NFS.NFSv3Backend do
   end
 
   # Tags the write with the caller's identity for `Authorise.check`,
-  # kept separate from the new file's owner uid/gid (#1230).
+  # kept separate from the new file's owner uid/gid.
   defp with_auth_identity(opts, identity) do
     Keyword.merge(opts,
       auth_uid: Keyword.get(identity, :uid, 0),
@@ -485,7 +484,7 @@ defmodule NeonFS.NFS.NFSv3Backend do
   # NFSv3 wire-status atoms — the keys of `@stat_codes` in
   # `tahr/lib/tahr/nfsv3/types.ex`. Any error atom returned
   # from this backend MUST belong to this set or the dispatcher's
-  # `Map.fetch!` will crash mid-response (issue #760).
+  # `Map.fetch!` will crash mid-response.
   @nfsstat3_atoms ~w[
     ok perm noent io nxio acces exist xdev nodev notdir isdir inval
     fbig nospc rofs mlink nametoolong notempty dquot stale remote
@@ -511,7 +510,7 @@ defmodule NeonFS.NFS.NFSv3Backend do
   defp to_nfs_status(:is_directory), do: :isdir
   defp to_nfs_status(:not_supported), do: :notsupp
   defp to_nfs_status(:read_only), do: :rofs
-  # A frozen cluster (#1378) is a temporary maintenance pause: JUKEBOX
+  # A frozen cluster is a temporary maintenance pause: JUKEBOX
   # tells the client to retry rather than surfacing a hard error.
   defp to_nfs_status(:cluster_frozen), do: :jukebox
   defp to_nfs_status(:name_too_long), do: :nametoolong
@@ -911,9 +910,9 @@ defmodule NeonFS.NFS.NFSv3Backend do
 
   # RFC 1813 §3.3.7 `committed` — the achieved stability, which must be at
   # least what the client requested. `write_ack: :quorum`/`:all` volumes
-  # block to `min_copies` on ack (#1501/#1506), so they're `:file_sync`. A
+  # block to `min_copies` on ack, so they're `:file_sync`. A
   # `write_ack: :local` volume acks after one local copy: an UNSTABLE write
-  # reports `:unstable` (the client COMMITs → `sync_file` barrier → #1509),
+  # reports `:unstable` (the client COMMITs → `sync_file` barrier),
   # while a DATA_SYNC/FILE_SYNC request — which we may not answer with a
   # weaker level — runs the barrier inline and reports `:file_sync`, or
   # fails the WRITE if the barrier can't reach `min_copies` right now.
@@ -932,7 +931,7 @@ defmodule NeonFS.NFS.NFSv3Backend do
 
   # The volume's `write_ack`, read from the locally-mirrored export record
   # (`ExportManager`, resynced on volume events) so the hot WRITE path takes
-  # no per-write `get_volume` RPC (#1509). Defaults to the volume default
+  # no per-write `get_volume` RPC. Defaults to the volume default
   # `:local` when the export isn't cached.
   defp export_write_ack(vol_name) do
     case get_export(vol_name) do
@@ -947,7 +946,7 @@ defmodule NeonFS.NFS.NFSv3Backend do
       {:ok, vol_name, path, meta} ->
         # RFC 1813 §3.3.21: flush the file's writes to stable storage. The
         # shared `sync_file` barrier blocks until every chunk has the
-        # volume's `min_copies` durable replicas (#1509) — the durability
+        # volume's `min_copies` durable replicas — the durability
         # `write_ack: :local` writes reported as `:unstable` defer to here.
         wcc = %WccData{before: wcc_attr_from_meta(meta), after: fattr_from_meta(meta)}
 
@@ -1111,8 +1110,8 @@ defmodule NeonFS.NFS.NFSv3Backend do
 
   defp identity_opts(_auth), do: [uid: @anon_uid, gids: [@anon_gid]]
 
-  # Like `identity_opts/1` but applies the export's root-squash policy
-  # (#1216): when the resolved identity is root (uid 0) and the export
+  # Like `identity_opts/1` but applies the export's root-squash policy:
+  # when the resolved identity is root (uid 0) and the export
   # squashes root, the caller is authorised as `nobody` so a remote
   # root can't act as the volume owner. The export lookup is skipped
   # for non-root callers (squash only affects uid 0) and when the
@@ -1147,8 +1146,8 @@ defmodule NeonFS.NFS.NFSv3Backend do
     :exit, _ -> {:error, :unavailable}
   end
 
-  # Per-request client IP allow-list enforcement (#1228). MOUNT is the
-  # primary gate (#1229); this refuses forged-filehandle requests from
+  # Per-request client IP allow-list enforcement. MOUNT is the
+  # primary gate; this refuses forged-filehandle requests from
   # hosts off the export's allow-list. Only a concrete peer address
   # triggers enforcement — a missing peer (nil / `:absent`, or an
   # internal resolution that doesn't carry one) fails open, since the
@@ -1178,8 +1177,8 @@ defmodule NeonFS.NFS.NFSv3Backend do
   ## Internal — resolution
 
   # Returns `{:ok, volume_name, path}` or `{:error, status}`. When a
-  # concrete `peer` is supplied the export's IP allow-list is enforced
-  # (#1228); internal callers omit it to skip the check.
+  # concrete `peer` is supplied the export's IP allow-list is enforced;
+  # internal callers omit it to skip the check.
   defp resolve_dir(fh, peer \\ nil) do
     with {:ok, _decoded, vol_name, path} <- resolve_handle(fh),
          :ok <- check_export_ip(vol_name, peer) do
@@ -1269,7 +1268,7 @@ defmodule NeonFS.NFS.NFSv3Backend do
   # instead. Recover it via the local `InodeTable` index (populated
   # by `MountBackend.resolve/2`); fall back to `Core.get_volume_by_id`
   # when the cache is empty (e.g. first request after an interface
-  # node restart). See #761.
+  # node restart).
   @synthetic_root_volume_id <<0::128>>
 
   defp resolve_vol_name_from_id(@synthetic_root_volume_id), do: ""
@@ -1362,7 +1361,7 @@ defmodule NeonFS.NFS.NFSv3Backend do
   defp core_call(module, function, args) do
     case Application.get_env(:neonfs_nfs, :core_call_fn) do
       nil ->
-        # core_call/3 routes volume-scoped metadata writes to a root holder (#1076).
+        # core_call/3 routes volume-scoped metadata writes to a root holder.
         NeonFS.Client.core_call(module, function, args)
 
       fun when is_function(fun, 3) ->
@@ -1384,7 +1383,7 @@ defmodule NeonFS.NFS.NFSv3Backend do
         # `{:ok, %{stream: ..., file_size: ...}}`. The handler's
         # `take_bytes/2` wants the raw `Enumerable.t()`, so unwrap.
         # Errors propagate through unchanged so `read/5`'s caller
-        # can map them. (#588.) `identity` carries the caller's
+        # can map them. `identity` carries the caller's
         # uid/gids so core runs `Authorise.check` against them.
         read_opts = Keyword.merge(identity, offset: offset, length: count)
 

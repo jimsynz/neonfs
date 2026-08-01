@@ -20,7 +20,7 @@ defmodule NeonFS.NFS.InodeTable do
   Uses ETS tables for fast concurrent reads:
   - `:nfs_inode_to_path` - Maps inode -> {volume_name, path}
   - `:nfs_path_to_inode` - Maps {volume_name, path} -> inode
-  - `:nfs_volume_index` - Maps volume_id_binary -> volume_name (for filehandle resolution; #761)
+  - `:nfs_volume_index` - Maps volume_id_binary -> volume_name (for filehandle resolution)
 
   ## Lifecycle
 
@@ -88,7 +88,7 @@ defmodule NeonFS.NFS.InodeTable do
   NFSv3 backend can recover the volume name from a filehandle's
   embedded volume id without an extra RPC, even when the in-memory
   inode table only carries the synthetic `{nil, "/"}` mapping for
-  `fileid: 1`. See `lookup_volume_name/1` and issue #761.
+  `fileid: 1`. See `lookup_volume_name/1`.
   """
   @spec register_volume_id(<<_::128>>, String.t()) :: :ok
   def register_volume_id(volume_id_binary, volume_name)

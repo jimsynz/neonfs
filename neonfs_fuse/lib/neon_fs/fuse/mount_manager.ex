@@ -19,7 +19,7 @@ defmodule NeonFS.FUSE.MountManager do
      session) in state.
   6. Monitor the session process for crashes.
 
-  Sub-issue #661 of #279 cut over from the legacy `fuser` NIF
+  Cut over from the legacy `fuser` NIF
   (`Native.mount/3`) to this BEAM-native stack.
 
   ## Crash Handling
@@ -158,7 +158,7 @@ defmodule NeonFS.FUSE.MountManager do
         # The state entry is dropped unconditionally — leaving it
         # behind on a `fusermount3 -u` failure strands the operator
         # with `:already_mounted` for every retry and no API to clear
-        # it short of restarting the daemon (#1016). Bookkeeping
+        # it short of restarting the daemon. Bookkeeping
         # follows kernel reality on a best-effort basis; the actual
         # unmount result is still reported to the caller.
         unmount_result = unmount_filesystem(mount_info)
@@ -251,8 +251,7 @@ defmodule NeonFS.FUSE.MountManager do
 
   # The path is checked on this FUSE node's own filesystem, so the node name
   # is part of the error: an operator who created the directory on a different
-  # host otherwise sees "not found" for a path that is plainly right there
-  # (#1358).
+  # host otherwise sees "not found" for a path that is plainly right there.
   defp validate_mount_point(mount_point) do
     expanded = Path.expand(mount_point)
 
@@ -350,7 +349,7 @@ defmodule NeonFS.FUSE.MountManager do
   # missing / not a directory / wrong owner / kernel-rejected option)
   # into one undifferentiated label. Stat the mount point to surface
   # which one fired so the operator gets an actionable error rather
-  # than `{:mount_failed, :fusermount_no_fd}`. Issue #756.
+  # than `{:mount_failed, :fusermount_no_fd}`.
   @doc false
   @spec diagnose_fusermount_no_fd(String.t(), non_neg_integer() | nil) ::
           {:fusermount_no_fd, String.t()}
@@ -406,7 +405,7 @@ defmodule NeonFS.FUSE.MountManager do
         # it, so MountManager learns of its death via `:DOWN`. Leaving them
         # linked meant `GenServer.stop(session, :shutdown)` on unmount (or a
         # session crash) propagated the exit and took the manager down with it —
-        # wedging the whole FUSE control interface until a daemon restart (#1035).
+        # wedging the whole FUSE control interface until a daemon restart.
         Process.unlink(pid)
         {:ok, pid}
 

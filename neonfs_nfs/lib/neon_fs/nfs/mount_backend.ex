@@ -14,7 +14,7 @@ defmodule NeonFS.NFS.MountBackend do
   the BEAM stack hands clients the same shape `NFSv3Backend` already
   decodes. The synthetic root uses an all-zero volume id and
   `fileid: 1` — same convention `NFSv3Backend.resolve_lookup/3`
-  recognises. Sub-issue #656 of #286.
+  recognises.
   """
 
   @behaviour Tahr.Mount.Backend
@@ -42,13 +42,13 @@ defmodule NeonFS.NFS.MountBackend do
     case lookup_export(volume_name) do
       {:ok, volume_id_binary, allowed_ips} ->
         # Per-export client IP allow-list: reject hosts not on the list
-        # before handing out a root filehandle (#1217). `ctx.peer` is the
-        # client source address (#1227); an empty list means allow-all.
+        # before handing out a root filehandle. `ctx.peer` is the
+        # client source address; an empty list means allow-all.
         if IpAllowList.allowed?(ctx[:peer], allowed_ips) do
           # Populate the volume index so the NFSv3 backend can recover
           # the volume name from a filehandle's volume id even when
           # `inode_table_get_path/1` only returns the synthetic
-          # `{nil, "/"}` mapping for `fileid: 1`. See #761.
+          # `{nil, "/"}` mapping for `fileid: 1`.
           InodeTable.register_volume_id(volume_id_binary, volume_name)
           {:ok, Filehandle.encode(volume_id_binary, @synthetic_root_fileid), @auth_flavors}
         else

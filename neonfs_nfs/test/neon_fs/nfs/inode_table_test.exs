@@ -76,7 +76,7 @@ defmodule NeonFS.NFS.InodeTableTest do
     assert {:ok, {nil, "/"}} = InodeTable.get_path(1)
   end
 
-  describe "volume_id index (issue #761)" do
+  describe "volume_id index" do
     @volume_id_bin <<0x12345678::32, 0::32, 0::32, 0::32>>
 
     test "register_volume_id then lookup_volume_name round-trips" do

@@ -785,7 +785,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
     end
   end
 
-  describe "xattr operations (#671)" do
+  describe "xattr operations" do
     # Each xattr test gets its own file so that state from one test
     # (e.g. attributes set by an earlier `setxattr`) cannot leak into
     # a sibling test under `cluster_mode: :shared`.
@@ -979,7 +979,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
     end
   end
 
-  describe "flock operations (#672)" do
+  describe "flock operations" do
     setup %{handler: handler, volume_id: volume_id, cluster: cluster} do
       name = "flock-#{System.unique_integer([:positive])}.txt"
       path = "/" <> name
@@ -1128,7 +1128,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
       assert_receive {:fuse_op_complete, 2, {"ok", _}}, @op_timeout
     end
 
-    test "blocking SETLKW waits until the conflicting holder releases (#677)",
+    test "blocking SETLKW waits until the conflicting holder releases",
          %{handler: handler, inode: ino} do
       send(
         handler,
@@ -1138,7 +1138,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
       assert_receive {:fuse_op_complete, 1, {"ok", _}}, @op_timeout
 
       # Blocking flock from a different owner — should not return
-      # immediately because the wait queue from #679 parks the
+      # immediately because the wait queue parks the
       # request until the conflict clears.
       send(
         handler,
@@ -1158,7 +1158,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
       assert_receive {:fuse_op_complete, 2, {"ok", _}}, @op_timeout
     end
 
-    test "INTERRUPT cancels a blocked SETLKW; original caller receives EINTR (#675)",
+    test "INTERRUPT cancels a blocked SETLKW; original caller receives EINTR",
          %{handler: handler, inode: ino} do
       send(
         handler,
@@ -1194,7 +1194,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
       refute_receive {:fuse_op_complete, 2, _}, 200
     end
 
-    test "INTERRUPT for an unknown request_id is a silent no-op (#675)",
+    test "INTERRUPT for an unknown request_id is a silent no-op",
          %{handler: handler} do
       # No pending flock — INTERRUPT should drop silently and the
       # Handler should remain alive.
@@ -1204,7 +1204,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
     end
   end
 
-  describe "byte-range fcntl operations (#674)" do
+  describe "byte-range fcntl operations" do
     setup %{handler: handler, volume_id: volume_id, cluster: cluster} do
       name = "fcntl-#{System.unique_integer([:positive])}.txt"
       path = "/" <> name
@@ -1381,7 +1381,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
       assert_receive {:fuse_op_complete, 3, {"ok", _}}, @op_timeout
     end
 
-    test "blocking SETLKW byte-range waits until the conflicting holder releases (#681)",
+    test "blocking SETLKW byte-range waits until the conflicting holder releases",
          %{handler: handler, inode: ino} do
       send(
         handler,
@@ -1436,7 +1436,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
       assert_receive {:fuse_op_complete, 2, {"ok", _}}, @op_timeout
     end
 
-    test "INTERRUPT cancels a blocked byte-range SETLKW; caller receives EINTR (#681)",
+    test "INTERRUPT cancels a blocked byte-range SETLKW; caller receives EINTR",
          %{handler: handler, inode: ino} do
       send(
         handler,

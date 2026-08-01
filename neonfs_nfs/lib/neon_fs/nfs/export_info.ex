@@ -2,13 +2,13 @@ defmodule NeonFS.NFS.ExportInfo do
   @moduledoc """
   Information about an exported NFS volume.
 
-  Exports are cluster state (#1175): a volume is exported when its
+  Exports are cluster state: a volume is exported when its
   `nfs_export` flag is set in the core volume registry. This struct is
   the local mirror `NeonFS.NFS.ExportManager` keeps of one such volume.
   Carrying `volume_id` lets the MOUNT/NFSv3 paths build filehandles
   without a per-lookup RPC to core. Carrying `write_ack` lets the WRITE
   path decide the RFC 1813 `committed` level (`:file_sync` vs `:unstable`)
-  without a per-WRITE `get_volume` RPC (#1509) — the mirror is resynced on
+  without a per-WRITE `get_volume` RPC — the mirror is resynced on
   volume lifecycle events, so this stays current.
   """
 
