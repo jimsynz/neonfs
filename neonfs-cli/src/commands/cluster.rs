@@ -139,10 +139,10 @@ pub enum ClusterCommand {
         tier: String,
 
         /// Replication factor to seed the `_system` volume with.
-        /// Defaults to 1; raise it on a cluster you plan to scale so
-        /// the system volume isn't pinned to single-copy storage.
-        #[arg(long = "system-replicas", default_value = "1")]
-        system_replicas: u32,
+        /// Raise it on a cluster you plan to scale so the system volume
+        /// isn't pinned to single-copy storage.
+        #[arg(long = "system-replicas")]
+        system_replicas: Option<u32>,
     },
 
     /// Join an existing cluster
@@ -494,10 +494,10 @@ impl ClusterCommand {
         name: &str,
         drive: &str,
         tier: &str,
-        system_replicas: u32,
+        system_replicas: Option<u32>,
         format: OutputFormat,
     ) -> Result<()> {
-        if system_replicas < 1 {
+        if system_replicas == Some(0) {
             return Err(crate::error::CliError::InvalidArgument(
                 "--system-replicas must be >= 1".to_string(),
             ));
@@ -516,12 +516,18 @@ impl ClusterCommand {
                     Term::Binary(Binary::from(tier.as_bytes().to_vec())),
                 ),
             ]));
-            let opts = Term::Map(Map::from([(
-                Term::Binary(Binary::from(b"system_replicas".to_vec())),
-                Term::FixInteger(FixInteger {
-                    value: system_replicas as i32,
-                }),
-            )]));
+            // Omitted rather than defaulted. A defaulted scalar cannot
+            // express "the operator said nothing", and the daemon needs that
+            // distinction to apply a default of its own.
+            let opts = match system_replicas {
+                Some(replicas) => Term::Map(Map::from([(
+                    Term::Binary(Binary::from(b"system_replicas".to_vec())),
+                    Term::FixInteger(FixInteger {
+                        value: replicas as i32,
+                    }),
+                )])),
+                None => Term::Map(Map::from([] as [(Term, Term); 0])),
+            };
             conn.call(
                 "Elixir.NeonFS.CLI.Handler",
                 "cluster_init",
@@ -2191,6 +2197,51 @@ fn print_field(map: &std::collections::HashMap<String, Term>, key: &str, label: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The daemon seeds `_system`'s replication factor from the drive count
+    // when the operator says nothing, so "omitted" and "given as 1" must not
+    // arrive looking the same. A `default_value` on the flag would collapse
+    // them, and every unit test that calls the handler directly would still
+    // pass.
+    #[test]
+    fn test_system_replicas_distinguishes_omitted_from_one() {
+        use clap::Parser;
+
+        #[derive(Parser)]
+        struct TestCli {
+            #[command(subcommand)]
+            command: ClusterCommand,
+        }
+
+        let omitted = TestCli::try_parse_from(["test", "init", "--name", "c", "--drive", "/d"])
+            .expect("init parses without --system-replicas");
+
+        match omitted.command {
+            ClusterCommand::Init {
+                system_replicas, ..
+            } => assert_eq!(system_replicas, None, "omitted must not become Some(1)"),
+            _ => panic!("expected Init"),
+        }
+
+        let given = TestCli::try_parse_from([
+            "test",
+            "init",
+            "--name",
+            "c",
+            "--drive",
+            "/d",
+            "--system-replicas",
+            "1",
+        ])
+        .expect("init parses with --system-replicas 1");
+
+        match given.command {
+            ClusterCommand::Init {
+                system_replicas, ..
+            } => assert_eq!(system_replicas, Some(1)),
+            _ => panic!("expected Init"),
+        }
+    }
 
     #[test]
     fn test_rebalance_command_parsing() {
