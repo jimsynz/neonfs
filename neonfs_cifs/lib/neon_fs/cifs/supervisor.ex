@@ -37,14 +37,17 @@ defmodule NeonFS.CIFS.Supervisor do
   def init(_opts) do
     register? = Application.get_env(:neonfs_cifs, :register_service, true)
 
+    # The handle registry is node-wide and outlives any one connection, so it
+    # starts whether or not the listener does — a handle opened through one
+    # connection has to remain usable through another (#1609).
     children =
       case listener_child_spec() do
         {:ok, listener} ->
-          [listener] |> maybe_add_registrar(register?)
+          [NeonFS.CIFS.HandleRegistry, listener] |> maybe_add_registrar(register?)
 
         {:skip, message} ->
           Logger.warning("CIFS listener disabled: #{message}")
-          []
+          [NeonFS.CIFS.HandleRegistry]
       end
 
     Supervisor.init(children, strategy: :one_for_one)

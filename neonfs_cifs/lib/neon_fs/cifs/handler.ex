@@ -49,6 +49,7 @@ defmodule NeonFS.CIFS.Handler do
 
   require Logger
 
+  alias NeonFS.CIFS.HandleRegistry
   alias NeonFS.Client.ChunkReader
 
   @stat_identity_domain "neonfs-cifs-stat-v1"
@@ -57,7 +58,6 @@ defmodule NeonFS.CIFS.Handler do
   @type state :: %{
           required(:volume) => String.t() | nil,
           required(:next_handle) => non_neg_integer(),
-          required(:files) => %{non_neg_integer() => {String.t(), String.t(), atom()}},
           required(:dirs) => %{
             non_neg_integer() => [{String.t(), String.t(), non_neg_integer()}]
           }
@@ -119,7 +119,7 @@ defmodule NeonFS.CIFS.Handler do
   defp do_handle(:disconnect, _args, _state) do
     # Best-effort: C shim is also tearing down, so we just blank
     # the per-connection state and let `handle_close/2` run.
-    {{:ok, %{}}, %{volume: nil, next_handle: 1, files: %{}, dirs: %{}}}
+    {{:ok, %{}}, %{volume: nil, next_handle: 1, dirs: %{}}}
   end
 
   ## Metadata
@@ -134,24 +134,24 @@ defmodule NeonFS.CIFS.Handler do
     do: with_volume(state, &fetch_stat(&1, path, &2))
 
   defp do_handle(:fstat, %{"handle" => handle}, state) do
-    case Map.fetch(state.files, handle) do
-      {:ok, {volume, path, _flags}} -> fetch_stat(volume, path, state)
-      :error -> {{:error, :ebadf}, state}
-    end
+    with_handle(handle, state, fn %{volume: volume, file_id: file_id} ->
+      with {:ok, file} <- core_call(NeonFS.Core, :get_file_meta_by_id, [volume, file_id]),
+           {:ok, stat} <- stat_term(file) do
+        {{:ok, %{stat: stat}}, state}
+      else
+        {:error, reason} -> {{:error, errno_for(reason)}, state}
+      end
+    end)
   end
 
   defp do_handle(:fchmod, %{"handle" => handle, "mode" => mode}, state)
        when is_integer(mode) do
-    case Map.fetch(state.files, handle) do
-      {:ok, {volume, path, _flags}} ->
-        case core_call(NeonFS.Core, :update_file_meta, [volume, path, [mode: mode]]) do
-          {:ok, _meta} -> {{:ok, %{}}, state}
-          {:error, reason} -> {{:error, errno_for(reason)}, state}
-        end
-
-      :error ->
-        {{:error, :ebadf}, state}
-    end
+    with_handle(handle, state, fn %{volume: volume, file_id: file_id} ->
+      case core_call(NeonFS.Core, :update_file_meta_by_id, [volume, file_id, [mode: mode]]) do
+        {:ok, _meta} -> {{:ok, %{}}, state}
+        {:error, reason} -> {{:error, errno_for(reason)}, state}
+      end
+    end)
   end
 
   defp do_handle(:fchown, _args, state) do
@@ -164,21 +164,17 @@ defmodule NeonFS.CIFS.Handler do
 
   defp do_handle(:fntimes, %{"handle" => handle, "atime" => atime, "mtime" => mtime}, state)
        when is_integer(atime) and is_integer(mtime) do
-    case Map.fetch(state.files, handle) do
-      {:ok, {volume, path, _flags}} ->
-        updates = [
-          accessed_at: DateTime.from_unix!(atime),
-          modified_at: DateTime.from_unix!(mtime)
-        ]
+    with_handle(handle, state, fn %{volume: volume, file_id: file_id} ->
+      updates = [
+        accessed_at: DateTime.from_unix!(atime),
+        modified_at: DateTime.from_unix!(mtime)
+      ]
 
-        case core_call(NeonFS.Core, :update_file_meta, [volume, path, updates]) do
-          {:ok, _meta} -> {{:ok, %{}}, state}
-          {:error, reason} -> {{:error, errno_for(reason)}, state}
-        end
-
-      :error ->
-        {{:error, :ebadf}, state}
-    end
+      case core_call(NeonFS.Core, :update_file_meta_by_id, [volume, file_id, updates]) do
+        {:ok, _meta} -> {{:ok, %{}}, state}
+        {:error, reason} -> {{:error, errno_for(reason)}, state}
+      end
+    end)
   end
 
   ## File I/O
@@ -187,78 +183,60 @@ defmodule NeonFS.CIFS.Handler do
     create_mode = Map.get(args, "mode", 0o644)
 
     with_volume(state, fn volume, state ->
-      case open_or_create(volume, path, flags, create_mode) do
-        {:ok, _file} ->
-          {handle, state} = mint_handle(state)
-          state = %{state | files: Map.put(state.files, handle, {volume, path, flags})}
-          {{:ok, %{handle: handle}}, state}
-
-        {:error, reason} ->
-          {{:error, errno_for(reason)}, state}
+      with {:ok, file} <- open_or_create(volume, path, flags, create_mode),
+           {:ok, claim_id} <- pin_file(volume, path),
+           {:ok, handle} <- HandleRegistry.open(volume, file.id, flags, claim_id, self()) do
+        {{:ok, %{handle: handle}}, state}
+      else
+        {:error, reason} -> {{:error, errno_for(reason)}, state}
       end
     end)
   end
 
   defp do_handle(:close, %{"handle" => handle}, state) do
-    case Map.fetch(state.files, handle) do
-      {:ok, _} -> {{:ok, %{}}, %{state | files: Map.delete(state.files, handle)}}
+    case HandleRegistry.close(handle) do
+      :ok -> {{:ok, %{}}, state}
       :error -> {{:error, :ebadf}, state}
     end
   end
 
   defp do_handle(:pread, %{"handle" => handle, "offset" => offset, "size" => size}, state)
        when is_integer(offset) and is_integer(size) and size >= 0 do
-    case Map.fetch(state.files, handle) do
-      {:ok, {volume, path, _flags}} ->
-        case ChunkReader.read_file(volume, path, offset: offset, length: size) do
-          {:ok, data} -> {{:ok, %{data: data}}, state}
-          {:error, reason} -> {{:error, errno_for(reason)}, state}
-        end
-
-      :error ->
-        {{:error, :ebadf}, state}
-    end
+    with_handle(handle, state, fn %{volume: volume, file_id: file_id} ->
+      case ChunkReader.read_file_by_id(volume, file_id, offset: offset, length: size) do
+        {:ok, data} -> {{:ok, %{data: data}}, state}
+        {:error, reason} -> {{:error, errno_for(reason)}, state}
+      end
+    end)
   end
 
   defp do_handle(:pwrite, %{"handle" => handle, "offset" => offset, "data" => data}, state)
        when is_integer(offset) and is_binary(data) do
-    case Map.fetch(state.files, handle) do
-      {:ok, {volume, path, _flags}} ->
-        case core_call(NeonFS.Core, :write_file_at, [volume, path, offset, data]) do
-          {:ok, _file} -> {{:ok, %{written: byte_size(data)}}, state}
-          {:error, reason} -> {{:error, errno_for(reason)}, state}
-        end
-
-      :error ->
-        {{:error, :ebadf}, state}
-    end
+    with_handle(handle, state, fn %{volume: volume, file_id: file_id} ->
+      case core_call(NeonFS.Core, :write_file_at_by_id, [volume, file_id, offset, data]) do
+        {:ok, _file} -> {{:ok, %{written: byte_size(data)}}, state}
+        {:error, reason} -> {{:error, errno_for(reason)}, state}
+      end
+    end)
   end
 
   defp do_handle(:fsync, %{"handle" => handle}, state) do
-    case Map.fetch(state.files, handle) do
-      {:ok, {volume, path, _flags}} ->
-        case NeonFS.Client.sync_file(volume, path) do
-          :ok -> {{:ok, %{}}, state}
-          {:error, reason} -> {{:error, errno_for(reason)}, state}
-        end
-
-      :error ->
-        {{:error, :ebadf}, state}
-    end
+    with_handle(handle, state, fn %{volume: volume, file_id: file_id} ->
+      case NeonFS.Client.sync_file_by_id(volume, file_id) do
+        :ok -> {{:ok, %{}}, state}
+        {:error, reason} -> {{:error, errno_for(reason)}, state}
+      end
+    end)
   end
 
   defp do_handle(:ftruncate, %{"handle" => handle, "size" => size}, state)
        when is_integer(size) and size >= 0 do
-    case Map.fetch(state.files, handle) do
-      {:ok, {volume, path, _flags}} ->
-        case core_call(NeonFS.Core, :truncate_file, [volume, path, size]) do
-          {:ok, _} -> {{:ok, %{}}, state}
-          {:error, reason} -> {{:error, errno_for(reason)}, state}
-        end
-
-      :error ->
-        {{:error, :ebadf}, state}
-    end
+    with_handle(handle, state, fn %{volume: volume, file_id: file_id} ->
+      case core_call(NeonFS.Core, :truncate_file_by_id, [volume, file_id, size]) do
+        {:ok, _} -> {{:ok, %{}}, state}
+        {:error, reason} -> {{:error, errno_for(reason)}, state}
+      end
+    end)
   end
 
   ## Directories
@@ -337,12 +315,14 @@ defmodule NeonFS.CIFS.Handler do
   # Open handles track paths, so a successful rename must not strand
   # them: smbd's atomic mkdir creates under a tmp name, renames, then
   # fstats the still-open handle (open.c `mkdir_internal`), and an
-  # SETINFO rename likewise targets an already-open file. Rewrite any
-  # handle whose path is the renamed entry or lives beneath it (#1555).
+  # No handle rewriting: file handles are keyed by `{volume, file_id}` in the
+  # node-wide registry, so a rename does not move what they refer to. The
+  # rewriting this used to do only ever fixed the single-connection case
+  # anyway (#1609).
   defp do_handle(:renameat, %{"old_path" => old, "new_path" => new}, state) do
     with_volume(state, fn volume, state ->
       case core_call(NeonFS.Core, :rename_file, [volume, old, new]) do
-        :ok -> {{:ok, %{}}, rewrite_handle_paths(state, old, new)}
+        :ok -> {{:ok, %{}}, state}
         {:error, reason} -> {{:error, errno_for(reason)}, state}
       end
     end)
@@ -378,26 +358,36 @@ defmodule NeonFS.CIFS.Handler do
 
   ## Helpers
 
+  # The identity pin (#1605) keeps the file reachable through this handle
+  # across a rename and survives an unlink until every handle closes. A
+  # coordinator that cannot issue one is not a reason to refuse the open —
+  # the handle simply carries no pin, matching how FUSE behaved before #1612
+  # tightened it. Recorded rather than silently dropped so the registry can
+  # tell "no pin" from "pin to release".
+  defp pin_file(volume, path) do
+    case core_call(NeonFS.Core, :pin_file, [volume, path, self()]) do
+      {:ok, %{claim_id: claim_id}} -> {:ok, claim_id}
+      {:error, _reason} -> {:ok, nil}
+    end
+  catch
+    :exit, _ -> {:ok, nil}
+  end
+
   defp with_volume(%{volume: nil} = state, _fun), do: {{:error, :enotconn}, state}
   defp with_volume(state, fun), do: fun.(state.volume, state)
 
-  defp rewrite_handle_paths(state, old, new) do
-    files =
-      Map.new(state.files, fn {handle, {volume, path, flags}} ->
-        {handle, {volume, rewrite_path(path, old, new), flags}}
-      end)
-
-    %{state | files: files}
-  end
-
-  defp rewrite_path(path, old, new) do
-    cond do
-      path == old -> new
-      String.starts_with?(path, old <> "/") -> new <> String.trim_leading(path, old)
-      true -> path
+  # Every fd-bearing op resolves through the node-wide registry, so a handle
+  # opened on one connection works on another and none of them re-resolve a
+  # path that a concurrent rename or unlink may have moved (#1609).
+  defp with_handle(handle, state, fun) do
+    case HandleRegistry.fetch(handle) do
+      {:ok, entry} -> fun.(entry)
+      :error -> {{:error, :ebadf}, state}
     end
   end
 
+  # Directory handles only — file handles are minted by the node-wide
+  # registry. Directory-handle pinning is out of scope on #1590.
   defp mint_handle(state) do
     handle = state.next_handle
     {handle, %{state | next_handle: handle + 1}}

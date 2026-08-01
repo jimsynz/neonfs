@@ -43,7 +43,9 @@ defmodule NeonFS.CIFS.SupervisorTest do
     assert log =~ "enotdir"
     refute File.exists?(socket_path)
 
+    # The handle registry is node-wide and starts regardless; only the
+    # listener is withheld.
     children = Supervisor.which_children(NeonFS.CIFS.Supervisor)
-    assert children == []
+    assert [{NeonFS.CIFS.HandleRegistry, _, :worker, _}] = children
   end
 end
