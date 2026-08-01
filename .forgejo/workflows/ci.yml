@@ -440,13 +440,19 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # One shard per amd64 runner, and there are two. Going wider does not
+        # add parallelism — the scheduler just puts two shards on one host,
+        # where they share its disk and ephemeral port range while each boots
+        # multi-node peer clusters. Four shards did exactly that and exhausted
+        # both. Raise this only alongside the runner count.
+        #
         # A literal list, never a computed one: a matrix over an empty list
         # creates no job at all, and `canary`'s `needs` on it then can never
-        # be satisfied. Keep `partitions` below in step with its length.
-        partition: [1, 2, 3, 4]
-    # A shard is roughly a quarter of a ~34-minute suite plus ~5 minutes of
-    # setup. Headroom over that, not an open-ended limit: a genuinely wedged
-    # shard must still fail rather than sit for an hour (#1643).
+        # be satisfied. Keep `--partitions` below in step with its length.
+        partition: [1, 2]
+    # A shard is roughly half of a ~34-minute suite plus ~5 minutes of setup.
+    # Headroom over that, not an open-ended limit: a genuinely wedged shard
+    # must still fail rather than sit for an hour.
     timeout-minutes: 45
     container:
       image: ${{ needs.setup.outputs.elixir_rust_image }}
@@ -463,7 +469,7 @@ jobs:
       #
       # Every shard gets one: `mix test --partitions` distributes files
       # round-robin over their sorted names, so the containerd tests can
-      # land in any shard.
+      # land in either shard.
       registry:
         image: registry:3
     steps:
@@ -532,11 +538,11 @@ jobs:
             oci-archive:test/fixtures/test-image.tar \
             docker://registry:5000/neonfs-test-image:v1
 
-      - name: Test (shard ${{ matrix.partition }} of 4)
+      - name: Test (shard ${{ matrix.partition }} of 2)
         working-directory: neonfs_integration
         env:
           MIX_TEST_PARTITION: ${{ matrix.partition }}
-        run: mix test --partitions 4
+        run: mix test --partitions 2
 
   canary:
     needs:
