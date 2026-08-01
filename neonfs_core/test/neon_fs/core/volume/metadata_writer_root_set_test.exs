@@ -151,27 +151,49 @@ defmodule NeonFS.Core.Volume.MetadataWriterRootSetTest do
     end
   end
 
-  # The ambiguous case: the command committed, but the caller was told it
-  # failed. #1589's bar asks for idempotent recovery here; the writer instead
-  # treats a timeout as terminal — only `:stale_pointer` is retried — so the
-  # caller is told the operation failed when it durably succeeded.
-  #
-  # This test documents the current behaviour rather than the desired one.
-  # Widening the retry is a mechanism change, not test coverage, and is
-  # tracked in #1700; the CAS expectation would make it safe, since a
-  # re-submission after a landed write sees `:stale_pointer`, rebuilds and
-  # converges. Flip this to `{:ok, _}` when that lands.
-  test "an ambiguous publication is reported as failed and not retried", ctx do
+  # The ambiguous case: the command may have committed, but the reply never
+  # arrived. Reporting it as a failure would tell the caller its operation
+  # aborted while the metadata is durable and visible to every reader, so
+  # the writer re-submits instead and converges.
+  test "an ambiguous publication is re-submitted rather than reported failed", ctx do
     mutations = mutations_on_distinct_shards(3)
     opts = capturing_opts(ctx, lose_first_response: true)
 
-    assert {:error, {:bootstrap_update_failed, :timeout}} =
+    assert {:ok, roots} = MetadataWriter.apply_batch("vol-1", mutations, opts)
+    assert map_size(roots) == 3
+
+    assert [first, second] = captured(ctx),
+           "the lost reply is retried, so there are exactly two submissions"
+
+    assert {:cas_update_volume_roots, "vol-1", published} = first
+
+    assert {:cas_update_volume_roots, "vol-1", ^published} = second,
+           "the retry publishes the same participant set"
+  end
+
+  # The retry is bounded by the same budget as a CAS conflict, so a cluster
+  # that never answers surfaces an error instead of spinning forever.
+  test "an endlessly ambiguous publication exhausts the retry budget", ctx do
+    mutations = mutations_on_distinct_shards(2)
+    opts = capturing_opts(ctx, registrar_result: {:error, :timeout}, cas_retries: 2)
+
+    assert {:error, {:cas_retries_exhausted, %{}}} =
              MetadataWriter.apply_batch("vol-1", mutations, opts)
 
-    assert [{:cas_update_volume_roots, "vol-1", published}] = captured(ctx),
-           "exactly one submission — the timeout is not retried"
+    assert length(captured(ctx)) == 3, "the initial attempt plus its two retries"
+  end
 
-    assert map_size(published) == 3
+  # An unambiguous non-commit is not the same thing: the command definitely
+  # did not reach consensus, so there is no unknown outcome to resolve and
+  # re-submitting would only be retrying an unavailable cluster.
+  test "an unambiguous failure surfaces on the first attempt", ctx do
+    mutations = mutations_on_distinct_shards(2)
+    opts = capturing_opts(ctx, registrar_result: {:error, :no_leader})
+
+    assert {:error, {:bootstrap_update_failed, :no_leader}} =
+             MetadataWriter.apply_batch("vol-1", mutations, opts)
+
+    assert length(captured(ctx)) == 1
   end
 
   # The flush window is the atomic unit: callers sharing a batch share fate.

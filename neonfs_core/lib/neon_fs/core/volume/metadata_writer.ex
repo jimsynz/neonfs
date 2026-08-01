@@ -37,6 +37,16 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
   re-colliding on every attempt (#1219 — the high-concurrency
   write-burst test exhausted an immediate-retry budget).
 
+  The same budget covers *ambiguous* publications. A Ra command that
+  times out has not necessarily failed to commit — the reply merely
+  did not arrive — so surfacing the timeout would tell the caller its
+  operation aborted while the metadata may already be durable. The
+  writer re-submits instead, which converges because the expectation
+  is re-read on every attempt and every batch mutation is idempotent
+  under a second application. Unambiguous non-commits (`:no_leader`,
+  a downed node) and rejections the state machine will repeat
+  (`:not_found`) still surface immediately.
+
   Each external dependency is injectable via opts so unit tests
   drive the function with deterministic stubs (same pattern as
   `Volume.Provisioner` from #810 and `MetadataReader` from #820).
@@ -388,19 +398,21 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
            replicate_tree_nodes(written_nodes, replica_drives, advanced_segment.durability, opts),
          {:ok, new_root_chunk_hash} <-
            replicate_metadata_chunk(encoded, replica_drives, advanced_segment.durability, opts) do
-      case update_bootstrap(
-             volume_id,
-             shard,
-             root_entry.root_chunk_hash,
-             new_root_chunk_hash,
-             replica_drives,
-             advanced_segment,
-             opts
-           ) do
-        {:ok, _} ->
+      volume_id
+      |> update_bootstrap(
+        shard,
+        root_entry.root_chunk_hash,
+        new_root_chunk_hash,
+        replica_drives,
+        advanced_segment,
+        opts
+      )
+      |> publication_outcome()
+      |> case do
+        :published ->
           {:ok, new_root_chunk_hash}
 
-        {:error, {:bootstrap_update_failed, {:stale_pointer, _info}}} ->
+        :resubmit ->
           cas_backoff(opts, retries_left)
           do_apply_index_op(volume_id, shard, index_kind, opts, tree_op, retries_left - 1)
 
@@ -434,11 +446,14 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
   # all of them rather than patching up the loser.
   defp do_apply_batch(volume_id, by_shard, opts, retries_left) do
     with {:ok, prepared} <- prepare_shards(volume_id, by_shard, opts) do
-      case publish_root_set(volume_id, prepared, opts) do
-        {:ok, _} ->
+      volume_id
+      |> publish_root_set(prepared, opts)
+      |> publication_outcome()
+      |> case do
+        :published ->
           {:ok, Map.new(prepared, fn {shard, %{new_root: root}} -> {shard, root} end)}
 
-        {:error, {:bootstrap_update_failed, {:stale_pointer, _info}}} ->
+        :resubmit ->
           cas_backoff(opts, retries_left)
           do_apply_batch(volume_id, by_shard, opts, retries_left - 1)
 
@@ -447,6 +462,42 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
       end
     end
   end
+
+  # Classifies a publication attempt into what the caller should do next.
+  #
+  # A moved expectation must be rebuilt and re-submitted: the segments were
+  # built against roots that have since flipped.
+  #
+  # An *ambiguous* outcome must be too, and this is the less obvious half.
+  # `:ra.process_command/3` timing out does not mean the command failed to
+  # commit — only that the reply did not arrive. Surfacing it tells the
+  # caller its operation aborted while the metadata may already be durable
+  # and visible to every reader, which is the one answer that is definitely
+  # wrong. Re-submitting is safe because the expectation is re-read on each
+  # attempt: if the first attempt never landed the state is unchanged and
+  # the retry simply succeeds, and if it did land the retry rebuilds on top
+  # of its own committed write. Every mutation a batch can carry is
+  # idempotent under that second application — `put` and `delete` trivially,
+  # and `merge` because it overwrites a fixed field set rather than reading
+  # and incrementing.
+  #
+  # Nothing else is re-submitted. The state machine rejects a checked root
+  # set with exactly `:stale_pointer` or `:not_found`, and it will reject
+  # `:not_found` identically however many times it is asked; the remaining
+  # reasons (`:no_leader`, `:noproc`, a downed node) are unambiguous
+  # non-commits, so re-submitting them would be retrying an unavailable
+  # cluster rather than resolving an unknown outcome.
+  defp publication_outcome({:ok, _}), do: :published
+
+  defp publication_outcome({:error, {:bootstrap_update_failed, {:stale_pointer, _info}}}),
+    do: :resubmit
+
+  defp publication_outcome({:error, {:bootstrap_update_failed, :timeout}}), do: :resubmit
+
+  defp publication_outcome({:error, {:bootstrap_update_failed, {:timeout, _server}}}),
+    do: :resubmit
+
+  defp publication_outcome({:error, _} = err), do: err
 
   # The expensive half of a commit — CoW tree rebuild, segment encode, and
   # tree-node + segment replication — is per-shard and I/O bound, so it runs
@@ -585,19 +636,21 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
          {:ok, replica_drives} <- pick_replica_drives(root_entry, opts),
          {:ok, new_root_chunk_hash} <-
            replicate_metadata_chunk(encoded, replica_drives, updated_segment.durability, opts) do
-      case update_bootstrap(
-             volume_id,
-             shard,
-             root_entry.root_chunk_hash,
-             new_root_chunk_hash,
-             replica_drives,
-             updated_segment,
-             opts
-           ) do
-        {:ok, _} ->
+      volume_id
+      |> update_bootstrap(
+        shard,
+        root_entry.root_chunk_hash,
+        new_root_chunk_hash,
+        replica_drives,
+        updated_segment,
+        opts
+      )
+      |> publication_outcome()
+      |> case do
+        :published ->
           {:ok, new_root_chunk_hash}
 
-        {:error, {:bootstrap_update_failed, {:stale_pointer, _info}}} ->
+        :resubmit ->
           cas_backoff(opts, retries_left)
           do_apply_segment_op(volume_id, opts, transform, retries_left - 1)
 
