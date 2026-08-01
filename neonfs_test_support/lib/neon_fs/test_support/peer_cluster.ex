@@ -1207,7 +1207,40 @@ defmodule NeonFS.TestSupport.PeerCluster do
     end
   end
 
-  defp next_port_offset, do: :erlang.unique_integer([:positive, :monotonic])
+  # A dedicated counter, not `rem(unique_integer(...), width)`. `unique_integer`
+  # is shared with every other caller in the VM, so its values jump by however
+  # much other code consumed in between — and two allocations separated by a
+  # multiple of the band width alias onto the same port. Interleaving
+  # allocations with unrelated `unique_integer` calls, as a real suite does,
+  # produced 13 duplicates in 400. Duplicate ports mean two peers are told to
+  # listen on one, which surfaces far away as cluster timeouts and dead
+  # data-plane calls.
+  defp next_port_offset do
+    :atomics.add_get(port_counter(), 1, 1)
+  end
+
+  defp port_counter do
+    case :persistent_term.get({__MODULE__, :port_counter}, nil) do
+      nil -> install_port_counter()
+      counter -> counter
+    end
+  end
+
+  # Racing initialisers would each install their own counter and hand out the
+  # same low offsets twice, so installation happens once under a lock.
+  defp install_port_counter do
+    :global.trans({{__MODULE__, :port_counter}, self()}, fn ->
+      case :persistent_term.get({__MODULE__, :port_counter}, nil) do
+        nil ->
+          counter = :atomics.new(1, signed: false)
+          :persistent_term.put({__MODULE__, :port_counter}, counter)
+          counter
+
+        counter ->
+          counter
+      end
+    end)
+  end
 
   defp build_code_paths do
     # Include ALL code paths, not just _build - we need Elixir's stdlib too.

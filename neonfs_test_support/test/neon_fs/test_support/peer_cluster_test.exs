@@ -46,10 +46,20 @@ defmodule NeonFS.TestSupport.PeerClusterTest do
       assert port < ephemeral_floor
     end
 
-    test "never repeats a port" do
-      ports = for _ <- 1..500, do: PeerCluster.allocate_peer_port()
+    # Interleaved with unrelated `unique_integer` traffic, which is how a real
+    # suite calls this. Back-to-back allocations cannot catch the failure this
+    # guards: deriving the offset from the VM-wide `unique_integer` counter
+    # aliases two allocations onto one port whenever they are separated by a
+    # multiple of the band width, and only intervening consumers create gaps
+    # that large. The naive version produced 13 duplicates in 400.
+    test "never repeats a port, even with other unique_integer consumers interleaved" do
+      ports =
+        for _ <- 1..400 do
+          for _ <- 1..:rand.uniform(40), do: System.unique_integer([:positive, :monotonic])
+          PeerCluster.allocate_peer_port()
+        end
 
-      assert length(Enum.uniq(ports)) == 500
+      assert length(Enum.uniq(ports)) == length(ports)
     end
 
     test "assigns something bindable" do
