@@ -58,7 +58,7 @@ defmodule NeonFS.Cluster.StateTest do
     end
   end
 
-  describe "meta_dir/0 env-var fallback (#1137)" do
+  describe "meta_dir/0 env-var fallback" do
     setup do
       saved =
         Map.new(["NEONFS_META_DIR", "NEONFS_DATA_DIR"], fn var -> {var, System.get_env(var)} end)

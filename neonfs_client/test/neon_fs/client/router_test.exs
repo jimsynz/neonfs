@@ -51,7 +51,7 @@ defmodule NeonFS.Client.RouterTest do
     end
   end
 
-  describe "volume_metadata_call_by_id/4 (#1087)" do
+  describe "volume_metadata_call_by_id/4" do
     test "dispatches to a reachable root holder resolved by volume id" do
       stub(RootPlacement, :get_by_id, fn "vol-id" -> {:ok, [Node.self()]} end)
       stub(Discovery, :get_core_nodes, fn -> [Node.self()] end)

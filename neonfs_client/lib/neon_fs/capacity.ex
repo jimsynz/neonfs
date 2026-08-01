@@ -5,7 +5,7 @@ defmodule NeonFS.Capacity do
 
   Shared by core's drive configuration (`NeonFS.Core.DriveConfig`
   delegates here) and the cluster-state validator, which lives in
-  `neonfs_client` so any node type can persist `cluster.json` (#1160).
+  `neonfs_client` so any node type can persist `cluster.json`.
   """
 
   @mib 1024 * 1024

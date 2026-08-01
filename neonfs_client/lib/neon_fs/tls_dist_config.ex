@@ -71,7 +71,7 @@ defmodule NeonFS.TLSDistConfig do
   We deliberately do NOT keep the local cert as a fallback alongside the
   cluster cert: OTP's TLS 1.3 `certs_keys` selection cannot be relied on to
   pick the cluster cert for a peer connection, and when it picks the local
-  (self-signed) cert the peer rejects it with "Unknown CA" (#1033). Every
+  (self-signed) cert the peer rejects it with "Unknown CA". Every
   verifier — peer nodes and the local CLI — trusts the cluster CA via
   `ca_bundle.crt` once the node has joined, so presenting the cluster cert
   alone is both sufficient and unambiguous.
@@ -124,7 +124,7 @@ defmodule NeonFS.TLSDistConfig do
   @doc """
   Atomically installs a new node cert + key into the local TLS dir.
 
-  Used by the `cluster ca rotate` orchestrator (#692) during the
+  Used by the `cluster ca rotate` orchestrator during the
   rolling reissue: each node's existing cluster cert is replaced with
   one signed by the staged incoming CA. Writes both files via
   temp-file + rename so a crash mid-write leaves the existing

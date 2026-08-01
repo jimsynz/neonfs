@@ -320,7 +320,7 @@ defmodule NeonFS.TLSDistConfigTest do
 
       # Only the cluster cert is presented — listing the local cert as a
       # fallback lets OTP's TLS 1.3 selection pick it for peer connections,
-      # which peers reject with "Unknown CA" (#1033).
+      # which peers reject with "Unknown CA".
       assert String.contains?(conf, "node.crt")
       assert String.contains?(conf, "node.key")
       refute String.contains?(conf, "node-local.crt")

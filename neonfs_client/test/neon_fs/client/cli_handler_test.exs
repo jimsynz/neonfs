@@ -5,7 +5,7 @@ defmodule NeonFS.Client.CLIHandlerTest do
   alias NeonFS.Client.CLIHandler
   alias NeonFS.Client.Join
 
-  describe "join_cluster/3 type resolution (#1161)" do
+  describe "join_cluster/3 type resolution" do
     test "rejects a type string that is not a service type" do
       assert {:error, {:invalid_service_type, "bogus_service"}} =
                CLIHandler.join_cluster("nfs_inv_x_9_y", "node1:9568", "bogus_service")

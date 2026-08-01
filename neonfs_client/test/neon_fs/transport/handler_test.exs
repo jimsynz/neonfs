@@ -125,7 +125,7 @@ defmodule NeonFS.Transport.HandlerTest do
       :ssl.close(client)
     end
 
-    test "8-tuple response carries a :locations list for the replica fan-out (#478)", ctx do
+    test "8-tuple response carries a :locations list for the replica fan-out", ctx do
       # Dispatches that don't export replicate_after_put/5 (the stub
       # falls in this category) yield a single-entry `:locations`
       # list: the just-written local node. The handler always
@@ -185,7 +185,7 @@ defmodule NeonFS.Transport.HandlerTest do
     end
   end
 
-  describe "store_chunk/6 (RPC fallback contract, #1094)" do
+  describe "store_chunk/6 (RPC fallback contract)" do
     test "stores the chunk and returns {:ok, codec_info} with replica locations" do
       StubBlobStore.put_volume_opts("vol-1", compression: "zstd", compression_level: 5)
 

@@ -31,8 +31,8 @@ defmodule NeonFS.Client.ChunkWriterTest do
 
   defp stub_volume_lookup(volume) do
     # ChunkWriter calls Router.call/3 twice on the discovery path: the volume
-    # lookup, and a cluster drive-tier query for tier-aware target selection
-    # (#1044). Returning no tier drives makes selection fall back to the first
+    # lookup, and a cluster drive-tier query for tier-aware target
+    # selection. Returning no tier drives makes selection fall back to the first
     # discovered node, preserving the @target_node expectations below.
     stub(Router, :call, fn
       NeonFS.Core, :get_volume, ["test-vol"] -> {:ok, volume}
@@ -173,7 +173,7 @@ defmodule NeonFS.Client.ChunkWriterTest do
     end
   end
 
-  describe "write_file_stream/4 — :no_data_endpoint fallback (#1094)" do
+  describe "write_file_stream/4 — :no_data_endpoint fallback" do
     test "stores via NeonFS.Transport.Handler over distribution when no data-plane pool exists" do
       volume = volume_fixture()
       stub_discovery([@target_node])
@@ -421,7 +421,7 @@ defmodule NeonFS.Client.ChunkWriterTest do
     end
   end
 
-  describe "write_file_stream/4 — multi-replica fan-out (#478)" do
+  describe "write_file_stream/4 — multi-replica fan-out" do
     test "codec-info :locations list is carried through to the ref" do
       volume =
         volume_fixture(%{
@@ -546,7 +546,7 @@ defmodule NeonFS.Client.ChunkWriterTest do
     end
   end
 
-  describe "write_file_stream/4 — tier-aware target selection (#1044)" do
+  describe "write_file_stream/4 — tier-aware target selection" do
     test "prefers a node with an active drive in the requested tier over the first" do
       volume = volume_fixture()
       node_a = :core_a@host
@@ -606,7 +606,7 @@ defmodule NeonFS.Client.ChunkWriterTest do
     end
   end
 
-  describe "write_file_stream/4 — per-chunk failover (#1044)" do
+  describe "write_file_stream/4 — per-chunk failover" do
     @node_a :node_a@host
     @node_b :node_b@host
 

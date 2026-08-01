@@ -120,7 +120,7 @@ defmodule NeonFS.Client.ConnectionTest do
   describe "connected_core_node/0 with a co-located core (omnibus)" do
     test "returns the local node when the core ServiceRegistry runs in-process" do
       # Stand in for the NeonFS.Core.ServiceRegistry process an omnibus node
-      # registers in the same BEAM; local_core?/0 keys off this name (#1049).
+      # registers in the same BEAM; local_core?/0 keys off this name.
       registry = spawn(fn -> Process.sleep(:infinity) end)
       Process.register(registry, NeonFS.Core.ServiceRegistry)
 
@@ -178,8 +178,8 @@ defmodule NeonFS.Client.ConnectionTest do
   end
 
   # `Node.connect/1` runs in a throw-away process and reports back as
-  # `{:connect_result, node, result}` so it never blocks the GenServer loop
-  # (#1072). These cover the result handler without a real distribution dial.
+  # `{:connect_result, node, result}` so it never blocks the GenServer
+  # loop. These cover the result handler without a real distribution dial.
   describe "async connect results" do
     test "a failed result clears the in-flight `connecting` entry without connecting" do
       pid = start_supervised!({Connection, bootstrap_nodes: []})

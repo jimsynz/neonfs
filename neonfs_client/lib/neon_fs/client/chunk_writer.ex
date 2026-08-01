@@ -18,7 +18,7 @@ defmodule NeonFS.Client.ChunkWriter do
        each chunk to a core node over TLS. `:processing_volume_id` is
        set so the receiving handler applies the volume's compression /
        encryption codecs before writing to the blob store (the
-       interface-side chunking path from the #408 design note).
+       interface-side chunking path).
     3. A per-chunk `%{hash:, location:, size:}` ref is collected and
        returned in order so the caller can subsequently invoke
        `NeonFS.Core.commit_chunks/4` with `:locations` and
@@ -26,7 +26,7 @@ defmodule NeonFS.Client.ChunkWriter do
 
   ## Return shape
 
-  The spec in #450 listed `{:ok, [chunk_hash]}` — the primary output is
+  The original spec listed `{:ok, [chunk_hash]}` — the primary output is
   the ordered hash list. In practice `commit_chunks/4` also needs the
   locations map (`%{hash => [%{node, drive_id, tier}]}`) and the file's
   total byte length, both of which only the writer knows. This module
@@ -39,7 +39,7 @@ defmodule NeonFS.Client.ChunkWriter do
   `put_chunk` handler kicks off the remaining `durability.factor - 1`
   replicas via `NeonFS.Core.Replication.replicate_chunk/4` and returns
   the full location list so the commit carries every replica that
-  acknowledged (#478). The interface never fans out directly; this
+  acknowledged. The interface never fans out directly; this
   keeps a single data-plane hop from the interface per chunk and reuses
   the core-side replication path the co-located writer already has.
 
@@ -59,7 +59,7 @@ defmodule NeonFS.Client.ChunkWriter do
   that accepted a chunk — including each replica, not just the
   primary. Failures are logged and swallowed; durable orphan cleanup
   is core-side GC's job. Interface-side durable abort tracking
-  (`PendingWriteLog`) is explicitly deferred per #450.
+  (`PendingWriteLog`) is explicitly deferred.
 
   ## Process-heap footprint
 
@@ -73,8 +73,8 @@ defmodule NeonFS.Client.ChunkWriter do
   (`:ssl_gen_statem`) inside `NeonFS.Transport.ConnPool` accumulates
   pending plaintext / encrypted records while the pipeline is in
   flight. Empirically that's ≈ 3–5% of the upload size for the
-  duration of the upload window. See `#534` for the profile and the
-  reasoning behind the `#499` peak-RSS bound being set at 25% of
+  duration of the upload window. See the peak-RSS tests for the profile
+  and the reasoning behind the bound being set at 25% of
   upload size — which accommodates the TLS overhead without papering
   over a real regression.
   """
@@ -263,8 +263,8 @@ defmodule NeonFS.Client.ChunkWriter do
   end
 
   # Prefer a reachable core node that actually has an active drive in the
-  # requested tier, so a chunk is not pinned to a node that cannot store it
-  # (#1044). Falls back to the first candidate when the cluster drive view is
+  # requested tier, so a chunk is not pinned to a node that cannot store
+  # it. Falls back to the first candidate when the cluster drive view is
   # unavailable or no node advertises an active drive in the tier — the
   # receiving node still resolves the concrete drive and rejects the write if it
   # genuinely cannot place it.
@@ -347,7 +347,7 @@ defmodule NeonFS.Client.ChunkWriter do
   # already in hand, so the retry is bounded by chunk size (no whole-file
   # buffering or stream replay). The new target sticks for subsequent chunks,
   # so a node dying mid-stream doesn't fail the write. Exhausting eligible
-  # nodes aborts with the original failure (#1044).
+  # nodes aborts with the original failure.
   defp write_chunk_with_failover(data, hash, size, volume, timeout, acc) do
     case put_chunk(data, hash, volume, acc.target, timeout) do
       {:ok, codec_info, locations} ->
@@ -396,13 +396,13 @@ defmodule NeonFS.Client.ChunkWriter do
 
       :ok ->
         # Handler on older core nodes doesn't send codec info back.
-        # Fall back to the pre-#481 assumption (compression=:none,
+        # Fall back to the legacy assumption (compression=:none,
         # crypto=nil) — still wrong for compressed/encrypted volumes
         # but at least forward-compatible once every node is
         # upgraded. `original_size` equals the plaintext length we
         # just sent; there's no codec on the legacy path. Same
         # forward-compat applies to `:locations` (absent from the
-        # pre-#478 response), which falls back to the single primary
+        # legacy response), which falls back to the single primary
         # target the writer picked.
         {:ok, %{compression: :none, crypto: nil, original_size: byte_size(data)}, [target]}
 
@@ -414,8 +414,8 @@ defmodule NeonFS.Client.ChunkWriter do
   # No TLS data-plane pool exists for the target node — e.g. a single
   # co-located omnibus, where `self` has no self-pool, or any node whose
   # pool was lost. Store the chunk over Erlang distribution instead,
-  # symmetric with `ChunkReader`'s `:no_data_endpoint` read fallback
-  # (#1094). The storing core node resolves a concrete local drive and
+  # symmetric with `ChunkReader`'s `:no_data_endpoint` read fallback.
+  # The storing core node resolves a concrete local drive and
   # reports the actual replica locations, so the resulting ref is accurate
   # regardless of which node served the write.
   defp store_via_core(data, hash, volume, target) do
@@ -440,7 +440,7 @@ defmodule NeonFS.Client.ChunkWriter do
 
   # Extracts replica locations from the codec_info reply, falling back
   # to the writer's primary `target` when the handler didn't include a
-  # `:locations` key (pre-#478 core nodes). The `:locations` key is
+  # `:locations` key (legacy core nodes). The `:locations` key is
   # stripped from the codec_info before it's handed back so the codec
   # struct matches the shape downstream `ChunkMeta` builders expect.
   defp extract_codec_and_locations(codec_info, target) do

@@ -1,7 +1,7 @@
 defmodule NeonFS.TestSupport.SupervisorStartTimer do
   @moduledoc """
   Test-only collector for `NeonFS.Core.Supervisor`'s per-child start
-  telemetry (#510).
+  telemetry.
 
   `NeonFS.Core.Supervisor` wraps every child spec with a telemetry span
   rooted at `[:neonfs, :core, :supervisor, :child]`. This module attaches

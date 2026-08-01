@@ -33,7 +33,7 @@ defmodule NeonFS.Client.MixProject do
   def application do
     [
       # :inets backs the HTTP invite-redemption client in
-      # `NeonFS.Client.Join` (#1160) — without it interface releases
+      # `NeonFS.Client.Join` — without it interface releases
       # ship without :httpc and `cluster join` dies with `undef`.
       extra_applications: [:logger, :inets, :ssl],
       mod: {NeonFS.Client.Application, []}

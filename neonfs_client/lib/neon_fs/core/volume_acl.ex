@@ -14,7 +14,7 @@ defmodule NeonFS.Core.VolumeACL do
   alias NeonFS.Core.FileACL
 
   # `mode` (owner/group/other rwx) is the POSIX "world" layer the ACL
-  # previously lacked (#1339). It defaults world-writable so a fresh
+  # previously lacked. It defaults world-writable so a fresh
   # volume is usable by any authenticated client; named `entries` add
   # per-uid/gid grants. Evaluation delegates to `FileACL` so volume and
   # file authorisation share one POSIX model.
@@ -92,7 +92,7 @@ defmodule NeonFS.Core.VolumeACL do
   def has_permission?(%VolumeACL{owner_uid: uid}, uid, _supplementary_gids, _permission), do: true
 
   # Non-owners are evaluated by the shared POSIX `FileACL` logic over the
-  # volume's mode + named entries (#1339), so a named entry overrides the
+  # volume's mode + named entries, so a named entry overrides the
   # "other"/world mode (POSIX.1e precedence) and a world-writable volume
   # grants any uid that has no more-specific entry.
   def has_permission?(%VolumeACL{} = acl, uid, supplementary_gids, permission) do

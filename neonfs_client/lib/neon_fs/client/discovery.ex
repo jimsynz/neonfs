@@ -36,7 +36,7 @@ defmodule NeonFS.Client.Discovery do
   end
 
   @doc """
-  Returns the set of core nodes the cluster has marked `:draining` (#1324).
+  Returns the set of core nodes the cluster has marked `:draining`.
 
   Sourced from the cached `ServiceInfo.status` the core node stamps from
   its node lifecycle table. Routing deprioritises — does not exclude —
@@ -52,7 +52,7 @@ defmodule NeonFS.Client.Discovery do
 
   @doc """
   Returns the set of core nodes routing should deprioritise — those
-  marked `:draining` (#1324) or `:maintenance` (#1376). Both are present
+  marked `:draining` or `:maintenance`. Both are present
   but not accepting new work; routing penalises rather than excludes
   them so a cluster whose only reachable core node is off-duty still
   works.

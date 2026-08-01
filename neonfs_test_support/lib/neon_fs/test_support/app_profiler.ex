@@ -18,7 +18,7 @@ defmodule NeonFS.TestSupport.AppProfiler do
   BEAM would include apps the runner itself already started (logger,
   ssl, etc.) and produce noise.
 
-  Used by #507 to identify per-app hot-spots in the ~1.4s average
+  Identifies per-app hot-spots in the ~1.4s average
   `start_applications` phase of peer-cluster integration tests.
   """
 

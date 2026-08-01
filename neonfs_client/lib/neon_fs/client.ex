@@ -11,8 +11,8 @@ defmodule NeonFS.Client do
   # `NeonFS.Core` facade operations that mutate a volume's per-volume metadata
   # tree (and so resolve + update its root segment). Each takes the volume name
   # as its first argument, so `core_call/3` routes them to a node that holds the
-  # root — turning the #1045 remote re-dispatch into the rare case instead of
-  # paying it on every write (#1046 / #1076). Reads and volume-lifecycle ops
+  # root — turning the remote re-dispatch into the rare case instead of
+  # paying it on every write. Reads and volume-lifecycle ops
   # (create/delete_volume) stay cost-based.
   @core_metadata_writes ~w(
     commit_chunks
@@ -66,7 +66,7 @@ defmodule NeonFS.Client do
   @doc """
   Interface-agnostic `fsync`/`sync`/COMMIT durability barrier: blocks until
   every chunk of the file at `path` on `volume_name` has at least the
-  volume's `min_copies` durable replicas (#1500 / #1502).
+  volume's `min_copies` durable replicas.
 
   Every interface (FUSE fsync/flush, NFS COMMIT, CIFS fsync) calls this one
   entry point so the barrier has identical semantics everywhere. RPCs to
@@ -89,8 +89,7 @@ defmodule NeonFS.Client do
 
   @doc """
   `file_id`-keyed counterpart to `NeonFS.Core.get_file_meta/3` — `stat`
-  through an open handle whose path may have been renamed or unlinked
-  (#1606).
+  through an open handle whose path may have been renamed or unlinked.
   """
   @spec get_file_meta_by_id(String.t(), binary(), keyword()) :: {:ok, map()} | {:error, term()}
   def get_file_meta_by_id(volume_name, file_id, opts \\ []) do
@@ -99,7 +98,7 @@ defmodule NeonFS.Client do
 
   @doc """
   `file_id`-keyed counterpart to `NeonFS.Core.update_file_meta/4` —
-  `fchmod` / `fchown` / `futimens` through an open handle (#1606).
+  `fchmod` / `fchown` / `futimens` through an open handle.
   """
   @spec update_file_meta_by_id(String.t(), binary(), keyword(), keyword()) ::
           {:ok, map()} | {:error, term()}
@@ -109,7 +108,7 @@ defmodule NeonFS.Client do
 
   @doc """
   `file_id`-keyed counterpart to `NeonFS.Core.truncate_file/5` —
-  `ftruncate` through an open handle (#1606).
+  `ftruncate` through an open handle.
   """
   @spec truncate_file_by_id(String.t(), binary(), non_neg_integer(), keyword(), keyword()) ::
           {:ok, map()} | {:error, term()}
@@ -160,7 +159,7 @@ defmodule NeonFS.Client do
   @doc """
   Routes a volume-scoped metadata *write* through an id-keyed core API
   (e.g. `NeonFS.Core.WriteOperation` / `NeonFS.Core.FileIndex`) to a node
-  holding the volume's root segment, resolved by `volume_id` (#1087).
+  holding the volume's root segment, resolved by `volume_id`.
 
   For callers that hold the volume id rather than its name. Falls back to
   cost-based routing if the volume can't be resolved.

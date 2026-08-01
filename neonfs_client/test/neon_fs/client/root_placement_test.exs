@@ -69,7 +69,7 @@ defmodule NeonFS.Client.RootPlacementTest do
     end
   end
 
-  describe "get_by_id/2 (#1087)" do
+  describe "get_by_id/2" do
     test "resolves + caches under a key namespace distinct from get/2" do
       id_resolver = counting_resolver({:ok, [:core1@host]})
 

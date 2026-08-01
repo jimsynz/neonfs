@@ -7,7 +7,7 @@ defmodule NeonFS.TestSupport.MixProject do
   `neonfs_fuse`, `neonfs_s3`, `neonfs_webdav`, `neonfs_docker`, and
   any future interface package that needs a multi-node test harness.
 
-  See sub-issue #599 (foundation for #582).
+  Shared peer-cluster test scaffolding.
   """
   @version "0.5.1"
 

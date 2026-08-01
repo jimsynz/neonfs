@@ -7,7 +7,7 @@ defmodule NeonFS.Client.ChunkCache do
   the requested window out of it. Repeated or overlapping reads — the
   pathological case being containerd image unpack, which issues thousands
   of small advancing `ReaderAt` reads inside the same chunk — otherwise
-  re-fetch the whole chunk every time (#1350). This cache holds the
+  re-fetch the whole chunk every time. This cache holds the
   verified whole-chunk bytes so those reads are served from memory.
 
   ## Shape

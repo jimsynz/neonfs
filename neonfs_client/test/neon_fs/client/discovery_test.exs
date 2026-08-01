@@ -24,7 +24,7 @@ defmodule NeonFS.Client.DiscoveryTest do
     end
   end
 
-  describe "draining_core_nodes/0 (#1324)" do
+  describe "draining_core_nodes/0" do
     test "returns only the core nodes marked :draining" do
       active = ServiceInfo.new(:core_a@host, :core, status: :online)
       draining = ServiceInfo.new(:core_b@host, :core, status: :draining)
@@ -38,7 +38,7 @@ defmodule NeonFS.Client.DiscoveryTest do
     end
   end
 
-  describe "deprioritised_core_nodes/0 (#1376)" do
+  describe "deprioritised_core_nodes/0" do
     test "returns core nodes marked :draining or :maintenance" do
       online = ServiceInfo.new(:core_a@host, :core, status: :online)
       draining = ServiceInfo.new(:core_b@host, :core, status: :draining)

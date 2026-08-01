@@ -3,7 +3,7 @@ defmodule NeonFS.TestSupport.PeerClusterTest do
 
   alias NeonFS.TestSupport.PeerCluster
 
-  describe "transient_rpc_error?/1 (#1396)" do
+  describe "transient_rpc_error?/1" do
     test "retries bring-up failures expressed as bare atoms" do
       for reason <- [:nodedown, :timeout, :noconnection, :noproc] do
         assert PeerCluster.transient_rpc_error?(reason), "expected #{inspect(reason)} transient"

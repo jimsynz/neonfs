@@ -76,7 +76,7 @@ defmodule NeonFS.Client.Application do
       NeonFS.Client.Connection,
       NeonFS.Client.Discovery,
       NeonFS.Client.CostFunction,
-      # Per-volume root-placement cache for metadata-write routing (#1046);
+      # Per-volume root-placement cache for metadata-write routing;
       # resolves via Router, so it follows Discovery/CostFunction.
       NeonFS.Client.RootPlacement,
 
@@ -90,7 +90,7 @@ defmodule NeonFS.Client.Application do
       NeonFS.Transport.PoolSupervisor,
       NeonFS.Transport.PoolManager,
 
-      # Per-node whole-chunk read cache for the data-plane read path (#1355)
+      # Per-node whole-chunk read cache for the data-plane read path
       NeonFS.Client.ChunkCache
     ]
   end

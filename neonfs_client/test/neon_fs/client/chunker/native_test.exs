@@ -1,6 +1,6 @@
 defmodule NeonFS.Client.Chunker.NativeTest do
   @moduledoc """
-  Smoke tests for the client-side chunker NIF (#449).
+  Smoke tests for the client-side chunker NIF.
 
   Cross-package parity against `NeonFS.Core.Blob.Native` lives in
   `neonfs_core/test/neon_fs/core/chunker_parity_test.exs` because

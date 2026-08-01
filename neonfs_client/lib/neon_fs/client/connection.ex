@@ -231,7 +231,7 @@ defmodule NeonFS.Client.Connection do
     # out of the Node.connect/monitor machinery (you don't connect to
     # yourself), so it never lands in `connected_nodes`. Without surfacing
     # it a single-node cluster reports no reachable core at all and every
-    # interface fails with "all core nodes unreachable" (#1049). Use it only
+    # interface fails with "all core nodes unreachable". Use it only
     # as a fallback when no remote core is connected, so multi-node routing
     # is unchanged.
     case remote do
@@ -262,7 +262,7 @@ defmodule NeonFS.Client.Connection do
   # `Node.connect/1` blocks the caller while the distribution channel is
   # established (a TCP connect, up to the net-tick window) — running it inline
   # in the GenServer starves concurrent calls like `connected_core_node/0`,
-  # which then time out under load (#1072). Run it in a throw-away process and
+  # which then time out under load. Run it in a throw-away process and
   # feed the outcome back as `{:connect_result, node, result}`; the node is
   # held in `connecting` until then so reconcile doesn't double-dial it.
   # `Node.connect/1` always returns, so the result message always arrives; if

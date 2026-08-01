@@ -5,7 +5,7 @@ defmodule NeonFS.ClientTest do
   alias NeonFS.Client
   alias NeonFS.Client.Router
 
-  describe "core_call/3 routing (#1076)" do
+  describe "core_call/3 routing" do
     test "routes volume-scoped NeonFS.Core metadata writes to a root holder" do
       stub(Router, :volume_metadata_call, fn vol, mod, fun, args ->
         {:root, vol, mod, fun, args}
@@ -47,7 +47,7 @@ defmodule NeonFS.ClientTest do
     end
   end
 
-  describe "sync_file/2 durability barrier (#1502)" do
+  describe "sync_file/2 durability barrier" do
     test "sync_file routes to NeonFS.Core.sync_file on the root holder" do
       stub(Router, :volume_metadata_call, fn vol, mod, fun, args ->
         {:root, vol, mod, fun, args}
@@ -67,10 +67,10 @@ defmodule NeonFS.ClientTest do
     end
   end
 
-  # By-ID metadata facade (#1606). The two mutating calls carry the
+  # By-ID metadata facade. The two mutating calls carry the
   # volume name first so they route to a root holder like their
   # path-based siblings; `stat` stays cost-based.
-  describe "by-id metadata pass-throughs (#1606)" do
+  describe "by-id metadata pass-throughs" do
     test "get_file_meta_by_id routes via cost-based Router.call" do
       stub(Router, :call, fn mod, fun, args -> {:cost_based, mod, fun, args} end)
 

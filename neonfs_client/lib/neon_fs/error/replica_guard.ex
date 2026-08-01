@@ -1,7 +1,7 @@
 defmodule NeonFS.Error.ReplicaGuard do
   @moduledoc """
   A drive operation was refused because it would drop a volume below its
-  durability floor (#1618).
+  durability floor.
 
   Shares `class: :conflict` with `NeonFS.Error.Conflict` — the refusal is
   transient in the same sense a lock conflict is: re-replication clears it.

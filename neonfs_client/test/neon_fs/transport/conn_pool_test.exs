@@ -268,7 +268,7 @@ defmodule NeonFS.Transport.ConnPoolTest do
         end)
 
       # Wait until the slow task has actually checked out the only connection,
-      # so the pool is genuinely exhausted before the timeout check (#1208).
+      # so the pool is genuinely exhausted before the timeout check.
       assert_receive {[:neonfs, :transport, :conn_pool, :checkout], ^ref, _measurements, _meta},
                      5_000
 
@@ -321,7 +321,7 @@ defmodule NeonFS.Transport.ConnPoolTest do
   end
 
   describe "connection refused" do
-    test "init worker exits with a :shutdown reason instead of crashing (#1300)", ctx do
+    test "init worker exits with a :shutdown reason instead of crashing", ctx do
       {:ok, listen} = :ssl.listen(0, ctx.server_ssl_opts)
       {:ok, {_addr, refused_port}} = :ssl.sockname(listen)
       :ssl.close(listen)

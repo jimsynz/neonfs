@@ -90,7 +90,7 @@ defmodule NeonFS.Transport.PoolManager do
   Drops `node`'s pool and re-syncs from discovery, so a failed `data_call`
   to a peer that restarted on a new data-plane port immediately rebuilds
   the pool against the peer's current endpoint rather than waiting up to a
-  full `discovery_refresh` interval (#1450). Fire-and-forget.
+  full `discovery_refresh` interval. Fire-and-forget.
   """
   @spec refresh_peer(node()) :: :ok
   def refresh_peer(node) do
@@ -108,7 +108,7 @@ defmodule NeonFS.Transport.PoolManager do
      (e.g. `neonfs@10.0.0.1`). This is the address peers already use to reach this
      node, and it matches the node cert's `iPAddress` SAN — so the data plane is
      both routable and verifiable. Picking the first arbitrary NIC instead breaks
-     cross-node reads/writes on multi-homed hosts (#1040).
+     cross-node reads/writes on multi-homed hosts.
   3. The first non-loopback IPv4 (single-homed / hostname-named fallback).
   """
   @spec advertise_endpoint(:inet.port_number()) :: endpoint()
@@ -179,7 +179,7 @@ defmodule NeonFS.Transport.PoolManager do
   @impl GenServer
   def handle_cast({:refresh_peer, node}, state) do
     # Drop the (likely stale) pool, then re-sync from discovery so the
-    # peer's current endpoint is picked up immediately (#1450).
+    # peer's current endpoint is picked up immediately.
     state = do_remove_pool(node, state)
     do_discovery_refresh(state)
     {:noreply, state}
