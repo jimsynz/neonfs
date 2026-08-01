@@ -386,41 +386,16 @@ jobs:
   # job-level and can't be switched per matrix entry), loop devices, and
   # containerd.
   # =========================================================================
-  neonfs_integration:
+  # The suite's static tools do not need the privileged container, the loop
+  # devices or the registry sidecar, and they must not run once per shard.
+  neonfs_integration_checks:
     needs: setup
     if: needs.setup.outputs.run_integration == 'true'
     runs-on: amd64
-    # Observed 35–48 minutes across a single day, and a run killed at
-    # exactly 60 with no test failure (#1643) — the old budget sat inside
-    # the spread, so a pass depended on runner load rather than on the
-    # diff. Headroom over the worst completed run, not an open-ended
-    # limit: a genuinely wedged suite must still fail. The real fix is
-    # sharding the suite (#1623); this only stops it failing for a reason
-    # unrelated to the change under test.
-    timeout-minutes: 90
+    timeout-minutes: 30
     container:
       image: ${{ needs.setup.outputs.elixir_rust_image }}
-      options: --privileged
-    services:
-      # Local registry for `containerd_image_pull_test.exs` (#728).
-      # Pre-seeded by the "Pre-seed registry sidecar" step below
-      # via `crane`, so the test never reaches docker.io. The test
-      # and the pre-seed step both reach this sidecar at
-      # `registry:5000` over the workflow's service network — the
-      # host port is never used, so we don't map it. Mapping
-      # `5000:5000` collides with anything else holding the host
-      # port (stuck containers from previous jobs, a docker daemon
-      # registry mirror, etc.) and breaks the whole job (#765).
-      registry:
-        image: registry:3
     steps:
-      - name: Install loopback dependencies
-        run: |
-          apt-get update
-          apt-get install -y --no-install-recommends \
-            e2fsprogs mount containerd skopeo
-          rm -rf /var/lib/apt/lists/*
-
       - uses: actions/checkout@v7
 
       - name: Restore build cache
@@ -454,6 +429,84 @@ jobs:
           mix compile
           if grep -qs dialyxir mix.exs; then mix dialyzer --plt --force-check; fi
 
+      - name: Check
+        working-directory: neonfs_integration
+        run: mix check --except ex_unit
+
+  neonfs_integration:
+    needs: setup
+    if: needs.setup.outputs.run_integration == 'true'
+    runs-on: amd64
+    strategy:
+      fail-fast: false
+      matrix:
+        # A literal list, never a computed one: a matrix over an empty list
+        # creates no job at all, and `canary`'s `needs` on it then can never
+        # be satisfied. Keep `partitions` below in step with its length.
+        partition: [1, 2, 3, 4]
+    # A shard is roughly a quarter of a ~34-minute suite plus ~5 minutes of
+    # setup. Headroom over that, not an open-ended limit: a genuinely wedged
+    # shard must still fail rather than sit for an hour (#1643).
+    timeout-minutes: 45
+    container:
+      image: ${{ needs.setup.outputs.elixir_rust_image }}
+      options: --privileged
+    services:
+      # Local registry for `containerd_image_pull_test.exs`. Pre-seeded by
+      # the "Pre-seed registry sidecar" step below via `skopeo`, so the test
+      # never reaches docker.io. The test and the pre-seed step both reach
+      # this sidecar at `registry:5000` over the workflow's service network
+      # — the host port is never used, so we don't map it. Mapping
+      # `5000:5000` collides with anything else holding the host port (stuck
+      # containers from previous jobs, a docker daemon registry mirror) and
+      # breaks the whole job.
+      #
+      # Every shard gets one: `mix test --partitions` distributes files
+      # round-robin over their sorted names, so the containerd tests can
+      # land in any shard.
+      registry:
+        image: registry:3
+    steps:
+      - name: Install loopback dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            e2fsprogs mount containerd skopeo
+          rm -rf /var/lib/apt/lists/*
+
+      - uses: actions/checkout@v7
+
+      - name: Restore build cache
+        uses: actions/cache@v6
+        with:
+          path: |
+            neonfs_client/deps
+            neonfs_client/_build
+            neonfs_client/native/neonfs_chunker/target
+            neonfs_client/priv/native
+            neonfs_integration/deps
+            neonfs_integration/_build
+            neonfs_core/target
+            neonfs_core/priv/native
+            neonfs-cli/target
+          key: v7-build-neonfs_integration-${{ runner.arch }}-${{ needs.setup.outputs.elixir }}-${{ needs.setup.outputs.rust }}-${{ hashFiles('neonfs_integration/mix.lock', 'neonfs_core/Cargo.lock', 'neonfs_client/native/neonfs_chunker/Cargo.lock', 'neonfs-cli/Cargo.lock') }}
+          restore-keys: v7-build-neonfs_integration-${{ runner.arch }}-
+
+      - name: Build
+        working-directory: neonfs_integration
+        run: |
+          bash ../resources/scripts/ci-scrub-path-deps
+          mix local.hex --force && mix local.rebar --force
+          # A transient hex registry timeout shouldn't fail the job.
+          for attempt in 1 2 3; do
+            mix deps.get && break
+            [ "$attempt" = 3 ] && exit 1
+            echo "mix deps.get failed (attempt ${attempt}); retrying in $((attempt * 10))s"
+            sleep $((attempt * 10))
+          done
+          mix deps.compile
+          mix compile
+
       - name: Enable loopback devices
         run: |
           modprobe loop max_loop=64 || true
@@ -462,16 +515,16 @@ jobs:
             [ -e /dev/loop$i ] || mknod /dev/loop$i b 7 $i
           done
 
-      - name: Containerd smoke test (#554 prep)
+      - name: Containerd smoke test
         working-directory: neonfs_integration
         run: mix test --include requires_containerd test/integration/containerd_smoke_test.exs
 
       - name: Pre-seed registry sidecar
         working-directory: neonfs_integration
         run: |
-          # Push the committed OCI fixture into the `registry:2`
+          # Push the committed OCI fixture into the `registry:3`
           # sidecar so `containerd_image_pull_test.exs` can pull
-          # via `localhost:5000` without reaching docker.io.
+          # via the service network without reaching docker.io.
           # `--dest-tls-verify=false` because the sidecar speaks
           # plain HTTP on the service network.
           skopeo copy \
@@ -479,16 +532,12 @@ jobs:
             oci-archive:test/fixtures/test-image.tar \
             docker://registry:5000/neonfs-test-image:v1
 
-      - name: Check
+      - name: Test (shard ${{ matrix.partition }} of 4)
         working-directory: neonfs_integration
-        run: mix check
+        env:
+          MIX_TEST_PARTITION: ${{ matrix.partition }}
+        run: mix test --partitions 4
 
-  # =========================================================================
-  # canary - single aggregation gate. Fails if any needed job failed or was
-  # cancelled; succeeds when every job succeeded or was skipped (skipped is
-  # allowed so path-filtered runs still pass). Branch protection can require
-  # just this check.
-  # =========================================================================
   canary:
     needs:
       - setup
@@ -498,6 +547,7 @@ jobs:
       - vfs_neonfs
       - neonfs-cli
       - neonfs_integration
+      - neonfs_integration_checks
     if: always()
     runs-on: docker
     timeout-minutes: 10
