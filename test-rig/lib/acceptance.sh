@@ -32,7 +32,7 @@ CONTAINERD_VOL="${CONTAINERD_VOL:-containerd}"
 # CIFS/SMB: the omnibus daemon ships the Samba VFS module (neonfs.so) and runs
 # the CIFS bridge in-process, exposing the ETF socket below. smbd and smbclient
 # come from apt (samba/smbclient); the VFS module is ABI-matched to the
-# release's Samba (#1527). See neonfs_cifs/README.md.
+# release's Samba. See neonfs_cifs/README.md.
 CIFS_SOCK="${CIFS_SOCK:-/run/neonfs/cifs.sock}"
 CIFS_USER="${CIFS_USER:-neonfs}"
 CIFS_PASS="${CIFS_PASS:-neonfs-rig}"
@@ -187,7 +187,7 @@ s_s3_ops() {
   node_ssh 1 "printf %s s3-content > /tmp/s3o.txt
     out=\$(s3cmd ${S3_FLAGS} put /tmp/s3o.txt s3://${ACCEPT_VOL}/s3o_${TAG}.txt 2>&1); rc=\$?
     if [ \$rc -ne 0 ] || echo \"\$out\" | grep -qi 'MD5.*match'; then
-      echo \"s3cmd PUT failed (rc=\$rc) — ETag/MD5 integrity (#1037): \$out\"; exit 1
+      echo \"s3cmd PUT failed (rc=\$rc) — ETag/MD5 integrity: \$out\"; exit 1
     fi
     got=\$(s3cmd ${S3_FLAGS} get --force s3://${ACCEPT_VOL}/s3o_${TAG}.txt - 2>/dev/null)
     [ \"\$got\" = s3-content ]" 2>&1 | sed 's/^/  /' >&2 \
@@ -408,15 +408,15 @@ s_cross_consistency() {
 s_volume_stats() {
   volume_ready || return 77
   # By now the FUSE/NFS/S3/WebDAV steps have written data into the volume.
-  # `volume show` must reflect it rather than reporting 0 chunks / 0 bytes (#1036).
+  # `volume show` must reflect it rather than reporting 0 chunks / 0 bytes.
   local out; out=$(ncli 1 "volume show ${ACCEPT_VOL}" 2>/dev/null)
   echo "${out}" | grep -iE 'chunks|logical|physical' | sed 's/^/  /' >&2
   local chunks; chunks=$(echo "${out}" | grep -iE 'chunks' | grep -oE '[0-9]+' | head -1)
   [ "${chunks:-0}" -gt 0 ] \
-    || { echo "  volume show reports 0 chunks despite writes (#1036)" >&2; return 1; }
+    || { echo "  volume show reports 0 chunks despite writes" >&2; return 1; }
 }
 
-# #1035: a FUSE unmount must not wedge the control plane. Unmount, confirm the
+# A FUSE unmount must not wedge the control plane. Unmount, confirm the
 # CLI still responds, then re-mount (MountManager must not be left in a bad
 # state). Runs after the FUSE-dependent steps; leaves the mount restored.
 s_fuse_unmount_resilience() {
@@ -426,10 +426,10 @@ s_fuse_unmount_resilience() {
   ncli 1 "fuse unmount ${FUSE_MNT}" 2>&1 | sed 's/^/  /' >&2 || true
 
   ncli 1 "cluster status" 2>&1 | grep -qE 'Status[[:space:]]+running' \
-    || { echo "  CLI wedged after fuse unmount (#1035)" >&2; return 1; }
+    || { echo "  CLI wedged after fuse unmount" >&2; return 1; }
 
   node_ssh 1 "for i in \$(seq 1 15); do sudo timeout 20 neonfs fuse mount ${ACCEPT_VOL} ${FUSE_MNT} 2>&1 | grep -qiE 'mounted|already' && exit 0; sleep 2; done; exit 1" 2>/dev/null \
-    || { echo "  re-mount after unmount failed — MountManager left in a bad state (#1035)" >&2; return 1; }
+    || { echo "  re-mount after unmount failed — MountManager left in a bad state" >&2; return 1; }
 }
 
 s_replication() {
@@ -437,7 +437,7 @@ s_replication() {
   local cores; cores=$(ncli 1 "cluster status" 2>/dev/null | grep -iE 'core nodes|members' | grep -oE '[0-9]+' | head -1)
   ncli 1 "volume list" 2>/dev/null | grep -qE "^${ACCEPT_REPL_VOL}[[:space:]]" \
     || ncli 1 "volume create ${ACCEPT_REPL_VOL} --replicas 2" 2>&1 | grep -qi 'created successfully' \
-    || { echo "  could not create replicas=2 volume (cluster has < 2 core nodes? see #1033)" >&2; return 1; }
+    || { echo "  could not create replicas=2 volume (cluster has < 2 core nodes?)" >&2; return 1; }
   # Write 8 MiB via S3 and check each node's drives gained data.
   local before after grew=0 i
   for i in $(seq 1 "${NODES}"); do

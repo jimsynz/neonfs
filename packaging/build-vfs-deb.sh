@@ -6,7 +6,7 @@
 # with the *same* symbol-version node the distro's samba-libs provides (a
 # bespoke ./configure produces `SAMBA_<upstream>_PRIVATE_SAMBA`, which the
 # distro's `SAMBA_<upstream>_DEBIAN_<debver>_PRIVATE_SAMBA` does not satisfy —
-# so smbd refuses to load it, #1548). The only robust way to get all of that is
+# so smbd refuses to load it). The only robust way to get all of that is
 # to build the module inside the distro's own samba source package: we
 # `apt-get source samba`, drop `vfs_neonfs` into `source3/modules`, add it to
 # `--with-shared-modules`, add a `samba-vfs-neonfs` binary package that

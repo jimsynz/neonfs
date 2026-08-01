@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Re-builds the OCI test image used by `neonfs_integration`'s
-# containerd integration tests (#728 onwards).
+# containerd integration tests.
 #
 # The output tarball lives at
 # `neonfs_integration/test/fixtures/test-image.tar` and is loaded

@@ -21,7 +21,7 @@ RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
 # The Samba VFS module (`neonfs.so`) can't be built out-of-tree and must ABI +
 # symbol-version match the host smbd, so build-vfs-deb.sh builds it inside the
 # distro's own samba source (`apt-get source samba`) as the samba-vfs-neonfs
-# deb (#1548); we then extract neonfs.so for a co-located/sidecar smbd to load
+# deb; we then extract neonfs.so for a co-located/sidecar smbd to load
 # (the sidecar's samba must match this build). Heavy + network-fetching, so
 # it's validated at release rather than on PR CI.
 FROM base AS vfs

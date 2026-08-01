@@ -19,7 +19,7 @@ depends:
   - libncurses6
   - ca-certificates
   # The Samba VFS module ships in its own package (built from the distro samba
-  # source so it loads in the host smbd — #1548); it pulls in the ABI-matching
+  # source so it loads in the host smbd); it pulls in the ABI-matching
   # samba as its own dependency.
   - samba-vfs-neonfs
 

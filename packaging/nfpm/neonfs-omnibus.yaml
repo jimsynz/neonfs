@@ -22,11 +22,11 @@ depends:
   - fuse3
   - nfs-common
 
-# The Samba VFS module (#1548) is an optional capability: it's loaded by an
+# The Samba VFS module is an optional capability: it's loaded by an
 # external smbd, not the omnibus node, which runs every other interface without
 # it. So it's a Recommends, not a Depends — apt pulls it in by default when the
 # package is available (CIFS builds), and silently skips it otherwise, keeping a
-# default (non-CIFS) omnibus installable (#1559).
+# default (non-CIFS) omnibus installable.
 recommends:
   - samba-vfs-neonfs
 

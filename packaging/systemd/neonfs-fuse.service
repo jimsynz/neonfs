@@ -14,7 +14,7 @@ RestartSec=5
 TimeoutStartSec=60
 # Must exceed the in-flight drain deadline (~25s; see `:drain_deadline_ms` /
 # `NEONFS_*_DRAIN_DEADLINE_MS`) plus headroom for the core final-metadata
-# snapshot, else systemd SIGKILLs the BEAM mid-drain (#1385). Bump both
+# snapshot, else systemd SIGKILLs the BEAM mid-drain. Bump both
 # together if either changes.
 TimeoutStopSec=45
 
@@ -33,8 +33,8 @@ NoNewPrivileges=false
 # mount namespace to MS_SLAVE, which traps every FUSE mount inside the
 # daemon's namespace — invisible to the host. With them set,
 # `MountFlags=shared` only yields `shared,slave` (no back-propagation),
-# which is why #758's fix was insufficient and FUSE mounts never reached
-# the host (#1034). They are removed so `MountFlags=shared` leaves the
+# so setting it alone is not enough — the mounts still never reach the
+# host. The sandbox options are removed so `MountFlags=shared` leaves the
 # unit's namespace genuinely shared and mounts propagate to the host.
 MountFlags=shared
 
