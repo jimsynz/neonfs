@@ -9,7 +9,7 @@ defmodule NeonFS.Core.BanditLauncher do
   The underlying condition is transient — no socket is actually bound — and
   retrying succeeds. This module encapsulates the retry so a flake on
   `MetricsSupervisor` startup doesn't cascade into the peer node's whole
-  supervision tree failing (observed in #433, hits `:shared`-mode
+  supervision tree failing (hits `:shared`-mode
   integration tests).
 
   Drop-in child-spec replacement: change

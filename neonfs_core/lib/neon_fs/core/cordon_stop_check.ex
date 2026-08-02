@@ -1,7 +1,7 @@
 defmodule NeonFS.Core.CordonStopCheck do
   @moduledoc """
   Read-only pre-shutdown safety analysis for stopping a cordoned core
-  node (#1417). Reports whether taking `node` offline would compromise
+  node. Reports whether taking `node` offline would compromise
   durability or quorum, so an operator can gate `systemctl stop` on it
   (the `neonfs cluster cordon-stop-check` CLI command).
 
@@ -12,7 +12,7 @@ defmodule NeonFS.Core.CordonStopCheck do
     * `:stranded` — a chunk has a replica on `node` and **no** trusted
       replica anywhere else, so stopping `node` makes it unreadable.
     * `:below_min_copies` — a chunk would drop below its volume's
-      `min_copies` (counting only `:trusted` replicas, per #1375) once
+      `min_copies` (counting only `:trusted` replicas) once
       `node`'s replicas are gone.
 
   Only `:trusted` replicas count toward durability — an `:unverified`

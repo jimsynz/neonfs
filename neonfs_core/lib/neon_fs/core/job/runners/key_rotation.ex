@@ -174,8 +174,8 @@ defmodule NeonFS.Core.Job.Runners.KeyRotation do
   # The metadata now points at the freshly-encrypted blob, so the
   # pre-rotation variant is safe to reap. Deleting it earlier — before the
   # nonce swap commits — would leave a window where a concurrent read
-  # resolves the old (now-deleted) path and fails with "chunk not found"
-  # (#1266), so the re-encrypt NIF deliberately leaves the old blob behind
+  # resolves the old (now-deleted) path and fails with "chunk not found",
+  # so the re-encrypt NIF deliberately leaves the old blob behind
   # and we delete it here. A fresh nonce always yields a new codec suffix;
   # on the astronomically unlikely nonce collision the blob was overwritten
   # in place and there is nothing to delete.
@@ -201,7 +201,7 @@ defmodule NeonFS.Core.Job.Runners.KeyRotation do
 
   # A persist failure caused by the node/cluster shutting down isn't a real
   # defect — the rotation job stays resumable and continues after restart, so
-  # log it at :debug. Genuine failures still surface at :error (#1268).
+  # log it at :debug. Genuine failures still surface at :error.
   defp log_metadata_update_failure(hash, reason) do
     hash_hex = Base.encode16(hash, case: :lower)
 

@@ -18,7 +18,7 @@ defmodule NeonFS.Core.CommitChunks do
   the reported locations — if every location reports `:not_found` the
   chunk is considered missing.
 
-  This is the *interface-side chunking* path described in the #408
+  This is the *interface-side chunking* path described in the
   design decision — compression and encryption still happen on core in
   the `put_chunk` handler, so this commit path stores chunks with the
   codec shape the `put_chunk` handler chose. Volumes that rely on
@@ -271,7 +271,7 @@ defmodule NeonFS.Core.CommitChunks do
   end
 
   # Persists the file metadata and commits the file's chunks in one
-  # batched root flip (#1304) — `create_committing_chunks/3` folds the
+  # batched root flip — `create_committing_chunks/3` folds the
   # chunks' `:committed` chunk-meta into the same shard-CAS as the
   # file-meta + dirent, dropping `write_id`'s refs on commit.
   defp create_file_metadata(volume_id, path, chunk_hashes, total_size, write_id, opts) do

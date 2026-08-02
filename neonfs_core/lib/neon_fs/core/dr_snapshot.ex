@@ -49,13 +49,13 @@ defmodule NeonFS.Core.DRSnapshot do
   (volumes, services, encryption keys, volume ACLs, segment
   assignments, credentials, escalations, KV) back onto live Ra state
   via `:bulk_restore` commands — the first slice of full-cluster
-  `dr restore` (#1005). Per-volume content, the catalogue-driven
+  `dr restore`. Per-volume content, the catalogue-driven
   per-volume `backup restore`, the `dr restore` wrapper, and the
   operator runbook land in later slices.
 
   ## Out of scope (for this slice)
 
-    * Scheduling / retention (lives in #323).
+    * Scheduling / retention (lives in the scheduler).
   """
 
   alias NeonFS.Core.{
@@ -142,8 +142,7 @@ defmodule NeonFS.Core.DRSnapshot do
   newest first, with each entry's manifest already deserialised.
 
   Returns `[%{id: timestamp, path: dir, manifest: manifest()}]`.
-  Used by the operator-facing `neonfs dr snapshot list` CLI surface
-  (#324).
+  Used by the operator-facing `neonfs dr snapshot list` CLI surface.
   """
   @spec list() ::
           {:ok, [%{id: String.t(), path: String.t(), manifest: manifest()}]}
@@ -179,7 +178,7 @@ defmodule NeonFS.Core.DRSnapshot do
 
   @doc """
   Restore a DR snapshot's cluster-wide metadata back into the live Ra
-  state (#1005), the first slice of full-cluster `dr restore`.
+  state, the first slice of full-cluster `dr restore`.
 
   Reads each cluster-wide index file from the snapshot directory and
   issues a `:bulk_restore` Ra command per keyspace, overlaying the
@@ -187,7 +186,7 @@ defmodule NeonFS.Core.DRSnapshot do
   per-volume indexes (`chunks`/`files`/`stripes`) are *not* touched —
   those are reconstructed per volume via `backup restore`.
 
-  Bumps the cluster generation counter (#1005) once the keyspaces are
+  Bumps the cluster generation counter once the keyspaces are
   applied, so operators can audit "cluster X generation N" and detect
   split-brain. Returns `{:ok, %{restored: %{keyspace => count},
   generation: new_generation}}`.
@@ -206,8 +205,7 @@ defmodule NeonFS.Core.DRSnapshot do
   end
 
   @doc """
-  Copy a snapshot off-cluster to `dest_dir` on the local filesystem
-  (#1367).
+  Copy a snapshot off-cluster to `dest_dir` on the local filesystem.
 
   A DR snapshot normally lives only inside the `_system` volume's
   `/dr/<id>/` directory, so a genuine bare-metal disaster — where the
@@ -242,8 +240,7 @@ defmodule NeonFS.Core.DRSnapshot do
 
   @doc """
   Stage an off-cluster snapshot (produced by `export/2`) back into the
-  `_system` volume's `/dr/<id>/` directory so `apply/1` can consume it
-  (#1367).
+  `_system` volume's `/dr/<id>/` directory so `apply/1` can consume it.
 
   Reads the manifest at `source_dir/manifest.json`, then streams every
   listed file into the `_system` volume, verifying each against its

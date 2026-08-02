@@ -61,7 +61,7 @@ defmodule NeonFS.Cluster.Init do
   - `{:error, :node_not_named}` - Erlang node not named (required for Ra)
   - `{:error, {:drive_preflight_failed, reason}}` - the supplied
     `drive_config` path was missing or not writable; refused before
-    any state was mutated (#1012)
+    any state was mutated
   - `{:error, :ra_start_failed}` - Ra cluster failed to start
   - `{:error, :no_drives_available}` - no `drive_config` supplied AND no
     drives registered locally; the system volume has nowhere to land
@@ -93,7 +93,7 @@ defmodule NeonFS.Cluster.Init do
   # Validate the supplied drive *before* any state mutation. A missing
   # or read-only drive path used to fail after Ra was already running,
   # which left the daemon reporting `cluster status: running` with no
-  # drives or system volume (#1012). Skipped when no drive is supplied
+  # drives or system volume. Skipped when no drive is supplied
   # — the legacy `:neonfs_core, :drives` config path performs its own
   # checks at `do_add_drive/2` time.
   defp preflight_drive(nil), do: :ok
@@ -146,7 +146,7 @@ defmodule NeonFS.Cluster.Init do
   # fires a self-nodedown that tears down service registration, the data plane,
   # lock state and discovery across both the core and client supervision trees;
   # on a single-node cluster there is no peer to restore any of it, so core
-  # reachability collapses seconds after init (#1051). A normal boot does *not*
+  # reachability collapses seconds after init. A normal boot does *not*
   # bounce distribution, so a full restart instead lands on the clean boot path:
   # the node comes back with its cluster cert and name, every subsystem
   # initialises once in order, and `ServiceRegistry` re-registers the local core
@@ -154,7 +154,7 @@ defmodule NeonFS.Cluster.Init do
   #
   # Detached so the init reply flushes to the CLI first; the CLI's distribution
   # connection drops over the restart and reconnects, re-validating via `cluster
-  # status` (#1033) — the same contract the in-place bounce already had. Gated on
+  # status` — the same contract the in-place bounce already had. Gated on
   # TLS distribution: plain distribution (tests/dev) has nothing to reload and
   # must not restart.
   defp schedule_distribution_restart do

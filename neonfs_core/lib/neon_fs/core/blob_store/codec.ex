@@ -3,7 +3,7 @@ defmodule NeonFS.Core.BlobStore.Codec do
   Pure resolution of a chunk's codec (compression + encryption-nonce) settings
   into the shapes the blob NIFs and callers expect.
 
-  Extracted from `NeonFS.Core.BlobStore` (#1207): these functions hold no
+  Extracted from `NeonFS.Core.BlobStore`: these functions hold no
   process state and depend only on their arguments, so they live apart from the
   stateful drive-management GenServer. The codec suffix on disk is a fingerprint
   of `(compression, encryption-nonce)` — see `native/neonfs_blob/src/codec.rs`.

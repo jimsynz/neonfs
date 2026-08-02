@@ -1,10 +1,10 @@
 defmodule NeonFS.Core.Volume.Deprovisioner do
   @moduledoc """
   Mirror of `NeonFS.Core.Volume.Provisioner` for the volume delete
-  path (#806).
+  path.
 
   Submits `:unregister_volume_root` to Ra so the bootstrap layer
-  (#779) stops trying to read the volume's (soon-to-be-orphaned)
+  stops trying to read the volume's (soon-to-be-orphaned)
   root segment. The Ra command is idempotent — calling it for a
   volume that was never registered (or already unregistered) is a
   no-op-equivalent and returns `:ok`.

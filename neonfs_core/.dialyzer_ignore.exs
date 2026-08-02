@@ -45,6 +45,6 @@
   # Dialyzer proves the clause is unreachable given current upstream return types,
   # but we keep them so new error atoms from internal modules are wrapped rather
   # than leaking raw atoms to the CLI. Covers the facade and the per-command-group
-  # submodules it is being split into (#1203).
+  # submodules it has been split into.
   ~r"lib/neon_fs/cli/handler(/\w+)?\.ex:\d+:\d+:pattern_match_cov"
 ]

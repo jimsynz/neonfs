@@ -126,7 +126,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
   @type namespace_scope :: :exclusive | :shared
 
   @typedoc """
-  POSIX byte-range bounds for `:byte_range` claims (#673).
+  POSIX byte-range bounds for `:byte_range` claims.
   `{offset, length}` — `length == 0` is the POSIX convention for
   "to end of file". Two ranges overlap when `start_a < end_b` and
   `start_b < end_a` (with the to-EOF sentinel treated as +∞).
@@ -139,19 +139,19 @@ defmodule NeonFS.Core.MetadataStateMachine do
     * `:path` — covers a single path.
     * `:subtree` — covers a path and all its descendants.
     * `:create` — exclusive placeholder for an atomic create-if-not-exist
-      operation (sub-issue #303). Behaves like an `:exclusive :path`
+      operation. Behaves like an `:exclusive :path`
       claim against other types, but two `:create` claims on the same
       path return `{:error, :exists}` (rather than the generic
       `:conflict`) so callers can map directly to `EEXIST` /
       `PreconditionFailed` / `AlreadyExists` at the protocol layer.
     * `:pinned` — shared "this path has open handles" marker for
-      handle-pinned files (sub-issue #637 of #306). Multiple pins on
+      handle-pinned files. Multiple pins on
       the same path coexist (each open `fd` is a separate pin); a pin
       conflicts with any covering `:exclusive` claim the same way
       `:shared` does. Holder lifetime ties pin lifetime: when the
       holder pid dies the coordinator's `:DOWN` handler releases the
       pin via the standard bulk-release path.
-    * `:byte_range` — POSIX byte-range advisory lock (#673). Carries
+    * `:byte_range` — POSIX byte-range advisory lock. Carries
       a `range: {offset, length}` field (length 0 = to-EOF). Two
       `:byte_range` claims on the same path conflict only when their
       ranges overlap and at least one is `:exclusive`. `:byte_range`
@@ -205,9 +205,9 @@ defmodule NeonFS.Core.MetadataStateMachine do
 
   @typedoc """
   Bootstrap-layer entry for a drive. Cached from the drive's
-  `<drive>/.neonfs-drive.json` identity file (#778). The Ra entry is
+  `<drive>/.neonfs-drive.json` identity file. The Ra entry is
   reconstructible from the on-disk identity at any time — it's a fast-
-  access cache, not a source of truth. (#779, #750)
+  access cache, not a source of truth.
   """
   @type drive_entry :: %{
           drive_id: String.t(),
@@ -218,12 +218,12 @@ defmodule NeonFS.Core.MetadataStateMachine do
         }
 
   @typedoc """
-  Per-drive trust state (#1375): the `{node, drive_id}` keys of drives
+  Per-drive trust state: the `{node, drive_id}` keys of drives
   that are **present but not durable-yet** — a rebooted node mid-resync,
   or a crash-recovered drive mid-scrub. Only `:unverified` drives are
   stored; absence means `:trusted` (the default), so the map stays empty
-  in steady state and the mechanism is dormant until a producer (#1376
-  node return, #1380 crash marker) marks a drive.
+  in steady state and the mechanism is dormant until a producer (node
+  return, crash marker) marks a drive.
 
   Consumers (durability maths, read-verify — wired in a follow-up) treat
   `:unverified` replicas as not counting toward `min_copies` and
@@ -232,13 +232,13 @@ defmodule NeonFS.Core.MetadataStateMachine do
   @type drive_trust :: %{optional({node(), String.t()}) => :unverified}
 
   @typedoc """
-  First-class node lifecycle entry (#1323). `status` is the node's
+  First-class node lifecycle entry. `status` is the node's
   cluster-lifecycle state — distinct from reachability (net_kernel /
   Ra membership) and from per-service presence (`services`). Placement
   and routing consumers exclude `:draining` and `:maintenance` nodes
   from *new* work (replica/owner placement) while existing data stays
   put. `:draining` is decommission (evacuate then remove); `:maintenance`
-  is planned, temporary absence (#1376) — same new-work exclusion, but
+  is planned, temporary absence — same new-work exclusion, but
   no evacuation and no Ra `remove_member`. Entries are upserted to
   `:active` when a node first registers a service; `:draining` and
   `:maintenance` are set explicitly.
@@ -251,7 +251,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
         }
 
   @typedoc """
-  Whole-cluster lifecycle mode (#1378) — distinct from per-node status
+  Whole-cluster lifecycle mode — distinct from per-node status
   (`node_status`). `:normal` is steady state; `:frozen` is a coordinated
   maintenance freeze (client ingress cut, best-effort quiesce before a
   planned power-down); `:recovering` is a reassembling cluster after a
@@ -269,12 +269,12 @@ defmodule NeonFS.Core.MetadataStateMachine do
 
   @typedoc """
   Bootstrap-layer entry for a volume's root chunk pointer. The root
-  chunk hash points at the volume's current root segment (#780); the
+  chunk hash points at the volume's current root segment; the
   drive locations + durability cache let the metadata write path
   resolve the required replica count without a root-segment read.
 
   Reconstructible by walking drives → finding the volume's root chunk
-  by content hash → reading the root segment. (#779, #750)
+  by content hash → reading the root segment.
   """
   @type volume_root_entry :: %{
           volume_id: binary(),
@@ -295,8 +295,8 @@ defmodule NeonFS.Core.MetadataStateMachine do
         }
 
   @typedoc """
-  Per-volume snapshot entry (#960 / epic #959). Records the frozen root
-  chunk hash of **every shard** (#1307) at the moment the snapshot was
+  Per-volume snapshot entry. Records the frozen root
+  chunk hash of **every shard** at the moment the snapshot was
   created — `root_chunk_hashes` maps `shard => root_chunk_hash`. The
   optional `name` is purely a human label — snapshots are addressed by
   `id` and the same name may legally repeat across volume forks.
@@ -370,7 +370,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
   def get_kv(state), do: Map.get(state, :kv, %{})
 
   @doc """
-  Returns the cluster generation counter (#1005) — bumped on every DR
+  Returns the cluster generation counter — bumped on every DR
   restore. Zero on a fresh cluster or a pre-v19 state.
   """
   @spec get_generation(state()) :: non_neg_integer()
@@ -390,7 +390,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
   def get_drive(state, drive_id), do: Map.get(get_drives(state), drive_id)
 
   @doc """
-  Returns the trust state of a single drive (#1375): `:unverified` if the
+  Returns the trust state of a single drive: `:unverified` if the
   `{node, drive_id}` is present in the trust map, `:trusted` otherwise
   (absence is the default).
   """
@@ -416,7 +416,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
   def unverified_drives(state), do: Map.keys(get_drive_trust(state))
 
   @doc """
-  Returns the node lifecycle table — `node => node_entry` (#1323).
+  Returns the node lifecycle table — `node => node_entry`.
   Empty map for pre-v18 states.
   """
   @spec get_nodes(state()) :: %{optional(node()) => node_entry()}
@@ -430,7 +430,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
   def get_node(state, node), do: Map.get(get_nodes(state), node)
 
   @doc """
-  Returns the whole-cluster lifecycle mode (#1378), or `:normal` when
+  Returns the whole-cluster lifecycle mode, or `:normal` when
   unset (a fresh cluster, or a pre-v21 state).
   """
   @spec get_cluster_mode(state()) :: cluster_mode()
@@ -449,8 +449,8 @@ defmodule NeonFS.Core.MetadataStateMachine do
   def get_cluster_mode_entry(state), do: Map.get(state, :cluster_mode)
 
   @doc """
-  Returns the set of nodes currently in the `:draining` lifecycle state
-  (#1323). The decommission flow (evacuation, removal) keys off this
+  Returns the set of nodes currently in the `:draining` lifecycle state.
+  The decommission flow (evacuation, removal) keys off this
   specifically; for new-work exclusion use `excluded_nodes/1`.
   """
   @spec draining_nodes(state()) :: MapSet.t(node())
@@ -460,7 +460,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
 
   @doc """
   Returns the set of nodes currently in the `:maintenance` lifecycle
-  state (#1376) — cordoned for planned, temporary absence.
+  state — cordoned for planned, temporary absence.
   """
   @spec maintenance_nodes(state()) :: MapSet.t(node())
   def maintenance_nodes(state) do
@@ -483,7 +483,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
 
   @doc """
   Returns the full bootstrap-layer volume-root table — `volume_id =>
-  %{shard => volume_root_entry}` (#1307). Empty map for pre-v13 states.
+  %{shard => volume_root_entry}`. Empty map for pre-v13 states.
   """
   @spec get_volume_roots(state()) ::
           %{optional(binary()) => %{optional(non_neg_integer()) => volume_root_entry()}}
@@ -614,7 +614,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
 
   @doc """
   Returns every namespace claim at exactly `path` whose type matches
-  `type`. Used by the unlink-while-open path (#306) to ask "is this
+  `type`. Used by the unlink-while-open path to ask "is this
   file pinned by any open handle anywhere in the cluster?". Sorted by
   claim id so iteration order is stable across calls.
   """
@@ -650,7 +650,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
   Initialise the state machine.
 
   Normal startup returns a clean state. The `force-reset` recovery
-  path (#473) passes `:initial_state` so the new single-node cluster
+  path passes `:initial_state` so the new single-node cluster
   starts with the survivor's last-applied state instead of an empty
   map — this is how operator-invoked quorum recovery preserves the
   cluster's metadata (volumes, ACLs, encryption keys, etc.) across
@@ -910,7 +910,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
     Logger.info("Ra machine version upgrade",
       from: 12,
       to: 13,
-      change: "add bootstrap layer (drives + volume_roots) for #779 / epic #750"
+      change: "add bootstrap layer (drives + volume_roots)"
     )
 
     new_state =
@@ -953,7 +953,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
     Logger.info("Ra machine version upgrade",
       from: 14,
       to: 15,
-      change: "add `snapshots` keyspace for volume snapshots (#960 / epic #959)"
+      change: "add `snapshots` keyspace for volume snapshots"
     )
 
     {Map.put_new(state, :snapshots, %{}), :ok, []}
@@ -965,7 +965,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
     Logger.info("Ra machine version upgrade",
       from: 15,
       to: 16,
-      change: "add `redeemed_invites` keyspace for single-use invite tokens (#1198)"
+      change: "add `redeemed_invites` keyspace for single-use invite tokens"
     )
 
     {Map.put_new(state, :redeemed_invites, %{}), :ok, []}
@@ -977,8 +977,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
     Logger.info("Ra machine version upgrade",
       from: 16,
       to: 17,
-      change:
-        "shard volume_roots: %{volume_id => entry} -> %{volume_id => %{shard => entry}} (#1307)"
+      change: "shard volume_roots: %{volume_id => entry} -> %{volume_id => %{shard => entry}}"
     )
 
     # No backwards compatibility (experimental, no production clusters): the
@@ -996,7 +995,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
     Logger.info("Ra machine version upgrade",
       from: 17,
       to: 18,
-      change: "add first-class node lifecycle table (nodes) for #1323"
+      change: "add first-class node lifecycle table (nodes)"
     )
 
     {Map.put_new(state, :nodes, %{}), :ok, []}
@@ -1008,7 +1007,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
     Logger.info("Ra machine version upgrade",
       from: 18,
       to: 19,
-      change: "add cluster generation counter for DR-restore split-brain detection (#1005)"
+      change: "add cluster generation counter for DR-restore split-brain detection"
     )
 
     {Map.put_new(state, :generation, 0), :ok, []}
@@ -1020,7 +1019,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
     Logger.info("Ra machine version upgrade",
       from: 19,
       to: 20,
-      change: "add per-drive trust state map for present-but-not-durable replicas (#1375)"
+      change: "add per-drive trust state map for present-but-not-durable replicas"
     )
 
     {Map.put_new(state, :drive_trust, %{}), :ok, []}
@@ -1032,7 +1031,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
     Logger.info("Ra machine version upgrade",
       from: 20,
       to: 21,
-      change: "add whole-cluster lifecycle mode for freeze/thaw + recovering (#1378)"
+      change: "add whole-cluster lifecycle mode for freeze/thaw + recovering"
     )
 
     {Map.put_new(state, :cluster_mode, nil), :ok, []}
@@ -1203,7 +1202,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
   # `:put_volume`) is what makes concurrent writes to the same volume
   # safe — two writers can't clobber each other's increment. Counters
   # clamp at zero so a reconcile or an over-decrement can't drive them
-  # negative (#1462).
+  # negative.
   def apply(_meta, {:adjust_volume_stats, volume_id, deltas}, state) do
     case Map.get(state.volumes, volume_id) do
       nil ->
@@ -1229,7 +1228,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
 
   # Reset a volume's usage counters to authoritative absolutes. Used by
   # the scrub reconcile to correct drift accumulated across crashes or
-  # streamed overwrites (#1462). Only the counters present in `absolutes`
+  # streamed overwrites. Only the counters present in `absolutes`
   # are overwritten — reconcile can rebuild `logical_size` (sum of file
   # sizes) and `file_count` (number of live files) exactly, but not the
   # dedup-aware `physical_size`/`chunk_count`, so it leaves those untouched.
@@ -1311,8 +1310,8 @@ defmodule NeonFS.Core.MetadataStateMachine do
     state = ensure_nodes(state)
     key = service_key(service_info)
     new_services = Map.put(state.services, key, service_info)
-    # A node becomes first-class the moment it registers a service
-    # (#1323). Upsert it as `:active` without clobbering an explicit
+    # A node becomes first-class the moment it registers a service.
+    # Upsert it as `:active` without clobbering an explicit
     # `:draining` / `:joining` status a re-registering service would
     # otherwise reset.
     new_nodes = ensure_active_node(state.nodes, service_info.node)
@@ -1358,7 +1357,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
   # Records an invite token id as redeemed, atomically rejecting reuse.
   # Because a single Ra apply is serialised across the cluster,
   # concurrent redemptions of the same token yield exactly one `:ok`
-  # winner; every other gets `{:error, :already_redeemed}` (#1198). The
+  # winner; every other gets `{:error, :already_redeemed}`. The
   # caller supplies `now_unix` so pruning of expired entries is
   # deterministic across replicas (apply must never read the wall clock).
   # Already-expired ids are dropped first — they can't be redeemed again
@@ -1700,7 +1699,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
     {new_state, :ok, []}
   end
 
-  # Escalation commands (decision escalation system, issue #245)
+  # Escalation commands (decision escalation system)
 
   def apply(_meta, {:put_escalation, escalation_data}, state) do
     state = ensure_escalations(state)
@@ -1762,7 +1761,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
     {new_state, :ok, []}
   end
 
-  # DR restore (#1005): overlay a snapshot's cluster-wide keyspace onto
+  # DR restore: overlay a snapshot's cluster-wide keyspace onto
   # live state. `entries` is a list of `{key, value}` pairs decoded from
   # a `DRSnapshot` index file; they're merged last-write-wins by key, so
   # the restoring node's own live entries (its `_system` volume, its own
@@ -1806,7 +1805,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
     {state, {:error, {:unrestorable_keyspace, keyspace}}, []}
   end
 
-  # Cluster generation (#1005): a monotonic counter bumped on every DR
+  # Cluster generation: a monotonic counter bumped on every DR
   # restore. Lets operators audit "cluster X generation N" and detect
   # split-brain when a presumed-dead original rejoins at a lower
   # generation. Deliberately *not* one of the bulk-restorable keyspaces,
@@ -1828,7 +1827,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
     {new_state, {:ok, new_generation}, []}
   end
 
-  # Namespace coordinator commands (new in v12, sub-issue #300 of #226)
+  # Namespace coordinator commands (new in v12)
   #
   # `:claim_namespace_path` and `:claim_namespace_subtree` allocate a
   # new claim under a sequenced id (`"ns-claim-<n>"`). Conflict
@@ -1850,7 +1849,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
   # and `dst` as `:exclusive :path` claims allocated under sequential
   # ids, so the caller can release them as a pair. Rejects renames into
   # the source's own subtree (a cycle the filesystem layer can't
-  # represent). #304.
+  # represent).
   def apply(_meta, {:claim_namespace_rename, src, dst, holder}, state)
       when is_binary(src) and is_binary(dst) do
     state = ensure_namespace(state)
@@ -1877,8 +1876,8 @@ defmodule NeonFS.Core.MetadataStateMachine do
     end
   end
 
-  # Foundation primitive for atomic create-if-not-exist (sub-issue #591
-  # of #303). Allocates an `:exclusive :create` claim if and only if no
+  # Foundation primitive for atomic create-if-not-exist. Allocates an
+  # `:exclusive :create` claim if and only if no
   # other `:create` claim already covers `path`. Two `:create` claims
   # on the same path return `{:error, :exists}` so callers can
   # distinguish "someone else is mid-create" from generic claim conflict
@@ -1886,7 +1885,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
   # `PreconditionFailed` / `AlreadyExists`).
   #
   # The check against an *existing* file at `path` is the caller's
-  # responsibility (lives in `WriteOperation` per #592) — the namespace
+  # responsibility (lives in `WriteOperation`) — the namespace
   # coordinator treats path strings as opaque coordination tokens, the
   # same way `:claim_namespace_path` and `:claim_namespace_subtree` do.
   def apply(_meta, {:claim_namespace_create, path, holder}, state) when is_binary(path) do
@@ -1912,8 +1911,8 @@ defmodule NeonFS.Core.MetadataStateMachine do
     end
   end
 
-  # Foundation primitive for handle-pinned files (sub-issue #637 of
-  # #306). Allocates a `:shared :pinned` claim. Multiple pins on the
+  # Foundation primitive for handle-pinned files. Allocates a
+  # `:shared :pinned` claim. Multiple pins on the
   # same path coexist — each open `fd` is a separate pin. A pin only
   # fails when a covering `:exclusive` claim already exists (e.g. an
   # in-flight rename on the same path or a `Depth: infinity`
@@ -1923,7 +1922,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
     apply_namespace_claim(:pinned, path, :shared, holder, state)
   end
 
-  # Foundation primitive for POSIX byte-range advisory locks (#673).
+  # Foundation primitive for POSIX byte-range advisory locks.
   # Allocates a `:byte_range` claim with the supplied `range` (offset
   # and length, where length 0 means "to end of file" per POSIX).
   # Conflict detection is range-aware: two byte-range claims on the
@@ -1989,7 +1988,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
     {new_state, {:ok, length(released_ids)}, []}
   end
 
-  # Bootstrap-layer commands (new in v13, #779).
+  # Bootstrap-layer commands (new in v13).
   #
   # The bootstrap layer is a Ra-replicated *cache* of state that is
   # ultimately reconstructible from on-disk volume data. Every command
@@ -2042,7 +2041,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
     set_drive_trust(state, {node, drive_id}, :trusted)
   end
 
-  # "Node implies" (#1375): a returning node marks all of its known drives
+  # "Node implies": a returning node marks all of its known drives
   # `:unverified` at once; each clears back to `:trusted` independently as
   # it verifies. Drives are keyed `{node, drive_id}`, so we match on the
   # node element.
@@ -2214,7 +2213,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
     {new_state, :ok, []}
   end
 
-  # Snapshot commands (#960 / epic #959). Snapshots pin a volume's root
+  # Snapshot commands. Snapshots pin a volume's root
   # chunk hash at the moment they're taken; they don't carry chunk data
   # themselves. `:put_snapshot` is idempotent on the `id` key, so a
   # retried command from `Snapshot.create/2` won't produce duplicates.
@@ -2656,7 +2655,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
   defp ensure_nodes(state), do: Map.put(state, :nodes, %{})
 
   # Add an `:active` entry for a node only if it has none — never
-  # overwrites an existing lifecycle status (#1323).
+  # overwrites an existing lifecycle status.
   defp ensure_active_node(nodes, node) when is_map_key(nodes, node), do: nodes
 
   defp ensure_active_node(nodes, node) do
@@ -2674,7 +2673,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
   defp ensure_drive_trust(%{drive_trust: _} = state), do: state
   defp ensure_drive_trust(state), do: Map.put(state, :drive_trust, %{})
 
-  # Single-drive trust transition (#1375). `:unverified` stores the key;
+  # Single-drive trust transition. `:unverified` stores the key;
   # `:trusted` deletes it (absence is the default), so steady state is an
   # empty map. Emits a from/to transition event for observability + tests.
   defp set_drive_trust(state, {node, drive_id} = key, to) do
@@ -2835,7 +2834,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
   # Byte-range conflict detection. Only collides with other
   # `:byte_range` claims — by design, byte-range claims live in a
   # separate logical namespace from `:path` / `:subtree` / etc.
-  # (#673's "out of scope" call). A new claim conflicts with any
+  # (deliberately out of scope). A new claim conflicts with any
   # existing `:byte_range` claim on the same path whose range
   # overlaps and whose scope combination is incompatible.
   defp detect_byte_range_conflict(new_path, new_range, new_scope, claims) do
@@ -2983,7 +2982,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
   # Always includes `:claim_id`. Includes `:claim_path`, `:claim_type`
   # and `:claim_holder` taken from the claim *as it existed before
   # release* — subscribers (e.g. the unlink-while-open detached-file
-  # GC, #644) need these to identify which tombstones a release
+  # GC) need these to identify which tombstones a release
   # affects without having to query the state again. Fields default to
   # `nil` when the claim wasn't present (idempotent release of an
   # already-released or never-existed id).

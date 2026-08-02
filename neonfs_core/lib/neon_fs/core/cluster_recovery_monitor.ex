@@ -1,11 +1,11 @@
 defmodule NeonFS.Core.ClusterRecoveryMonitor do
   @moduledoc """
   Auto-detects a cold whole-cluster quorum reform and drives the cluster
-  into (and back out of) the `:recovering` mode (#1437, part of #1378).
+  into (and back out of) the `:recovering` mode.
 
   A power outage or a planned full power-down is not operator-initiated,
   so the `:recovering` state — which suppresses failure-driven repair and
-  throttles verification (#1436) so a mass restart doesn't cause a repair
+  throttles verification so a mass restart doesn't cause a repair
   storm — must be entered automatically.
 
   ## Detecting cold reform vs a single-node reboot
@@ -37,7 +37,7 @@ defmodule NeonFS.Core.ClusterRecoveryMonitor do
   (`DriveTrust`) — or after a bounded timeout backstop (default 30 min,
   runtime-configurable) so a permanently-missing member or stuck drive
   can't suppress repair forever. Explicit `:recovering` set by `cluster
-  thaw` (#1439) is driven to exit by the same loop.
+  thaw` is driven to exit by the same loop.
 
   Every dependency is injectable for testing.
   """

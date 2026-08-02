@@ -21,7 +21,7 @@ defmodule NeonFS.TestHelpers do
       single-chunk `[content]` stream (empty content collapses to `[]`).
     * erasure    → `WriteOperation.write_file_at/5` with `offset: 0`,
       which routes through the existing `erasure_write` whole-binary
-      path (streaming erasure writes are out of scope for #195).
+      path (streaming erasure writes are out of scope).
 
   Returns whatever the underlying `WriteOperation` returns.
   """

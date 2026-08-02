@@ -1,11 +1,11 @@
 defmodule NeonFS.Core.SyncOperation do
   @moduledoc """
-  The `fsync`/`sync`/COMMIT durability barrier (#1500).
+  The `fsync`/`sync`/COMMIT durability barrier.
 
   Blocks until every chunk of a file has at least the volume's
   `min_copies` durable replicas, driving synchronous replication for any
   chunk that is short (via `Replication.ensure_min_copies/2`). This is the
-  core mechanism the interface layer wires its sync operations to (#1502).
+  core mechanism the interface layer wires its sync operations to.
 
   On a `write_ack: :local` volume the extra replicas are placed by a
   fire-and-forget background task after the write acks, so a read — or a

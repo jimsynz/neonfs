@@ -1,7 +1,7 @@
 defmodule NeonFS.Core.ChunkIndex do
   @moduledoc """
-  GenServer managing chunk metadata against the per-volume metadata path
-  (#785). Provides fast point lookups by `(volume_id, hash)` plus list /
+  GenServer managing chunk metadata against the per-volume metadata path.
+  Provides fast point lookups by `(volume_id, hash)` plus list /
   scan operations served from a local ETS write-through cache.
 
   ## Per-volume metadata path
@@ -71,7 +71,7 @@ defmodule NeonFS.Core.ChunkIndex do
   Resolves through `Volume.MetadataReader.get_chunk_meta/3`. The local
   ETS table is a write-through materialisation for list operations on
   this node — serving point reads from it would return stale values
-  for keys written or deleted elsewhere in the cluster (#342).
+  for keys written or deleted elsewhere in the cluster.
   """
   @spec get(binary(), binary()) :: {:ok, ChunkMeta.t()} | {:error, :not_found}
   def get(volume_id, hash) when is_binary(volume_id) and is_binary(hash) do
@@ -140,7 +140,7 @@ defmodule NeonFS.Core.ChunkIndex do
 
   Unlike `lookup_by_hash/1` (local ETS only), this reads the cluster
   truth, so it is correct after a restart when the ETS cache is empty.
-  Drive evacuation classifies on-disk blobs against this (#1573): the
+  Drive evacuation classifies on-disk blobs against this: the
   cold-ETS `lookup_by_hash/1` misclassified real data chunks as untracked
   blobs and migrated them byte-for-byte without updating `chunk.locations`,
   orphaning them once the drained drive was wiped and re-added.
@@ -303,14 +303,14 @@ defmodule NeonFS.Core.ChunkIndex do
 
   @doc """
   Builds the metadata mutations that persist `hashes`' chunk metadata as
-  `committed`, for inclusion in a caller's batched root-CAS (#1304).
+  `committed`, for inclusion in a caller's batched root-CAS.
 
   Reads the local ETS materialisation and emits a `commit_state`-only
   `:merge` per chunk currently in the `:uncommitted` state. A merge (not a
   full put) so it only flips `commit_state` against whatever the chunk's
   current persisted value is — it can't clobber a concurrent
-  `update_locations/2` that adds a replica location to the same record
-  (#1304). Already-committed chunks (dedup hits against a prior write)
+  `update_locations/2` that adds a replica location to the same record.
+  Already-committed chunks (dedup hits against a prior write)
   need no persist and are skipped. Pair with `finalize_commit/2` in the
   batch's post-commit callback to flip the ETS state once the root is
   durable.
@@ -330,7 +330,7 @@ defmodule NeonFS.Core.ChunkIndex do
 
   @doc """
   Finalises a batched chunk commit in the local ETS materialisation
-  (#1304): drops `write_id`'s write ref from each chunk and, when no refs
+  : drops `write_id`'s write ref from each chunk and, when no refs
   remain, flips its `commit_state` to `:committed`. ETS-only — the
   persisted `:committed` payload was already written by the batch that
   carried `commit_mutations/2`'s puts, so this does no quorum write.
@@ -441,7 +441,7 @@ defmodule NeonFS.Core.ChunkIndex do
     case :ets.lookup(:chunk_index, hash) do
       [{^hash, chunk_meta}] ->
         # Persist a `locations`-only merge, not a full-meta overwrite, so a
-        # concurrent `commit_state` flip folded into the file batch (#1304)
+        # concurrent `commit_state` flip folded into the file batch
         # isn't clobbered.
         case merge_chunk_fields(chunk_meta, %{locations: locations}) do
           :ok ->

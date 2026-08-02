@@ -177,7 +177,7 @@ defmodule NeonFS.Core.ChunkFetcher do
   defp fetch_from_storage(hash, start_time, opts) do
     exclude_nodes = Keyword.get(opts, :exclude_nodes, [])
     # Fetch the (normally empty) present-but-not-durable-yet set once per
-    # read (#1375); each read attempt forces content-hash verification
+    # read; each read attempt forces content-hash verification
     # when it reads from a drive in this set. One local Ra query per
     # fetch — measure before caching.
     unverified = unverified_drives()
@@ -399,8 +399,8 @@ defmodule NeonFS.Core.ChunkFetcher do
   defp drive_score(_hdd, _state, true), do: 20
   defp drive_score(_hdd, _state, false), do: 30
 
-  # The `{node, drive_id}` set of present-but-not-durable-yet replicas
-  # (#1375). Degrades to "none" on a transient Ra hiccup so reads never
+  # The `{node, drive_id}` set of present-but-not-durable-yet replicas.
+  # Degrades to "none" on a transient Ra hiccup so reads never
   # hard-fail on it; worst case is a missed verify, i.e. status quo.
   defp unverified_drives, do: MapSet.new(DriveTrust.unverified())
 
@@ -448,9 +448,9 @@ defmodule NeonFS.Core.ChunkFetcher do
 
   # Prefer the volume-scoped lookup when the caller threads `:volume_id`
   # through `opts`. Background runners without `volume_id` (covered by
-  # the design call in #874) get `:not_found` — the chunk lookup needs
+  # the design call) get `:not_found` — the chunk lookup needs
   # the per-volume index tree to resolve, and there's no way to walk
-  # the global index tree from a hash-only entry point any more (#836).
+  # the global index tree from a hash-only entry point any more.
   defp lookup_chunk_meta(opts, hash) do
     case Keyword.fetch(opts, :volume_id) do
       {:ok, volume_id} -> ChunkIndex.get(volume_id, hash)
@@ -486,7 +486,7 @@ defmodule NeonFS.Core.ChunkFetcher do
 
       {:error, {:data_call_failed, reason}} ->
         # The pooled data-plane connection failed — typically a stale pool to a
-        # peer that restarted on a new data-plane port (#1450). `data_call` has
+        # peer that restarted on a new data-plane port. `data_call` has
         # already triggered a pool refresh; serve this read over distribution
         # RPC so it stays correct while the pool rebuilds. Essential for
         # single-replica volumes, where this node is the only location.

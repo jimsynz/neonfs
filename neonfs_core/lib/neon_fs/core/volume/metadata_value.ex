@@ -1,12 +1,12 @@
 defmodule NeonFS.Core.Volume.MetadataValue do
   @moduledoc """
-  Serialisation contract for index-tree values (#819).
+  Serialisation contract for index-tree values.
 
-  The IndexTree (#781) stores opaque bytes — the caller decides the
+  The IndexTree stores opaque bytes — the caller decides the
   encoding. Per-volume metadata uses ETF (`:erlang.term_to_binary/1`)
   so values round-trip BEAM struct shapes without a separate schema:
 
-  - Symmetric with the existing `Volume.RootSegment` (#780) format.
+  - Symmetric with the existing `Volume.RootSegment` format.
   - Lossless for atoms, datetimes, nested maps — the kind of fields
     `FileMeta` / `ChunkMeta` / `Stripe` carry.
   - `:safe` mode on decode rejects atoms not yet known to the VM,

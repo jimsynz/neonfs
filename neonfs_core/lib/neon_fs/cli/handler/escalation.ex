@@ -4,7 +4,7 @@ defmodule NeonFS.CLI.Handler.Escalation do
   escalations, resolving one by choosing an option, and fetching a
   single record.
 
-  Extracted from `NeonFS.CLI.Handler` (#1203). `NeonFS.CLI.Handler`
+  Extracted from `NeonFS.CLI.Handler`. `NeonFS.CLI.Handler`
   delegates its `handle_escalation_*` RPC entry points here, so the CLI
   wire contract is unchanged.
   """

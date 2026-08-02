@@ -95,7 +95,7 @@ defmodule NeonFS.Core.WriteOperation do
   file already exists at `path` (or another `create_only` write is in flight on
   the same path) — atomic create-if-not-exist semantics for `O_EXCL`,
   `If-None-Match: *`, S3 `If-None-Match: *`, etc. Coordination is via
-  `NamespaceCoordinator.claim_create/2` (#591); `{:error, :conflict}` may also
+  `NamespaceCoordinator.claim_create/2`; `{:error, :conflict}` may also
   surface when an unrelated namespace claim (e.g. a `Depth: infinity`
   collection lock) covers the path.
   """
@@ -137,7 +137,7 @@ defmodule NeonFS.Core.WriteOperation do
   `file_id`-keyed counterpart to `write_file_at/5`.
 
   Resolves the target file via `FileIndex.get/1` so writes succeed
-  even when the path is detached (`#638`). Used by FUSE / NFSv4 fd
+  even when the path is detached. Used by FUSE / NFSv4 fd
   holders that opened the file before an unlink and continue writing
   through the cached `file_id`. Existing chunks are rewritten as with
   `write_file_at/5`.
@@ -252,7 +252,7 @@ defmodule NeonFS.Core.WriteOperation do
   # `create_only`-gated path for `write_file_at/5`. Overwriting an
   # existing file is the common case; `create_only: true` adds an
   # `EEXIST`-shaped pre-check + namespace-coordinator claim around the
-  # new-file path. See sub-issue #592 of #303.
+  # new-file path.
   defp do_write_file_at(volume, volume_id, path, offset, data, write_id, opts) do
     if Keyword.get(opts, :create_only, false) do
       with_create_claim(volume_id, path, fn ->
@@ -452,7 +452,7 @@ defmodule NeonFS.Core.WriteOperation do
   # Processes one fed batch of chunks and halts the stream reduce as soon
   # as the running total crosses the volume's cap — rather than buffering
   # the whole stream first — so transient over-cap storage is bounded to
-  # roughly one chunk (#1462).
+  # roughly one chunk.
   defp feed_batch(emitted, acc, index, compression_config, volume, write_ctx, capacity) do
     with {:ok, processed} <-
            process_streamed_chunks(emitted, index, compression_config, volume, write_ctx),
@@ -591,7 +591,7 @@ defmodule NeonFS.Core.WriteOperation do
              size: new_size
            ) do
         {:ok, _updated_meta} = ok ->
-          # Account the offset write against volume stats (#1036): only the
+          # Account the offset write against volume stats: only the
           # grown bytes are new logical data, plus any newly-stored (non-deduped)
           # chunks. Without this, files written via FUSE/NFS — create an empty
           # file, then write at offsets through this path — leave the volume
@@ -1362,8 +1362,8 @@ defmodule NeonFS.Core.WriteOperation do
   end
 
   # Persists the erasure file metadata, commits the stripe chunks, and
-  # writes the `:stripe_index` entries in one batched root flip (#1318,
-  # #1320): the stripe chunks' `:committed` chunk-meta and the stripe-index
+  # writes the `:stripe_index` entries in one batched root flip: the
+  # stripe chunks' `:committed` chunk-meta and the stripe-index
   # puts all fold into the same shard-CAS as the file-meta + dirent create.
   defp create_erasure_file_metadata(volume_id, path, stripe_results, data, write_id, chunks, opts) do
     case FileIndex.get_by_path(volume_id, path) do
@@ -1633,7 +1633,7 @@ defmodule NeonFS.Core.WriteOperation do
   # extra replicas are best-effort background work, so a shortfall there is
   # logged, not fatal. `:quorum` / `:all` promise `min_copies` durable on
   # ack — failing to reach it must fail the write rather than silently
-  # under-replicate while reporting success (#1501). The count check catches
+  # under-replicate while reporting success. The count check catches
   # both a quorum that couldn't ack and `replicate_chunk`'s no-targets
   # short-circuit (which returns just the local copy regardless of ack).
   defp handle_replication_result({:ok, locations}, write_ack, min_copies)
@@ -1693,7 +1693,7 @@ defmodule NeonFS.Core.WriteOperation do
   end
 
   # Persists the file metadata and commits the write's content chunks in
-  # one batched root flip (#1304): `FileIndex.create_committing_chunks/3`
+  # one batched root flip: `FileIndex.create_committing_chunks/3`
   # folds the chunks' `:committed` chunk-meta into the same shard-CAS as
   # the file-meta + dirent create.
   defp create_file_metadata_with_size(volume_id, path, chunks, size, write_id, opts) do
@@ -1751,7 +1751,7 @@ defmodule NeonFS.Core.WriteOperation do
   both storage and the `ChunkIndex`. Safe to call multiple times.
 
   Made public so `NeonFS.Core.PendingWriteRecovery` can drive orphan
-  cleanup on startup (#296).
+  cleanup on startup.
   """
   @spec abort_chunks(write_id()) :: :ok
   def abort_chunks(write_id) do
@@ -1805,7 +1805,7 @@ defmodule NeonFS.Core.WriteOperation do
 
   # Best-effort stats update for the offset-write path: the file is already
   # committed, so a VolumeRegistry timeout (which exits) or error must not
-  # propagate and fail the write (#1036).
+  # propagate and fail the write.
   defp safe_update_volume_stats(volume_id, size, chunks) do
     update_volume_stats_with_size(volume_id, size, chunks)
   catch
@@ -1819,8 +1819,8 @@ defmodule NeonFS.Core.WriteOperation do
       :ok
   end
 
-  # Rejects a write that would push the volume past its `max_size` cap
-  # (#1462). `delta` is the additional logical bytes the write adds.
+  # Rejects a write that would push the volume past its `max_size` cap.
+  # `delta` is the additional logical bytes the write adds.
   # A `nil` cap is unlimited. The check reads the (eventually-consistent)
   # `logical_size` counter — a soft cap the atomic counter and the scrub
   # reconcile keep close to reality.
@@ -1850,7 +1850,7 @@ defmodule NeonFS.Core.WriteOperation do
   end
 
   # Rejects the creation of a new file that would push the volume past its
-  # `max_files` quota (#1470). `nil` is unlimited. Like the byte cap, this
+  # `max_files` quota. `nil` is unlimited. Like the byte cap, this
   # reads the eventually-consistent `file_count` counter (kept close to
   # reality by the atomic increment and the scrub reconcile).
   defp check_file_quota(%{max_files: nil}), do: :ok
@@ -1875,7 +1875,7 @@ defmodule NeonFS.Core.WriteOperation do
   # byte delta (full size for a new file, `new_size - old_size` for an
   # overwrite via the offset path); the atomic Ra increment keeps
   # concurrent writes to the same volume from clobbering each other's
-  # count (#1462).
+  # count.
   defp update_volume_stats_with_size(volume_id, size, chunks, file_delta \\ 0) do
     new_chunks = Enum.filter(chunks, & &1.new)
     physical_delta = Enum.sum(Enum.map(new_chunks, & &1.stored_size))
@@ -1909,14 +1909,14 @@ defmodule NeonFS.Core.WriteOperation do
   # NFS AUTH_SYS client) so `Authorise.check` runs against them, while
   # `:uid`/`:gid` set the resulting file's ownership. Callers that pass
   # only `:uid`/`:gids` (S3, WebDAV, FUSE, containerd) keep their prior
-  # behaviour: the owner doubles as the authorised identity (#1230).
+  # behaviour: the owner doubles as the authorised identity.
   defp authz_identity(opts) do
     uid = Keyword.get(opts, :auth_uid) || Keyword.get(opts, :uid, 0)
     gids = Keyword.get(opts, :auth_gids) || Keyword.get(opts, :gids, [])
     {uid, gids}
   end
 
-  # Authorise a path-based write against POSIX mode (#1339): an existing
+  # Authorise a path-based write against POSIX mode: an existing
   # file → write on the file itself; a new path → write on its parent
   # directory. uid 0 (FUSE / S3 / WebDAV / internal callers, which pass no
   # auth uid) bypasses before any metadata lookup.

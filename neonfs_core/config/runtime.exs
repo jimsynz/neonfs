@@ -35,7 +35,7 @@ if config_env() == :prod do
 
   # Core configuration
   #
-  # Fresh installs come up with no drives configured (#754). Operators
+  # Fresh installs come up with no drives configured. Operators
   # run `neonfs drive add ...` after `cluster init` to register
   # production storage; the daemon refuses to accept writes until at
   # least one drive is registered. The previous behaviour

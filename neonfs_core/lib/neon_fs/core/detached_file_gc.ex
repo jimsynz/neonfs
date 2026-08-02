@@ -3,7 +3,7 @@ defmodule NeonFS.Core.DetachedFileGC do
   Telemetry handler that GC's `:detached` FileMetas when their pins
   release.
 
-  POSIX unlink-while-open (sub-issue #644 of #638) keeps the chunks of
+  POSIX unlink-while-open keeps the chunks of
   an unlinked file reachable for as long as any open handle holds a
   `:pinned` namespace claim against the path. Each detached
   `FileMeta` snapshots the pin claim ids that block its GC at detach
@@ -53,7 +53,7 @@ defmodule NeonFS.Core.DetachedFileGC do
   # `FileIndex.decrement_pin/2` work inline blocks Ra until the
   # `MetadataWriter` round-trip — itself a Ra command for the
   # bootstrap pointer update — completes, which it never can while the
-  # current Ra apply is still in flight (#904). The handler therefore
+  # current Ra apply is still in flight. The handler therefore
   # only forwards the claim ids onto this module's GenServer; the
   # `handle_info/2` callback below picks them up off the apply path
   # and runs the per-claim work without blocking Ra.

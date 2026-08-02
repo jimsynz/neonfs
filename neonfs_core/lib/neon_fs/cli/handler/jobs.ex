@@ -4,7 +4,7 @@ defmodule NeonFS.CLI.Handler.Jobs do
   and inspecting jobs (cluster-wide or local), cancelling them, and
   reading/reconfiguring the per-node `BackgroundWorker`.
 
-  Extracted from `NeonFS.CLI.Handler` (#1203). `NeonFS.CLI.Handler`
+  Extracted from `NeonFS.CLI.Handler`. `NeonFS.CLI.Handler`
   delegates its `handle_list_jobs`/`handle_get_job`/`handle_cancel_job`/
   `handle_worker_status`/`handle_worker_configure` RPC entry points here,
   so the CLI wire contract is unchanged. Job rendering uses the shared
@@ -233,7 +233,7 @@ defmodule NeonFS.CLI.Handler.Jobs do
   end
 
   # Discovered from the application's module list rather than a
-  # hand-maintained list that silently drifts out of sync (#1580 —
+  # hand-maintained list that silently drifts out of sync (
   # `ReplicaRepair` was missing, so `job list --type replica-repair`
   # returned nothing).
   @doc false

@@ -1,6 +1,6 @@
 defmodule NeonFS.Core.BackupCrypto do
   @moduledoc """
-  At-rest encryption for backup archives (#1004, part of #248).
+  At-rest encryption for backup archives.
 
   A backup is encrypted under a fresh per-archive **content key** (32
   random bytes). File bodies are encrypted frame-at-a-time with

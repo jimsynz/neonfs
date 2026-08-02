@@ -105,7 +105,7 @@ defmodule NeonFS.Core.ReadOperation do
   Counterpart to `read_file/3` that resolves the file by `file_id`
   instead of `path`.
 
-  The unlink-while-open story (#638) keeps a deleted file's chunks
+  The unlink-while-open story keeps a deleted file's chunks
   reachable by `file_id` for as long as some `:pinned` claim holds.
   Callers that opened the file before the unlink (FUSE / NFSv4 fd
   holders) cache the `file_id` and read through here so the
@@ -1033,7 +1033,7 @@ defmodule NeonFS.Core.ReadOperation do
     end
   end
 
-  # Authorise a read against the file's POSIX mode (#1339). uid 0
+  # Authorise a read against the file's POSIX mode. uid 0
   # (FUSE / S3 / WebDAV / internal callers, which pass no auth uid)
   # bypasses before any lookup.
   defp authorise_read(0, _gids, _volume_id, _path), do: :ok
@@ -1056,7 +1056,7 @@ defmodule NeonFS.Core.ReadOperation do
 
   # Counterpart to `get_file/2` keyed by `file_id`. Resolves through
   # `FileIndex.get/2` which works for both live and `:detached` files
-  # — that's the whole point of the unlink-while-open story (#638).
+  # — that's the whole point of the unlink-while-open story.
   # Verifies the resolved FileMeta belongs to the requested volume so
   # a stale `file_id` from another volume can't slip through.
   defp get_file_by_id(volume_id, file_id) do

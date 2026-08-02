@@ -56,7 +56,7 @@ defmodule NeonFS.Core.ServiceRegistry do
 
   # On boot the data-plane `Listener` may not have bound yet when we first
   # self-register, so `build_self_metadata/0` yields no `:data_endpoint`
-  # and peers can't open a data-plane pool to us (#1450). The init/join
+  # and peers can't open a data-plane pool to us. The init/join
   # flows call `refresh_self/0` once the Listener is up, but a plain
   # auto-restart from persisted state runs neither — so we self-heal by
   # re-registering until the endpoint is present.
@@ -191,7 +191,7 @@ defmodule NeonFS.Core.ServiceRegistry do
     end
   end
 
-  # Stamp the node's lifecycle status on its services (#1324, #1376), so
+  # Stamp the node's lifecycle status on its services, so
   # the existing discovery RPC carries node lifecycle to clients without
   # a new protocol. The client `CostFunction` deprioritises both
   # `:draining` and `:maintenance` nodes when routing.
@@ -339,7 +339,7 @@ defmodule NeonFS.Core.ServiceRegistry do
   # transiently around the distribution restart on `cluster init`, and
   # deregistering self would strand a single-node cluster with no
   # registered core, so every interface reports "all core nodes
-  # unreachable" (#1049). Ignore it; the local core stays registered.
+  # unreachable". Ignore it; the local core stays registered.
   @impl true
   def handle_info({:nodedown, node, _info}, state) when node == node() do
     {:noreply, state}
@@ -671,7 +671,7 @@ defmodule NeonFS.Core.ServiceRegistry do
       |> write_result()
 
     # Membership-change observers (e.g. `ReplicaRepairScheduler` from
-    # #708) attach to this telemetry event to react to nodes leaving
+    # attach to this telemetry event to react to nodes leaving
     # the cluster without taking a hard dependency on
     # `ServiceRegistry`.
     :telemetry.execute(

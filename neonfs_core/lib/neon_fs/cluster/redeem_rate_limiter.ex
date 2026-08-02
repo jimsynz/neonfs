@@ -1,7 +1,7 @@
 defmodule NeonFS.Cluster.RedeemRateLimiter do
   @moduledoc """
   Per-source-IP fixed-window rate limiter for the invite-redemption HTTP
-  endpoint (#1198).
+  endpoint.
 
   Redemption is a low-volume operation — a node redeems an invite once
   when it joins — so requests are serialised through this GenServer

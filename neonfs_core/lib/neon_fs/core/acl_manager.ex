@@ -235,7 +235,7 @@ defmodule NeonFS.Core.ACLManager do
       volume_id: volume_id,
       owner_uid: Map.get(acl_data, :owner_uid, 0),
       owner_gid: Map.get(acl_data, :owner_gid, 0),
-      # Volumes created before #1339 have no stored mode → world-writable
+      # Older volumes have no stored mode → world-writable
       # default, matching a fresh volume (POSIX governs per-object).
       mode: Map.get(acl_data, :mode, 0o777),
       entries: entries

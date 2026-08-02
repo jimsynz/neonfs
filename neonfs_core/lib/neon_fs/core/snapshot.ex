@@ -1,9 +1,9 @@
 defmodule NeonFS.Core.Snapshot do
   @moduledoc """
-  Volume snapshots (#960 / epic #959).
+  Volume snapshots.
 
   A snapshot is a frozen pointer to a volume's root chunk hashes at a
-  point in time — one per shard (#1307), in `root_chunk_hashes`.
+  point in time — one per shard, in `root_chunk_hashes`.
   Snapshots don't carry chunk data — they share storage with the live
   volume via the content-addressed graph. Deletion is just a Ra write
   that removes the pin; reclamation is the GC scheduler's job (separate
@@ -93,7 +93,7 @@ defmodule NeonFS.Core.Snapshot do
 
   @doc """
   Promotes a snapshot to a brand-new top-level volume that shares
-  storage with the source (#964).
+  storage with the source.
 
   Creates `new_volume_name` whose `volume_root` points at the same
   `root_chunk_hash` as `snapshot_id`. Chunks and per-volume tree pages
@@ -136,13 +136,12 @@ defmodule NeonFS.Core.Snapshot do
   end
 
   @doc """
-  Restore a volume's live `volume_root` to a snapshot's saved root
-  (#963).
+  Restore a volume's live `volume_root` to a snapshot's saved root.
 
   Destructive in the general case: chunks reachable from the current
   live root but not from any remaining snapshot become unreferenced
   and will be reclaimed by the next GC pass (which walks every
-  snapshot root, per #961).
+  snapshot root).
 
   ## Options
 

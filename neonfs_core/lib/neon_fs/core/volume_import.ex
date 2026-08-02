@@ -1,7 +1,6 @@
 defmodule NeonFS.Core.VolumeImport do
   @moduledoc """
-  Import a `VolumeExport` tarball into a brand-new volume (#966,
-  part of the snapshots epic #959). Pairs with
+  Import a `VolumeExport` tarball into a brand-new volume. Pairs with
   `NeonFS.Core.VolumeExport` for round-trip volume migration.
 
   The tar is parsed as a stream: each `files/<path>` entry's body
@@ -64,12 +63,12 @@ defmodule NeonFS.Core.VolumeImport do
 
   ## Options
 
-    * `:passphrase` — decrypt an encrypted archive (#1004). Required
+    * `:passphrase` — decrypt an encrypted archive. Required
       when the manifest carries an `encryption` envelope; checked
       before the volume is created, so a wrong passphrase writes
       nothing.
     * `:into_existing` — when `true`, restore into the existing volume
-      named `new_volume_name` instead of creating a fresh one (#1368).
+      named `new_volume_name` instead of creating a fresh one.
       The volume record must already exist (else `{:error, :not_found}`).
       Files overwrite by path; the target's other files are left in
       place. Used by full-cluster DR restore, where the volume record is
@@ -91,7 +90,7 @@ defmodule NeonFS.Core.VolumeImport do
 
   @doc """
   Restore a chain of archives — a full backup followed by zero or more
-  incrementals (#1003) — into a new volume named `new_volume_name`.
+  incrementals — into a new volume named `new_volume_name`.
 
   `archive_paths` must be ordered oldest-first (the full base, then each
   incremental in the order it was taken). The full is imported into a
@@ -201,7 +200,7 @@ defmodule NeonFS.Core.VolumeImport do
   # archive is restored into the volume that already carries
   # `new_volume_name` — the case full-cluster DR restore needs, where the
   # `volumes` keyspace has already been reseeded from a DR snapshot so the
-  # record exists before its content is restored (#1368). Files overwrite
+  # record exists before its content is restored. Files overwrite
   # by path; entries already in the target that the archive doesn't carry
   # are left untouched (merge-by-path), which is a clean replace when the
   # target is the freshly-bootstrapped, empty volume.

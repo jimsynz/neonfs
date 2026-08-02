@@ -1,7 +1,7 @@
 defmodule NeonFS.Core.PlacementBarrier do
   @moduledoc """
   Tracks in-flight background chunk placements so a cluster freeze can drain
-  them before reporting the cluster durable and quiescent (#1504).
+  them before reporting the cluster durable and quiescent.
 
   A `write_ack: :local` volume acknowledges a write once the primary copy is
   on local disk and places the remaining replicas in a fire-and-forget
@@ -10,7 +10,7 @@ defmodule NeonFS.Core.PlacementBarrier do
   not yet at its `min_copies` durable replica set — a power-cycle in that
   window drops the not-yet-placed copies.
 
-  Freeze cuts new write ingress (the #1438 write-gate on `:frozen`) and then
+  Freeze cuts new write ingress (the write-gate on `:frozen`) and then
   drains the outstanding placements through this barrier, so everything
   already acknowledged reaches its replica set before the operator powers
   off. Placements run under a dedicated `Task.Supervisor`

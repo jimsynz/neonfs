@@ -46,7 +46,7 @@ defmodule NeonFS.Core.StripeIndex do
 
   @doc """
   Builds the `:stripe_index` put mutations for `stripes`, for inclusion in
-  a caller's batched root-CAS (#1320) — the erasure write path folds these
+  a caller's batched root-CAS — the erasure write path folds these
   into the same `FileIndex` batch as the file-meta + chunk commits instead
   of persisting each stripe with its own `put/1` flip. Pure: no ETS, no
   persist. Pair with `materialize/1` in the batch's post-commit callback.
@@ -61,7 +61,7 @@ defmodule NeonFS.Core.StripeIndex do
 
   @doc """
   Inserts `stripes` into the local ETS materialisation once the batch that
-  carried `put_mutations/1`'s puts is durable (#1320). ETS-only — the
+  carried `put_mutations/1`'s puts is durable. ETS-only — the
   persist already happened in the batch.
   """
   @spec materialize([Stripe.t()]) :: :ok
@@ -75,7 +75,7 @@ defmodule NeonFS.Core.StripeIndex do
   Resolves through `Volume.MetadataReader.get_stripe/3`. The local ETS
   table is a write-through materialisation for list operations on this
   node — serving point reads from it would return stale values for
-  keys written or deleted elsewhere in the cluster (#342).
+  keys written or deleted elsewhere in the cluster.
   """
   @spec get(binary(), binary()) :: {:ok, Stripe.t()} | {:error, :not_found}
   def get(volume_id, stripe_id) when is_binary(volume_id) and is_binary(stripe_id) do

@@ -1,30 +1,30 @@
 defmodule NeonFS.Core.Volume.MetadataWriter do
   @moduledoc """
-  The mirror of `NeonFS.Core.Volume.MetadataReader` (#820) for the
-  write path (#785).
+  The mirror of `NeonFS.Core.Volume.MetadataReader` for the
+  write path.
 
   The flow for every write:
 
   1. Resolve `volume_id` to `{root_chunk_hash, drive_locations}`
-     via the bootstrap layer (#779).
-  2. Read + decode the current `RootSegment` (#780).
+     via the bootstrap layer.
+  2. Read + decode the current `RootSegment`.
   3. Apply the update to the relevant index tree via the write
-     NIFs (#828) — produces a new `tree_root_hash` (CoW).
-  4. Advance the per-volume HLC (#782) and bump
+     NIFs — produces a new `tree_root_hash` (CoW).
+  4. Advance the per-volume HLC and bump
      `last_written_by_neonfs_version`.
   5. Build a new `RootSegment` with the updated `index_roots[kind]`
      + advanced HLC.
-  6. Encode + replicate via `Volume.ChunkReplicator` (#808).
+  6. Encode + replicate via `Volume.ChunkReplicator`.
   7. Submit `:update_volume_root` to Ra so the bootstrap pointer
      swaps to the new root.
 
-  The bootstrap-event subscription on `MetadataCache` (#826)
+  The bootstrap-event subscription on `MetadataCache`
   invalidates cached entries for the volume once the Ra command
   commits, so the next read goes through the full walk and picks
   up the new state.
 
   Per-volume serialisation is provided by the CAS variant of the Ra
-  command (`:cas_update_volume_root`, #830). The writer threads the
+  command (`:cas_update_volume_root`). The writer threads the
   current root chunk hash as `expected_previous_hash`; if a
   concurrent writer has flipped the bootstrap pointer in the
   meantime, Ra rejects the update with
@@ -34,7 +34,7 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
   retry budget is configurable via `:cas_retries` (default 10),
   and conflicting retries back off with full jitter so a burst of
   concurrent writers to one volume decorrelates rather than
-  re-colliding on every attempt (#1219 — the high-concurrency
+  re-colliding on every attempt (the high-concurrency
   write-burst test exhausted an immediate-retry budget).
 
   The same budget covers *ambiguous* publications. A Ra command that
@@ -49,7 +49,7 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
 
   Each external dependency is injectable via opts so unit tests
   drive the function with deterministic stubs (same pattern as
-  `Volume.Provisioner` from #810 and `MetadataReader` from #820).
+  `Volume.Provisioner` and `MetadataReader`).
   """
 
   alias NeonFS.Core.Blob.Native
@@ -124,7 +124,7 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
 
   @doc """
   Read-modify-write `key`: decode its current value, `Map.merge/2` the
-  `fields` map over it, and write the result back (#1304). Returns the
+  `fields` map over it, and write the result back. Returns the
   `root_chunk_hash` the bootstrap layer now points at, or
   `{:error, :merge_target_missing}` if the key has no current value.
 
@@ -200,8 +200,8 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
   end
 
   @doc """
-  Reap tombstones older than `before_unix_nanos` across every shard
-  (#1312). Returns `%{shard => new_root_chunk_hash}` for the shards that
+  Reap tombstones older than `before_unix_nanos` across every shard.
+  Returns `%{shard => new_root_chunk_hash}` for the shards that
   had a non-empty tree; an all-empty volume is a no-op (`{:ok, %{}}`).
   """
   @spec purge_tombstones(binary(), index_kind(), non_neg_integer(), keyword()) ::
@@ -223,8 +223,8 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
     )
   end
 
-  # Tombstone reaping is volume-wide, so it sweeps every shard's tree
-  # (#1312). A shard with no tree root has nothing to purge and is
+  # Tombstone reaping is volume-wide, so it sweeps every shard's tree.
+  # A shard with no tree root has nothing to purge and is
   # skipped; an all-empty volume is a no-op (`{:ok, %{}}`). Returns
   # `%{shard => new_root}` for the shards actually purged; the first
   # shard whose purge fails aborts the sweep.
@@ -285,7 +285,7 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
 
   @default_cas_retries 30
 
-  # CAS-conflict backoff bounds (#1219). Optimistic
+  # CAS-conflict backoff bounds. Optimistic
   # `:cas_update_volume_root` conflicts retry end-to-end; retrying
   # immediately under a concurrent write burst just re-collides, so
   # sleep a jittered, exponentially-growing interval (capped) between
@@ -297,7 +297,7 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
   # Ra command timeout for the volume-root CAS commit. `RaSupervisor.command`
   # defaults to 5s, which is too tight when the metadata layer is under a
   # burst of concurrent commits — e.g. a DR restore writing many files'
-  # metadata while the cluster is otherwise busy (#1515) — so a healthy
+  # metadata while the cluster is otherwise busy — so a healthy
   # leader spuriously times out. Matches the module's `@remote_write_timeout`.
   @bootstrap_command_timeout 30_000
 
@@ -306,11 +306,11 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
   # has none, the resolve step fails with `{:no_local_replica, drive_locations}`
   # (often wrapped in `:root_chunk_unreachable`) *before* anything is committed,
   # and the candidate nodes are carried in that error. Re-dispatch the whole
-  # operation to one of them — the read path has the same fallback (#1045).
+  # operation to one of them — the read path has the same fallback.
   #
   # Correctness-only: this does not change the root segment's replica set; it
   # just routes the write to a node that can perform it (routing/placement is
-  # tracked in #1046). `__remote_dispatched` stops the remote side recursing.
+  # tracked separately). `__remote_dispatched` stops the remote side recursing.
   # Only `:no_local_replica` triggers re-dispatch — every other error (CAS
   # exhaustion, not_found, malformed) is authoritative or already retried
   # locally, and is returned as-is.
@@ -588,7 +588,7 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
   # Read-decode-merge-encode-put against the current tree root. Runs inside
   # the CAS retry loop, so a stale-pointer conflict re-reads the latest
   # value and re-merges `fields` over it — disjoint-field writers compose
-  # instead of clobbering (#1304).
+  # instead of clobbering.
   defp merge_tree_op(key, fields, opts) do
     nif_get = Keyword.get(opts, :index_tree_get, &Native.index_tree_get/4)
     nif_put = Keyword.get(opts, :index_tree_put, &Native.index_tree_put/5)
@@ -799,7 +799,7 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
   # volume's full metadata drive set with the same majority-wins quorum
   # (`min_copies`) the root segment uses, before the bootstrap pointer
   # flips — so any replica node can walk the tree immediately rather
-  # than only after anti-entropy catches up (#903). A node chunk that
+  # than only after anti-entropy catches up. A node chunk that
   # can't reach quorum aborts the whole write; the locally-written
   # chunks orphan to GC, exactly as a failed segment replication does.
   defp replicate_tree_nodes([], _replica_drives, _durability, _opts), do: :ok
@@ -818,7 +818,7 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
     min_copies = min_copies(durability)
 
     # Thread the volume so ChunkReplicator routes the write through the IO
-    # scheduler at `:metadata_commit` priority (#1305).
+    # scheduler at `:metadata_commit` priority.
     base_opts = [min_copies: min_copies, volume_id: Keyword.get(opts, :volume_id)]
     write_opts = maybe_put_writer_fn(base_opts, opts)
 
@@ -888,7 +888,7 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
       # `{:error, {:stale_pointer, …}}` arrives here as
       # `{:ok, {:error, …}, leader}`. Unwrap the inner error and surface
       # it, otherwise a rejected CAS reads as success and the write is
-      # silently dropped (#1260 — concurrent index-tree lost updates).
+      # silently dropped (concurrent index-tree lost updates).
       {:ok, {:error, reason}, _leader} -> {:error, reason}
       {:ok, result, _leader} -> {:ok, result}
       {:error, _} = err -> err

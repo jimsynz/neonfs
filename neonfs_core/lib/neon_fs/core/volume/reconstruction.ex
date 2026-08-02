@@ -1,7 +1,6 @@
 defmodule NeonFS.Core.Volume.Reconstruction do
   @moduledoc """
-  Pure-logic core of the bootstrap-layer reconstruction (#838 /
-  part of #788).
+  Pure-logic core of the bootstrap-layer reconstruction.
 
   Given:
 
@@ -12,11 +11,11 @@ defmodule NeonFS.Core.Volume.Reconstruction do
   - The expected `cluster_id` (refuses to incorporate root segments
     from a different cluster).
 
-  Walks each drive's identity file (`Drive.Identity`, #778), scans
+  Walks each drive's identity file (`Drive.Identity`), scans
   candidate chunks, decodes each one, and keeps those that parse
-  as a `Volume.RootSegment` (#780). The output is the `:register_drive`
-  + `:register_volume_root` Ra commands an operator's CLI (#839)
-  would submit to rebuild the bootstrap layer (#779) state.
+  as a `Volume.RootSegment`. The output is the `:register_drive`
+  + `:register_volume_root` Ra commands an operator's CLI
+  would submit to rebuild the bootstrap layer state.
 
   All filesystem / blob I/O is injectable via opts so this module
   is unit-testable against in-memory fixtures without spinning up
@@ -29,7 +28,7 @@ defmodule NeonFS.Core.Volume.Reconstruction do
   partial GC means the operator may see both, and the HLC tiebreak
   is the correct call.
 
-  ## Sharded roots (#1313)
+  ## Sharded roots
 
   A volume's metadata root is split into `Shard.count/0` shards, each its
   own bootstrap pointer. A segment records the shard it belongs to
@@ -83,7 +82,7 @@ defmodule NeonFS.Core.Volume.Reconstruction do
     submission gate lives in the handler (`submit_commands/2`).
   - `:chunk_lister` — `(drive_path -> [chunk_hash])`. Default
     raises with a clear error so production callers must supply
-    one (the CLI / orchestrator in #839 wires up the real walker).
+    one (the CLI orchestrator wires up the real walker).
   - `:chunk_reader` — `(drive_path, chunk_hash -> {:ok, bytes} |
     {:error, _})`. Same default behaviour as above.
   - `:identity_reader` — `(drive_path -> {:ok, Identity.t()} |
@@ -99,7 +98,7 @@ defmodule NeonFS.Core.Volume.Reconstruction do
     all_shards = Keyword.get(opts, :shards, Shard.all())
     # `:dry_run?` is accepted for API stability but no longer changes
     # what the algorithm returns — the handler gates submission, not
-    # this function. See #855.
+    # this function.
     _ = Keyword.get(opts, :dry_run?, false)
     identity_reader = Keyword.get(opts, :identity_reader, &Identity.read/1)
     chunk_lister = Keyword.get(opts, :chunk_lister, &default_chunk_lister/1)
@@ -122,7 +121,7 @@ defmodule NeonFS.Core.Volume.Reconstruction do
     # Build commands regardless of `:dry_run?` so the CLI's preview
     # output reports `commands == drives + volumes` per the runbook
     # contract. The handler's `submit_commands/2` is what actually
-    # gates submission against the dry-run flag (#855).
+    # gates submission against the dry-run flag.
     commands = build_commands(drives, volumes, target_node, all_shards)
 
     %{
@@ -291,7 +290,7 @@ defmodule NeonFS.Core.Volume.Reconstruction do
   end
 
   # A `shard: n` segment restores shard `n`; the `shard: nil` shared empty
-  # chunk fills every shard that didn't diverge (#1313).
+  # chunk fills every shard that didn't diverge.
   defp volume_shard_commands(volume_id, shard_map, target_node, all_shards) do
     {empty_root, diverged} = Map.pop(shard_map, nil)
 
@@ -332,12 +331,12 @@ defmodule NeonFS.Core.Volume.Reconstruction do
   defp default_chunk_lister(_drive_path) do
     raise ArgumentError,
           "Reconstruction.reconstruct/2 needs a `:chunk_lister` opt; " <>
-            "the production walker lives in #839 (CLI orchestrator)"
+            "the production walker lives in the CLI orchestrator"
   end
 
   defp default_chunk_reader(_drive_path, _hash) do
     raise ArgumentError,
           "Reconstruction.reconstruct/2 needs a `:chunk_reader` opt; " <>
-            "the production reader lives in #839 (CLI orchestrator)"
+            "the production reader lives in the CLI orchestrator"
   end
 end

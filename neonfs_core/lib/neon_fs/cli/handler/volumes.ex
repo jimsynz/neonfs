@@ -3,7 +3,7 @@ defmodule NeonFS.CLI.Handler.Volumes do
   Volume-operations CLI command handlers: list, create, update, delete,
   get, and per-volume key rotation.
 
-  Extracted from `NeonFS.CLI.Handler` (#1203). `NeonFS.CLI.Handler`
+  Extracted from `NeonFS.CLI.Handler`. `NeonFS.CLI.Handler`
   delegates its `list_volumes/1`, `create_volume/2`, `update_volume/2`,
   `delete_volume/1,2`, `get_volume/1`, `rotate_volume_key/1` and
   `rotation_status/1` RPC entry points here, so the CLI wire contract is
@@ -430,7 +430,7 @@ defmodule NeonFS.CLI.Handler.Volumes do
   # more drives than the cluster currently has — replicas and erasure
   # shards are placed on distinct drives, which may live on the same
   # node, so the bound is the cluster-wide drive count, not the core
-  # node count (#1032). A single multi-drive node can satisfy
+  # node count. A single multi-drive node can satisfy
   # `replicate:2`; a factor above the total drive count cannot be
   # placed and writes would leave the chunk under-replicated.
   # `--allow-under-replicated` plumbs through as
@@ -471,7 +471,7 @@ defmodule NeonFS.CLI.Handler.Volumes do
   # `MetadataStateMachine` (strongly consistent). `DriveRegistry`'s ETS
   # table is an eventually-consistent local cache that under-counts
   # remote drives until its periodic peer sync catches up, which races
-  # volume creation during cluster formation (#1032). Prefer Ra; fall
+  # volume creation during cluster formation. Prefer Ra; fall
   # back to the local cache only when Ra is unreachable (no core node
   # to coordinate with — e.g. handler unit tests without a cluster).
   defp cluster_drive_count do

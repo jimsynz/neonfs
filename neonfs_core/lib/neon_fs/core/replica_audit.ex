@@ -1,8 +1,7 @@
 defmodule NeonFS.Core.ReplicaAudit do
   @moduledoc """
   Counts how many drives actually hold each volume's chunks, and decides
-  whether losing one drive would take a volume below its durability floor
-  (#1618).
+  whether losing one drive would take a volume below its durability floor.
 
   Two operator-facing uses, one traversal:
 
@@ -19,8 +18,8 @@ defmodule NeonFS.Core.ReplicaAudit do
   Nothing stopped either operation before this: evacuation finalisation
   deregisters a drive on a filesystem-empty check, and
   `DriveManager.remove_drive/2`'s `:force` only bypassed the
-  data-presence test. #1573 turned that into unrecoverable loss because
-  `_system` held exactly one copy of the CA key; #1617 now scales
+  data-presence test. That turned into unrecoverable loss because
+  `_system` held exactly one copy of the CA key; the factor now scales
   `_system` with the drive count, and this guard stops an operator (or a
   future bug) from spending the redundancy that buys.
 
@@ -44,7 +43,7 @@ defmodule NeonFS.Core.ReplicaAudit do
   range-scans each volume's `chunk_index` tree. `ChunkIndex`'s ETS table
   is a cold write-through cache that is empty after a restart, so
   `lookup_by_hash/1` would report almost everything as absent and wave
-  every removal through — the same trap #1573 fell into.
+  every removal through — the same trap.
 
   A volume with no bootstrap pointer yet (provisioning deferred until the
   cluster has enough drives) reads back `:not_found`, which is genuinely
@@ -174,7 +173,7 @@ defmodule NeonFS.Core.ReplicaAudit do
   how many other copies exist. Evacuation finalisation uses it as the
   post-condition of a completed drain: a successful evacuation leaves the
   drive referenced by nothing, so any non-zero count means metadata was
-  not fully rewritten and the drive must not be deregistered (#1628).
+  not fully rewritten and the drive must not be deregistered.
   """
   @spec removal_impact(node(), String.t()) :: {:ok, [volume_replication()]} | {:error, term()}
   def removal_impact(node, drive_id) when is_atom(node) and is_binary(drive_id) do

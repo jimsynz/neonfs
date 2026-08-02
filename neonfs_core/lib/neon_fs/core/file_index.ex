@@ -67,7 +67,7 @@ defmodule NeonFS.Core.FileIndex do
   @dir_key_prefix "dir:"
   @dirent_key_prefix "dirent:"
 
-  # Transaction batching (#1295): operations stage their metadata
+  # Transaction batching: operations stage their metadata
   # mutations and a windowed committer flushes them as one root-CAS per
   # volume. The window flushes early when the mailbox drains, so a
   # sequential caller never waits — only a concurrent burst accumulates.
@@ -88,7 +88,7 @@ defmodule NeonFS.Core.FileIndex do
   ## Options
 
   None currently. Per-volume metadata reader/writer opts are read
-  from `:persistent_term` at call time (post-#792 — see
+  from `:persistent_term` at call time (see
   `NeonFS.Core.Volume.MetadataReader` / `Volume.MetadataWriter`).
   """
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -130,7 +130,7 @@ defmodule NeonFS.Core.FileIndex do
 
   @doc """
   Creates a file and commits its content chunks in the same batched root
-  flip (#1304).
+  flip.
 
   Folds `ChunkIndex.commit_mutations/2` for `chunk_hashes` into the same
   staged transaction as the file-meta + dirent create, so a content
@@ -140,7 +140,7 @@ defmodule NeonFS.Core.FileIndex do
   dropped from the chunks via `ChunkIndex.finalize_commit/2`.
 
   `opts` may carry additional mutations to fold into the same batch
-  (#1320 — the erasure path folds its `:stripe_index` puts here):
+  (the erasure path folds its `:stripe_index` puts here):
 
     * `:extra_mutations` — extra `MetadataWriter` mutations to stage.
     * `:on_commit` — a 0-arity fun run once the batch is durable (e.g.
@@ -163,7 +163,7 @@ defmodule NeonFS.Core.FileIndex do
   Resolves through `Volume.MetadataReader.get_file_meta/3`. The local
   ETS table is a write-through materialisation for list operations on
   this node — serving point reads from it would return stale values
-  for files written or deleted elsewhere in the cluster (#342).
+  for files written or deleted elsewhere in the cluster.
   """
   @spec get(volume_id(), file_id()) :: {:ok, FileMeta.t()} | {:error, :not_found}
   def get(volume_id, file_id) do
@@ -201,7 +201,7 @@ defmodule NeonFS.Core.FileIndex do
     case FileMeta.normalize_path(path) do
       "/" ->
         # The root has no parent dirent. It's conceptually always present
-        # and world-writable (#1339) — its `dir:` record is materialised
+        # and world-writable — its `dir:` record is materialised
         # lazily on the first write — so resolve the stored record when
         # present, else a synthetic world-writable (0o777) root. This lets
         # getattr and POSIX authorisation of top-level creates see the root
@@ -242,7 +242,7 @@ defmodule NeonFS.Core.FileIndex do
 
   @doc """
   Updates a file and commits its newly-written content chunks in the same
-  batched root flip (#1304) — the `update/2` counterpart of
+  batched root flip — the `update/2` counterpart of
   `create_committing_chunks/3`, used by the append / partial-write commit
   path.
   """
@@ -315,7 +315,7 @@ defmodule NeonFS.Core.FileIndex do
   `LOOKUP` returns `:not_found`.
 
   Idempotent: a second call on an already-detached FileMeta returns
-  the existing record without changes (#643 sub-issue of #638).
+  the existing record without changes.
   """
   @spec mark_detached(file_id(), [String.t()]) :: {:ok, FileMeta.t()} | {:error, term()}
   def mark_detached(file_id, pinned_claim_ids) when is_list(pinned_claim_ids) do
@@ -334,7 +334,7 @@ defmodule NeonFS.Core.FileIndex do
   Idempotent in two directions: passing a `claim_id` not in the list
   is a no-op, and passing a `file_id` for a non-detached or
   already-purged file returns `:ok`. The unlink-while-open GC handler
-  (#644 of #638) calls this once per pin-release telemetry event;
+  calls this once per pin-release telemetry event;
   duplicate or stale notifications must not error.
   """
   @spec decrement_pin(file_id(), String.t()) :: :ok | {:error, term()}
@@ -476,7 +476,7 @@ defmodule NeonFS.Core.FileIndex do
   directory under its old basename between the two publications, and any
   concurrent reader — another interface node's `list_dir`, a scrub pass, a
   range scan — can observe that intermediate path. It is a state the caller
-  never asked for (#1608).
+  never asked for.
 
   With `dest_name == name` this is exactly `move/4`; the destination check
   is a no-op for equal names, so plain moves keep their existing behaviour
@@ -555,7 +555,7 @@ defmodule NeonFS.Core.FileIndex do
   `list_volume/1`'s ETS cache only reflects writes whose `on_commit`
   ran on the local node, so an interface (e.g. S3 `ListObjects`) routed
   to a node that didn't perform the write — or reading a file written
-  through a different interface — sees a stale listing (#1034). This
+  through a different interface — sees a stale listing. This
   reads the same source `get_by_path/2` and WebDAV's `list_dir/2`
   already use, so a file is listable as soon as it's committed.
   """
@@ -575,7 +575,7 @@ defmodule NeonFS.Core.FileIndex do
   tombstones. The `file:` keyspace holds regular files only (directories
   are `dir:` records), so the count is regular files.
 
-  Backs the volume-stats reconcile (#1462, #1470): the incremental
+  Backs the volume-stats reconcile: the incremental
   `logical_size` / `file_count` counters can drift from reality across a
   crash or a streamed overwrite, and this recomputes the exact figures
   the caps are enforced against.
@@ -628,7 +628,7 @@ defmodule NeonFS.Core.FileIndex do
     # writer are: a `FileIndex` unit test exercises index behaviour, not
     # clustering, and standing up Ra per test to obtain a lease costs far
     # more than it proves. Production uses the real `IntentLog`, which
-    # fails closed when Ra is unavailable (#1631).
+    # fails closed when Ra is unavailable.
     :persistent_term.put(
       {__MODULE__, :intent_log},
       Keyword.get(opts, :intent_log) ||
@@ -1034,7 +1034,7 @@ defmodule NeonFS.Core.FileIndex do
     delete_file_from_ets(file_id, file)
   end
 
-  ## Private — Mark detached (POSIX unlink-while-open, #643 of #638)
+  ## Private — Mark detached (POSIX unlink-while-open)
 
   defp plan_mark_detached(file_id, pinned_claim_ids, overlay) do
     case fetch_file(file_id, overlay) do
@@ -1087,7 +1087,7 @@ defmodule NeonFS.Core.FileIndex do
     end
   end
 
-  ## Private — Decrement pin (POSIX unlink-while-open, #644 of #638)
+  ## Private — Decrement pin (POSIX unlink-while-open)
 
   defp plan_decrement_pin(file_id, claim_id, overlay) do
     case fetch_file(file_id, overlay) do
@@ -1121,7 +1121,7 @@ defmodule NeonFS.Core.FileIndex do
     end
   end
 
-  ## Private — Purge detached (POSIX unlink-while-open, #644 of #638)
+  ## Private — Purge detached (POSIX unlink-while-open)
 
   defp plan_purge_detached(file_id, overlay) do
     case fetch_file(file_id, overlay) do
@@ -1157,7 +1157,7 @@ defmodule NeonFS.Core.FileIndex do
     # `validate_path/1` is the storage-layer gate for the leading-slash
     # invariant — the persisted `/` root entry is only consistent if every
     # dir path starts with `/`. `FileMeta.normalize_path/1` only trims
-    # trailing slashes; it does not prepend a leading one (#1210).
+    # trailing slashes; it does not prepend a leading one.
     with :ok <- FileMeta.validate_path(normalized),
          {:ok, ancestor_muts} <- ancestor_mutations(volume_id, parent_path) do
       new_dir = DirectoryEntry.new(volume_id, normalized, opts)
@@ -1279,11 +1279,11 @@ defmodule NeonFS.Core.FileIndex do
   # `dest_name` differing from `name` is the combined move-and-rename. It
   # publishes one `FileMeta.path` transition — old full path to new full
   # path — rather than the `move` then `rename` pair that left the file
-  # briefly in the destination directory under its old basename (#1608).
+  # briefly in the destination directory under its old basename.
   #
   # The dirent pair keeps writing the new key before deleting the old, so a
   # crash leaves a recoverable duplicate rather than a vanished entry (the
-  # per-entry index-key pattern from #1294).
+  # per-entry index-key pattern).
   defp plan_move(volume_id, source_dir, dest_dir, name, dest_name, overlay) do
     source_normalized = FileMeta.normalize_path(source_dir)
     dest_normalized = FileMeta.normalize_path(dest_dir)
@@ -1419,7 +1419,7 @@ defmodule NeonFS.Core.FileIndex do
 
       {:error, _} ->
         # The volume root is world-writable so any authenticated client
-        # (e.g. an NFS AUTH_SYS uid, checked against POSIX mode — #1339)
+        # (e.g. an NFS AUTH_SYS uid, checked against POSIX mode)
         # can populate a fresh volume. Entries created within get normal
         # per-owner ownership/mode; the volume itself is gated at the
         # interface boundary (NFS allow-list / S3 creds / WebDAV auth).
@@ -1456,7 +1456,7 @@ defmodule NeonFS.Core.FileIndex do
   defp default_on_abort, do: fn reason -> {:error, reason} end
   defp noop_on_commit, do: fn -> :ok end
 
-  ## Private — Chunk-commit folding (#1304)
+  ## Private — Chunk-commit folding
   #
   # Augments a staged file operation so the content chunks' `:committed`
   # metadata persists in the *same* shard-grouped batch as the file
@@ -1485,7 +1485,7 @@ defmodule NeonFS.Core.FileIndex do
      file_effect}
   end
 
-  # Folds caller-supplied extra mutations (#1320 — the erasure path's
+  # Folds caller-supplied extra mutations (the erasure path's
   # `:stripe_index` puts) and an extra post-commit hook into the staged
   # transaction, so they share the same shard-CAS as the file + chunks.
   defp with_extra_mutations({:now, _} = now, _opts), do: now
@@ -1704,7 +1704,7 @@ defmodule NeonFS.Core.FileIndex do
   # Reads the file record, consulting the in-batch overlay first so an
   # operation sees a same-file mutation staged earlier in the same batch
   # (otherwise concurrent same-file updates would read the committed
-  # value and lose each other — the #1260 invariant). Falls through to
+  # value and lose each other — the lost-update invariant). Falls through to
   # the local ETS materialisation for anything not touched this batch.
   defp fetch_file(file_id, overlay) do
     case Map.get(overlay, file_id) do
@@ -1744,7 +1744,7 @@ defmodule NeonFS.Core.FileIndex do
   # absorbs the failure. What it must not do is absorb it *silently*: an
   # unreleased lease blocks the next writer on that conflict key until its
   # TTL expires, and an operator seeing that stall deserves a log line
-  # naming the cause (#1631).
+  # naming the cause.
   defp complete_intent(intent_id) do
     case intent_log().complete(intent_id) do
       :ok -> :ok

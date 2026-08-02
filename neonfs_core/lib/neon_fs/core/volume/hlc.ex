@@ -7,11 +7,11 @@ defmodule NeonFS.Core.Volume.HLC do
   state in `RootSegment.hlc`; metadata writes thread the current
   root segment through `now/1` (or `receive_timestamp/2` for remote
   timestamps), getting a fresh timestamp + an updated segment to
-  encode into the new root chunk on commit (#785).
+  encode into the new root chunk on commit.
 
   Cross-volume HLC ordering is intentionally undefined — volumes are
   independent. Use `NeonFS.Core.HLC` directly only in cluster-scope
-  contexts (which are increasingly rare under epic #750).
+  contexts (which are increasingly rare).
   """
 
   alias NeonFS.Core.HLC

@@ -1,23 +1,22 @@
 defmodule NeonFS.Core.Volume.MetadataCache do
   @moduledoc """
-  ETS-backed cache for per-volume metadata reads (#816).
+  ETS-backed cache for per-volume metadata reads.
 
-  Caches the values that `NeonFS.Core.Volume.MetadataReader` (#820,
-  #821) returns from `get/4` and `range/5`. Keyed by
+  Caches the values that `NeonFS.Core.Volume.MetadataReader` returns from `get/4` and `range/5`. Keyed by
   `{volume_id, root_chunk_hash, key}`:
 
   - `volume_id` makes per-volume eviction efficient on bootstrap
     `:update_volume_root` / `:unregister_volume_root` events
-    (handled in #823).
+
   - `root_chunk_hash` is the natural CoW versioning bound — a
     different hash means different bytes, so stale entries that
     survive an eviction are correct-by-construction; they just
     take memory until cleaned up.
 
   Subscribes to bootstrap-layer telemetry events from
-  `MetadataStateMachine.apply/3` (#779) and evicts a volume's
+  `MetadataStateMachine.apply/3` and evicts a volume's
   entries on `:update_volume_root` / `:unregister_volume_root`. The
-  read-through wiring in `MetadataReader` is the follow-up #824.
+  read-through wiring in `MetadataReader` is a follow-up.
 
   No LRU bound for now: the cache is unbounded until we have
   telemetry data showing real-world working sets.
@@ -81,7 +80,7 @@ defmodule NeonFS.Core.Volume.MetadataCache do
 
   @doc """
   Wipe every entry whose key starts with `volume_id`. Driven by the
-  bootstrap-layer event subscription (#823) on
+  bootstrap-layer event subscription on
   `:update_volume_root` / `:unregister_volume_root`.
 
   Returns the count of evicted entries (mainly useful in tests
@@ -115,7 +114,7 @@ defmodule NeonFS.Core.Volume.MetadataCache do
   # Telemetry handler for bootstrap-layer events that change a
   # volume's root pointer. Driven by the events `MetadataStateMachine`
   # emits from `:update_volume_root` and `:unregister_volume_root`
-  # apply clauses (#779). Attached from `init/1` and detached from
+  # apply clauses. Attached from `init/1` and detached from
   # `terminate/2`; the handler dispatches to `evict_volume/1` so the
   # next read for that volume goes through the full bootstrap → root
   # segment → index tree walk.

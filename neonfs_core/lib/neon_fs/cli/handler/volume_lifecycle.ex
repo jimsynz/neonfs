@@ -5,7 +5,7 @@ defmodule NeonFS.CLI.Handler.VolumeLifecycle do
   restoring a volume to a snapshot, TAR export/import, and the backup
   create/describe/restore commands.
 
-  Extracted from `NeonFS.CLI.Handler` (#1203). `NeonFS.CLI.Handler`
+  Extracted from `NeonFS.CLI.Handler`. `NeonFS.CLI.Handler`
   delegates the matching RPC entry points here. Snapshot refs are
   resolved via the (public) `NeonFS.CLI.Handler.Snapshots.resolve_snapshot/3`.
   """
@@ -45,7 +45,7 @@ defmodule NeonFS.CLI.Handler.VolumeLifecycle do
   end
 
   @doc """
-  Rolls a volume's live root back to a snapshot (#963).
+  Rolls a volume's live root back to a snapshot.
   """
   @spec handle_volume_restore(binary(), binary(), map()) :: {:ok, map()} | {:error, term()}
   def handle_volume_restore(volume_name, snapshot_ref, opts \\ %{})
@@ -65,7 +65,7 @@ defmodule NeonFS.CLI.Handler.VolumeLifecycle do
 
   @doc """
   Exports a volume's live root (or a snapshot) as a TAR archive on the
-  daemon's filesystem (#965).
+  daemon's filesystem.
   """
   @spec handle_volume_export(binary(), binary(), map()) :: {:ok, map()} | {:error, term()}
   def handle_volume_export(volume_name, output_path, opts \\ %{})
@@ -89,7 +89,7 @@ defmodule NeonFS.CLI.Handler.VolumeLifecycle do
   end
 
   @doc """
-  Imports a previously-exported tarball into a new volume (#966).
+  Imports a previously-exported tarball into a new volume.
   """
   @spec handle_volume_import(binary(), binary()) :: {:ok, map()} | {:error, term()}
   def handle_volume_import(input_path, new_volume_name)
@@ -115,7 +115,7 @@ defmodule NeonFS.CLI.Handler.VolumeLifecycle do
 
   @doc """
   Snapshots `volume_name`, exports it to `output_path`, then drops the
-  snapshot (#968). On export failure the snapshot is left in place.
+  snapshot. On export failure the snapshot is left in place.
   """
   @spec handle_backup_create(binary(), binary(), map()) :: {:ok, map()} | {:error, term()}
   def handle_backup_create(volume_name, output_path, opts \\ %{})
@@ -132,7 +132,7 @@ defmodule NeonFS.CLI.Handler.VolumeLifecycle do
   end
 
   @doc """
-  Reads a backup's manifest without unpacking the body (#968).
+  Reads a backup's manifest without unpacking the body.
   """
   @spec handle_backup_describe(binary()) :: {:ok, map()} | {:error, term()}
   def handle_backup_describe(input_path) when is_binary(input_path) do
@@ -148,8 +148,8 @@ defmodule NeonFS.CLI.Handler.VolumeLifecycle do
   end
 
   @doc """
-  Restores a backup tarball into a brand-new volume (#968). Accepts a
-  `:passphrase` (#1004) to decrypt an encrypted archive.
+  Restores a backup tarball into a brand-new volume. Accepts a
+  `:passphrase` to decrypt an encrypted archive.
   """
   @spec handle_backup_restore(binary(), binary(), map()) :: {:ok, map()} | {:error, term()}
   def handle_backup_restore(input_path, new_volume_name, opts \\ %{})
@@ -167,7 +167,7 @@ defmodule NeonFS.CLI.Handler.VolumeLifecycle do
 
   @doc """
   Restore a chain of backup archives — a full followed by its
-  incrementals, oldest-first — into a new volume (#1003). Each path is
+  incrementals, oldest-first — into a new volume. Each path is
   resolved as a local destination URL; replayed in order onto the new
   volume.
   """
@@ -215,7 +215,7 @@ defmodule NeonFS.CLI.Handler.VolumeLifecycle do
     }
   end
 
-  # Render per-shard roots (#1307) as one hex string: a single shard is
+  # Render per-shard roots as one hex string: a single shard is
   # the bare hash (pre-sharding output), multiple are `shard:hex` joined.
   defp render_root_hashes(root_chunk_hashes) do
     case Map.to_list(root_chunk_hashes) do

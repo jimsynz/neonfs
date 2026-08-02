@@ -3,10 +3,10 @@ defmodule NeonFS.CLI.Handler.S3 do
   CLI command handlers for the S3-compatible interface: the
   volumes-as-buckets views.
 
-  Extracted from `NeonFS.CLI.Handler` (#1203). `NeonFS.CLI.Handler`
+  Extracted from `NeonFS.CLI.Handler`. `NeonFS.CLI.Handler`
   delegates its `handle_s3_*` RPC entry points here, so the CLI wire
   contract is unchanged. Credential lifecycle moved to the
-  interface-agnostic `NeonFS.CLI.Handler.Credential` (#1283).
+  interface-agnostic `NeonFS.CLI.Handler.Credential`.
   """
 
   import NeonFS.CLI.Handler.Common

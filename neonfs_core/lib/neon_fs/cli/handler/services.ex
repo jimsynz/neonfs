@@ -2,7 +2,7 @@ defmodule NeonFS.CLI.Handler.Services do
   @moduledoc """
   CLI command handler for the cluster service registry.
 
-  Extracted from `NeonFS.CLI.Handler` (#1203). `NeonFS.CLI.Handler`
+  Extracted from `NeonFS.CLI.Handler`. `NeonFS.CLI.Handler`
   delegates its `list_services/0` RPC entry point here, so the CLI wire
   contract is unchanged.
   """

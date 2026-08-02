@@ -2,10 +2,10 @@ defmodule NeonFS.CLI.Handler.DR do
   @moduledoc """
   CLI command handlers for disaster-recovery snapshots: create, list,
   and show the cluster-state DR snapshots in the `_system` volume's
-  `/dr` directory (#324), plus the full-cluster `dr restore`
-  orchestration (#1005).
+  `/dr` directory, plus the full-cluster `dr restore`
+  orchestration.
 
-  Extracted from `NeonFS.CLI.Handler` (#1203). `NeonFS.CLI.Handler`
+  Extracted from `NeonFS.CLI.Handler`. `NeonFS.CLI.Handler`
   delegates its `handle_dr_snapshot_*` and `handle_dr_restore` RPC entry
   points here.
   """
@@ -16,7 +16,7 @@ defmodule NeonFS.CLI.Handler.DR do
   alias NeonFS.Error.NotFound
 
   @doc """
-  Triggers an immediate DR snapshot (#324).
+  Triggers an immediate DR snapshot.
   """
   @spec handle_dr_snapshot_create(map()) :: {:ok, map()} | {:error, term()}
   def handle_dr_snapshot_create(_opts \\ %{}) do
@@ -41,7 +41,7 @@ defmodule NeonFS.CLI.Handler.DR do
   end
 
   @doc """
-  Lists every DR snapshot, newest first (#324).
+  Lists every DR snapshot, newest first.
   """
   @spec handle_dr_snapshot_list() :: {:ok, [map()]} | {:error, term()}
   def handle_dr_snapshot_list do
@@ -56,7 +56,7 @@ defmodule NeonFS.CLI.Handler.DR do
   end
 
   @doc """
-  Fetches a single DR snapshot's manifest by id (#324).
+  Fetches a single DR snapshot's manifest by id.
   """
   @spec handle_dr_snapshot_show(String.t()) :: {:ok, map()} | {:error, term()}
   def handle_dr_snapshot_show(id) when is_binary(id) do
@@ -76,7 +76,7 @@ defmodule NeonFS.CLI.Handler.DR do
 
   @doc """
   Apply a DR snapshot's cluster-wide metadata back into live Ra state
-  (#1005) — the restore-primitive slice of full-cluster `dr restore`.
+  — the restore-primitive slice of full-cluster `dr restore`.
   """
   @spec handle_dr_snapshot_apply(String.t()) :: {:ok, map()} | {:error, term()}
   def handle_dr_snapshot_apply(id) when is_binary(id) do
@@ -109,7 +109,7 @@ defmodule NeonFS.CLI.Handler.DR do
 
   @doc """
   Export a DR snapshot off-cluster to `dest_dir` on the daemon's
-  filesystem (#1367) so it survives a bare-metal disaster.
+  filesystem so it survives a bare-metal disaster.
   """
   @spec handle_dr_snapshot_export(String.t(), String.t()) :: {:ok, map()} | {:error, term()}
   def handle_dr_snapshot_export(id, dest_dir) when is_binary(id) and is_binary(dest_dir) do
@@ -136,7 +136,7 @@ defmodule NeonFS.CLI.Handler.DR do
 
   @doc """
   Stage an exported DR snapshot from `source_dir` back into the
-  `_system` volume (#1367) so `handle_dr_snapshot_apply/1` can consume
+  `_system` volume so `handle_dr_snapshot_apply/1` can consume
   it on a freshly-bootstrapped cluster.
   """
   @spec handle_dr_snapshot_import(String.t()) :: {:ok, map()} | {:error, term()}
@@ -159,7 +159,7 @@ defmodule NeonFS.CLI.Handler.DR do
   end
 
   @doc """
-  Full-cluster restore (#1005): stage the DR snapshot exported at
+  Full-cluster restore: stage the DR snapshot exported at
   `source_dir` back into the freshly-bootstrapped `_system` volume, apply
   its cluster-wide metadata (recreating every volume's shell and the
   cluster CA / credentials / keys), then restore each volume's content
@@ -176,7 +176,7 @@ defmodule NeonFS.CLI.Handler.DR do
       so volumes it omits are left as empty shells. Without a catalogue,
       each volume's archive is expected at
       `<source_dir>/volumes/<volume>.backup`.
-    * `"passphrase"` — passphrase for encrypted backup archives (#1004).
+    * `"passphrase"` — passphrase for encrypted backup archives.
 
   Best-effort per volume: a volume whose archive is missing or fails to
   restore is reported in the result rather than aborting the whole

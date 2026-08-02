@@ -5,7 +5,7 @@ defmodule NeonFS.CLI.Handler.Maintenance do
   a schedule-interval setter, and a status view, plus the cluster-wide
   GC trigger/status.
 
-  Extracted from `NeonFS.CLI.Handler` (#1203). `NeonFS.CLI.Handler`
+  Extracted from `NeonFS.CLI.Handler`. `NeonFS.CLI.Handler`
   delegates the matching RPC entry points here. Job-returning commands
   render via the shared `NeonFS.CLI.Handler.Common.job_to_map/1`.
   """
@@ -180,7 +180,7 @@ defmodule NeonFS.CLI.Handler.Maintenance do
   end
 
   @doc """
-  Triggers an immediate anti-entropy job for the named volume (#922).
+  Triggers an immediate anti-entropy job for the named volume.
   """
   @spec handle_volume_anti_entropy_now(binary()) :: {:ok, map()} | {:error, term()}
   def handle_volume_anti_entropy_now(volume_name) when is_binary(volume_name) do
@@ -196,7 +196,7 @@ defmodule NeonFS.CLI.Handler.Maintenance do
   end
 
   @doc """
-  Updates the anti-entropy schedule interval for the named volume (#922).
+  Updates the anti-entropy schedule interval for the named volume.
   """
   @spec handle_volume_anti_entropy_set_interval(binary(), pos_integer()) ::
           {:ok, map()} | {:error, term()}
@@ -219,7 +219,7 @@ defmodule NeonFS.CLI.Handler.Maintenance do
   end
 
   @doc """
-  Returns the anti-entropy schedule + latest job for the named volume (#922).
+  Returns the anti-entropy schedule + latest job for the named volume.
   """
   @spec handle_volume_anti_entropy_status(binary()) :: {:ok, map()} | {:error, term()}
   def handle_volume_anti_entropy_status(volume_name) when is_binary(volume_name) do

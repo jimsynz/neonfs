@@ -63,7 +63,7 @@ defmodule NeonFS.Core do
   end
 
   @doc """
-  Whether the cluster is currently `:frozen` (#1378) — a coordinated
+  Whether the cluster is currently `:frozen` — a coordinated
   maintenance freeze during which new client writes are rejected so
   in-flight writes can settle before a planned power-down.
 
@@ -82,7 +82,7 @@ defmodule NeonFS.Core do
   Interface nodes use this (via `NeonFS.Client.RootPlacement`) to route
   metadata writes to a node that can perform them locally, avoiding the
   per-write remote re-dispatch the `MetadataWriter` fallback otherwise
-  pays (#1046). Reads the authoritative `root_entry.drive_locations`
+  pays. Reads the authoritative `root_entry.drive_locations`
   from the Ra-backed bootstrap layer — no untracked copies.
   """
   @spec volume_root_nodes(String.t()) :: {:ok, [node()]} | {:error, term()}
@@ -97,7 +97,7 @@ defmodule NeonFS.Core do
 
   The Ra `volume_root` bootstrap entry is already keyed by `volume_id`, so this
   skips the name→id resolution `volume_root_nodes/1` does — for callers (e.g.
-  FUSE) that hold the id and issue writes through id-keyed APIs (#1087).
+  FUSE) that hold the id and issue writes through id-keyed APIs.
   """
   @spec volume_root_nodes_by_id(String.t()) :: {:ok, [node()]} | {:error, term()}
   def volume_root_nodes_by_id(volume_id) when is_binary(volume_id) do
@@ -108,7 +108,7 @@ defmodule NeonFS.Core do
 
   # The replica nodes are the same across a volume's shards at provision
   # time; shard 0 always exists, so it answers "which nodes hold this
-  # volume's metadata" (#1307).
+  # volume's metadata".
   defp fetch_volume_root(volume_id) do
     case RaSupervisor.local_query(&MetadataStateMachine.get_volume_root(&1, volume_id, 0)) do
       {:ok, nil} -> {:error, VolumeNotFound.exception(volume_id: volume_id)}
@@ -267,7 +267,7 @@ defmodule NeonFS.Core do
   existing file, only the chunks / stripes overlapping the write range are
   rewritten. This is the whole-binary counterpart to `write_file_streamed/4`
   and the only supported entry point for whole-file writes on erasure-coded
-  volumes until streaming erasure encoding lands (see #195).
+  volumes until streaming erasure encoding lands.
   """
   @spec write_file_at(String.t(), String.t(), non_neg_integer(), binary(), keyword()) ::
           {:ok, NeonFS.Core.FileMeta.t()} | {:error, term()}
@@ -284,7 +284,7 @@ defmodule NeonFS.Core do
   Counterpart to `read_file/3` for callers holding a long-lived
   handle (FUSE / NFSv4 fd) that may have been resolved before an
   unlink. Works against `:detached` FileMetas — the unlink-while-open
-  story (#638 / #644) keeps chunks reachable by `file_id` until the
+  story keeps chunks reachable by `file_id` until the
   last `:pinned` claim releases.
   """
   @spec read_file_by_id(String.t(), binary(), keyword()) :: {:ok, binary()} | {:error, term()}
@@ -323,7 +323,7 @@ defmodule NeonFS.Core do
   Counterpart to `write_file_at/5` keyed by `file_id`. Targets an
   already-existing file resolved by id rather than path — used by
   FUSE / NFSv4 fd holders writing through a cached handle to a file
-  that may have been detached by another peer (#638). Does not
+  that may have been detached by another peer. Does not
   support `:create_only`.
   """
   @spec write_file_at_by_id(String.t(), binary(), non_neg_integer(), binary(), keyword()) ::
@@ -338,10 +338,10 @@ defmodule NeonFS.Core do
   @doc """
   Durability barrier for `path` — blocks until every chunk of the file
   has at least the volume's `min_copies` durable replicas, driving
-  synchronous replication for any shortfall (#1500).
+  synchronous replication for any shortfall.
 
   This is the core mechanism behind `fsync`/`sync`/COMMIT across the
-  interface layer (wired in #1502). On a `write_ack: :local` volume the
+  interface layer. On a `write_ack: :local` volume the
   extra replicas are placed by a fire-and-forget background task after
   the write acks; this barrier forces them to complete so a read — or a
   whole-cluster restart — immediately after the sync sees durable data.
@@ -363,7 +363,7 @@ defmodule NeonFS.Core do
   @doc """
   `file_id`-keyed counterpart to `sync_file/2`. FUSE / NFSv4 fd holders
   sync through a cached handle whose file may have been detached by
-  another peer (#638); resolving by id keeps a `:detached` file syncable.
+  another peer; resolving by id keeps a `:detached` file syncable.
   """
   @spec sync_file_by_id(String.t(), binary()) :: :ok | {:error, term()}
   def sync_file_by_id(volume_name, file_id) do
@@ -407,7 +407,7 @@ defmodule NeonFS.Core do
 
   @doc """
   Pins a file by identity so an open handle survives rename and unlink
-  (#1605 of #1590).
+
 
   Resolves `path` to a `file_id` and takes a `:pinned` namespace claim
   keyed by `{volume_id, file_id}` rather than by path, so:
@@ -457,14 +457,14 @@ defmodule NeonFS.Core do
   same path (or any descendant — important for the rmdir
   empty-directory check, which would otherwise race against creates
   inside the target) serialise across interface nodes. See sub-issue
-  #305.
+
 
   A file held open anywhere in the cluster (a `:pinned` claim on its
   identity, see `pin_file/3`) is tombstoned rather than hard-deleted.
   When the pin state cannot be established — the coordinator is
   unreachable or its Ra query fails — the delete fails with a
   `class: :unavailable` error rather than assuming "no pins" and
-  discarding a live handle's chunks (#1605).
+  discarding a live handle's chunks.
 
   Honours `:uid` / `:gids` opts for `:write` authorisation (default
   uid 0 bypasses), so an NFS REMOVE/RMDIR is held to the volume ACL.
@@ -490,7 +490,7 @@ defmodule NeonFS.Core do
 
   # Volume-wide grants (POSIX-shaped VolumeACL) gate the volume; the
   # per-object/per-parent-dir POSIX `resource` governs the specific target.
-  # uid 0 bypasses both inside `Authorise.check/4` (#1339).
+  # uid 0 bypasses both inside `Authorise.check/4`.
   defp authorise_posix(uid, gids, action, volume_id, resource) do
     with :ok <- Authorise.check(uid, gids, action, {:volume, volume_id}) do
       Authorise.check(uid, gids, action, resource)
@@ -499,7 +499,7 @@ defmodule NeonFS.Core do
 
   # Files take a `:shared :path` claim, directories the historical
   # `:exclusive :subtree` one. Pins no longer live on the path key
-  # (they are keyed by file identity since #1605), so the shared
+  # (they are keyed by file identity), so the shared
   # scope is what keeps an unlink compatible with the other shared
   # path holders — WebDAV shared locks, FUSE `LOCK_SH` flocks —
   # exactly as POSIX expects. Concurrent renames / mkdir / rmdir
@@ -587,8 +587,8 @@ defmodule NeonFS.Core do
     end
   end
 
-  # Frees the unlinked file's logical bytes from the volume counter
-  # (#1462). Unlink-while-open (mark_detached) frees the accounting too:
+  # Frees the unlinked file's logical bytes from the volume counter.
+  # Unlink-while-open (mark_detached) frees the accounting too:
   # the reconcile excludes detached tombstones, so the incremental path
   # must match. Best-effort — the file is already gone, so a counter
   # glitch (including a VolumeRegistry call timeout, which exits) must
@@ -618,7 +618,7 @@ defmodule NeonFS.Core do
   end
 
   # Directories carry no FileMeta, so the by-id `FileIndex.delete/1`
-  # path can't remove them — `rmdir/2` works by path instead (#1555).
+  # path can't remove them — `rmdir/2` works by path instead.
   defp do_delete(volume_id, path) do
     FileIndex.rmdir(volume_id, path)
   end
@@ -638,7 +638,7 @@ defmodule NeonFS.Core do
   # An unreachable coordinator is *not* "no pins" — it is an unknown
   # pin state, and hard-deleting on an unknown pin state is how an
   # open handle loses its chunks. Surface it so the caller retries or
-  # fails the unlink (#1605).
+  # fails the unlink.
   defp pinned_claim_ids(volume_id, file_id) do
     case NamespaceCoordinator.consistent_claims_for_path(pin_key(volume_id, file_id)) do
       {:ok, claims} -> {:ok, Enum.map(claims, &elem(&1, 0))}
@@ -733,7 +733,7 @@ defmodule NeonFS.Core do
   Automatically increments the version and updates timestamps.
 
   Honours `:uid` / `:gids` opts for `:write` authorisation (default
-  uid 0 bypasses), so NFS SETATTR is held to the file's POSIX mode (#1339).
+  uid 0 bypasses), so NFS SETATTR is held to the file's POSIX mode.
   """
   @spec update_file_meta(String.t(), String.t(), keyword(), keyword()) ::
           {:ok, NeonFS.Core.FileMeta.t()} | {:error, FileNotFound.t() | term()}
@@ -755,13 +755,13 @@ defmodule NeonFS.Core do
   shrinking; sparse-extends when growing (no zero-filled chunks
   allocated). See `NeonFS.Core.FileIndex.truncate/3`.
 
-  Used by NFSv3 SETATTR (#621) when the `size` field is set —
+  Used by NFSv3 SETATTR when the `size` field is set —
   combining truncate with mode/uid/gid/atime/mtime updates lets the
   whole sattr3 mutation land in a single FileIndex write.
 
   Honours `:uid` / `:gids` opts for `:write` authorisation (default
   uid 0 bypasses), so an NFS SETATTR that sets `size` is held to the
-  file's POSIX mode just like the no-size SETATTR path (#1339).
+  file's POSIX mode just like the no-size SETATTR path.
   """
   @spec truncate_file(String.t(), String.t(), non_neg_integer(), keyword(), keyword()) ::
           {:ok, NeonFS.Core.FileMeta.t()} | {:error, FileNotFound.t() | term()}
@@ -784,7 +784,7 @@ defmodule NeonFS.Core do
 
   Serves `stat` on an open handle without re-resolving its path — the
   path may have been renamed or unlinked since the handle was opened,
-  and a `:detached` file has no path at all (#1606 of #1590).
+  and a `:detached` file has no path at all.
 
   Returns `{:error, :wrong_volume}` when the id resolves into a
   different volume than `volume_name`.
@@ -801,7 +801,7 @@ defmodule NeonFS.Core do
 
   @doc """
   `file_id`-keyed counterpart to `update_file_meta/4` — `fchmod`,
-  `fchown` and `futimens` on an open handle (#1606 of #1590).
+  `fchown` and `futimens` on an open handle.
   """
   @spec update_file_meta_by_id(String.t(), binary(), keyword(), keyword()) ::
           {:ok, FileMeta.t()} | {:error, FileNotFound.t() | term()}
@@ -815,7 +815,7 @@ defmodule NeonFS.Core do
 
   @doc """
   `file_id`-keyed counterpart to `truncate_file/5` — `ftruncate` on an
-  open handle (#1606 of #1590).
+  open handle.
   """
   @spec truncate_file_by_id(String.t(), binary(), non_neg_integer(), keyword(), keyword()) ::
           {:ok, FileMeta.t()} | {:error, FileNotFound.t() | term()}
@@ -856,8 +856,8 @@ defmodule NeonFS.Core do
     end
   end
 
-  # Accounts a truncation's logical-byte delta against the volume counter
-  # (#1462); the delta is negative for a shrink, positive for a sparse
+  # Accounts a truncation's logical-byte delta against the volume counter;
+  # the delta is negative for a shrink, positive for a sparse
   # grow. Best-effort — the metadata change is already committed.
   defp adjust_logical_usage(_volume_id, 0), do: :ok
 
@@ -888,7 +888,7 @@ defmodule NeonFS.Core do
       # the old exclusion silently dropped a file whose path equalled the
       # prefix (e.g. `ls s3://bucket/exact-file.txt` returned nothing). No
       # directory is ever in this file list, so the only thing the exclusion
-      # ever dropped was that exact-key file (#1034).
+      # ever dropped was that exact-key file.
       filtered = Enum.filter(files, &String.starts_with?(&1.path, normalized))
 
       {:ok, filtered}
@@ -924,7 +924,7 @@ defmodule NeonFS.Core do
   `mkdir` / `delete_file` / `rename_file` on the same name (from
   different interface nodes) serialise cleanly — one `mkdir` wins, the
   rest see `FileIndex` already holds the entry and surface `:eexist`,
-  rather than racing through quorum-write resolution. Sub-issue #305.
+  rather than racing through quorum-write resolution.
 
   Honours `:uid` / `:gids` opts for `:write` authorisation (default
   uid 0 bypasses), so an NFS MKDIR is held to the volume ACL.
@@ -948,7 +948,7 @@ defmodule NeonFS.Core do
 
       # The new directory is owned by the creating client (POSIX), so the
       # client can populate it — without this it defaulted to uid 0 and an
-      # NFS client couldn't write in a directory it had just created (#1339).
+      # NFS client couldn't write in a directory it had just created.
       with_namespace_claim(:path, volume.id, normalized, fn ->
         FileIndex.mkdir(volume.id, normalized, dir_create_opts(uid, gids, opts))
       end)
@@ -973,7 +973,7 @@ defmodule NeonFS.Core do
   Honours `:uid` / `:gids` opts for `:write` authorisation (default
   uid 0 bypasses). A rename adds a name in the destination directory and
   removes one from the source, so it requires write on both parents'
-  POSIX modes (#1339).
+  POSIX modes.
   """
   @spec rename_file(String.t(), String.t(), String.t(), keyword()) :: :ok | {:error, term()}
   def rename_file(volume_name, src_path, dest_path, opts \\ []) do
@@ -999,7 +999,7 @@ defmodule NeonFS.Core do
   # Releases on completion (success or failure). When the coordinator
   # is unreachable (no Ra cluster, network split) we fall back to the
   # historical single-core-node serialisation — same posture WebDAV
-  # took in #301 and rename in #304.
+  # took, and rename.
   defp with_namespace_claim(claim_kind, volume_id, path, fun)
        when claim_kind in [:path, :subtree] do
     with_namespace_claim(claim_kind, :exclusive, volume_id, path, fun)
@@ -1007,7 +1007,7 @@ defmodule NeonFS.Core do
 
   # Variant taking an explicit `scope`. The file delete path uses
   # `:shared :path` so it coexists with `:pinned` claims (open file
-  # handles) — the unlink-while-open story (#643 of #638) treats a
+  # handles) — the unlink-while-open story treats a
   # delete on a pinned file as a tombstone-mark rather than a
   # blocking conflict. Concurrent renames / mkdir / rmdir keep
   # serialising because they hold `:exclusive :*`, which still
@@ -1036,7 +1036,7 @@ defmodule NeonFS.Core do
   # `claim_rename` pair so concurrent cross-directory renames (across
   # interface nodes — WebDAV, NFS, FUSE) serialise cleanly. Claim is
   # always released, whether the inner work succeeds or errors. See
-  # sub-issue #304.
+
   defp with_rename_claim(volume_id, src, dst, fun) do
     src_key = volume_scoped_path(volume_id, src)
     dst_key = volume_scoped_path(volume_id, dst)
@@ -1060,7 +1060,7 @@ defmodule NeonFS.Core do
         # Fall back to the historical single-core-node serialisation
         # property. Cross-node correctness regresses to "best-effort"
         # while the coordinator is down — same posture WebDAV took in
-        # sub-issue #301.
+
         fun.()
     end
   end
@@ -1132,7 +1132,7 @@ defmodule NeonFS.Core do
       # Both the directory and the basename change. Published as one
       # transition: a `move` followed by a `rename` would leave the file in
       # the destination directory under its old basename between the two, and
-      # a concurrent reader can observe that intermediate path (#1608).
+      # a concurrent reader can observe that intermediate path.
       true ->
         FileIndex.move_rename(volume_id, src_dir, dest_dir, src_name, dest_name)
     end
@@ -1145,7 +1145,7 @@ defmodule NeonFS.Core do
     end
   end
 
-  # Rejects new client writes while the cluster is `:frozen` (#1378) so
+  # Rejects new client writes while the cluster is `:frozen` so
   # in-flight writes can settle before a planned power-down. Gates the
   # external write RPCs only — internal operations (repair, rebalance,
   # DR restore) call the `WriteOperation` / `CommitChunks` modules

@@ -8,7 +8,7 @@ defmodule NeonFS.CLI.Handler.Common do
   error-normalisation (`wrap_error/1`), and the shared `job_to_map/1`
   serialiser (every operational command that returns a background job
   renders it the same way) live in one place rather than being copied
-  into every group. Extracted while splitting the handler per #1203.
+  into every group. Extracted while splitting the handler.
   """
 
   alias NeonFS.Cluster.State

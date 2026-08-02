@@ -3,7 +3,7 @@ defmodule NeonFS.CLI.Handler.ClusterRecovery do
   Cluster-recovery and dangerous-operations CLI command handlers:
   node decommission, minority force-reset, and reconstruct-from-disk.
 
-  Extracted from `NeonFS.CLI.Handler` (#1203). `NeonFS.CLI.Handler`
+  Extracted from `NeonFS.CLI.Handler`. `NeonFS.CLI.Handler`
   delegates its `handle_remove_node/2`, `handle_force_reset/1` and
   `handle_cluster_reconstruct_from_disk/1` RPC entry points here, so the
   CLI wire contract is unchanged.
@@ -100,10 +100,10 @@ defmodule NeonFS.CLI.Handler.ClusterRecovery do
 
   @doc """
   Begins graceful decommission of a node: marks it `:draining` and starts
-  evacuating each of its drives (#1325).
+  evacuating each of its drives.
 
   Marking `:draining` first is the point — placement (`DriveSelector` /
-  `Provisioner`, #1323) and client routing (`CostFunction`, #1324)
+  `Provisioner`) and client routing (`CostFunction`)
   immediately stop giving the node new work, so nothing new lands on it
   while its existing data drains off. Then each of the node's drives is
   handed to `DriveEvacuation` to migrate its chunks elsewhere.
@@ -150,7 +150,7 @@ defmodule NeonFS.CLI.Handler.ClusterRecovery do
   end
 
   @doc """
-  Reverses a drain: marks the node `:active` again (#1325) so placement
+  Reverses a drain: marks the node `:active` again so placement
   and routing resume giving it new work.
 
   Note this does not reverse drive evacuation already in flight — chunks
@@ -171,7 +171,7 @@ defmodule NeonFS.CLI.Handler.ClusterRecovery do
   end
 
   @doc """
-  Cordons a node for planned, temporary absence (#1376): marks it
+  Cordons a node for planned, temporary absence: marks it
   `:maintenance` so placement (`DriveSelector` / `Provisioner`) and
   client routing (`CostFunction`) stop giving it new work — **without**
   evacuating its drives or removing it from Ra. Use this before a
@@ -200,7 +200,7 @@ defmodule NeonFS.CLI.Handler.ClusterRecovery do
   end
 
   @doc """
-  Reverses a cordon: marks the node `:active` again (#1376) so placement
+  Reverses a cordon: marks the node `:active` again so placement
   and routing resume giving it new work.
   """
   @spec handle_uncordon_node(String.t()) :: {:ok, map()} | {:error, Exception.t()}
@@ -217,8 +217,8 @@ defmodule NeonFS.CLI.Handler.ClusterRecovery do
   end
 
   @doc """
-  Read-only pre-shutdown safety check for stopping a cordoned node
-  (#1417). Reports whether taking the node offline would break Ra
+  Read-only pre-shutdown safety check for stopping a cordoned node.
+  Reports whether taking the node offline would break Ra
   quorum, strand a chunk (no trusted replica elsewhere), or drop a
   chunk below its volume's `min_copies`. Does not mutate anything —
   the caller (CLI) decides whether to proceed.
@@ -249,10 +249,10 @@ defmodule NeonFS.CLI.Handler.ClusterRecovery do
 
   @doc """
   Freezes the whole cluster for a coordinated maintenance shutdown
-  (#1378): sets the cluster mode `:frozen` (cutting client write ingress
-  via the #1438 write-gate), drains outstanding background chunk placements
+  : sets the cluster mode `:frozen` (cutting client write ingress
+  via the write-gate), drains outstanding background chunk placements
   cluster-wide so every acknowledged write reaches its `min_copies` replica
-  set (#1504), then triggers a metadata DR snapshot. Reports
+  set, then triggers a metadata DR snapshot. Reports
   ready-to-power-off — the operator then stops interface nodes, then core
   nodes.
 
@@ -294,10 +294,10 @@ defmodule NeonFS.CLI.Handler.ClusterRecovery do
   end
 
   @doc """
-  Thaws the cluster after a coordinated restart (#1378): sets the cluster
+  Thaws the cluster after a coordinated restart: sets the cluster
   mode `:recovering` so failure-driven repair stays suppressed and
-  verification throttled (#1436) while the cluster reassembles. The
-  `ClusterRecoveryMonitor` (#1437) returns the mode to `:normal` once all
+  verification throttled while the cluster reassembles. The
+  `ClusterRecoveryMonitor` returns the mode to `:normal` once all
   members are back and drives are trusted (or on its timeout backstop).
 
   `opts` (test injection): `:cluster_mode_mod`.
@@ -373,7 +373,7 @@ defmodule NeonFS.CLI.Handler.ClusterRecovery do
   records the operator-acknowledged data-loss intent in the audit log.
 
   This is the first slice of the force-reset command (tracking issue
-  #458). The Ra minority-recovery mutation itself is deferred to #473;
+  The Ra minority-recovery mutation itself is deferred;
   when every safety gate passes this function writes a durable audit
   entry and then returns an "Ra mutation not yet implemented" error.
   Landing the gates and the audit entry on their own lets operators
@@ -447,10 +447,10 @@ defmodule NeonFS.CLI.Handler.ClusterRecovery do
   on-disk root segments and rebuilds the bootstrap-layer Ra state.
 
   Use this when Ra logs are unrecoverable but the underlying volume
-  data is intact. Drive identity files (#778) and root segment
-  chunks (#780) are the source of truth; this handler discovers
-  them via `Reconstruction.OnDisk` (#844) and submits the Ra
-  commands `Reconstruction.reconstruct/2` (#841) emits.
+  data is intact. Drive identity files and root segment
+  chunks are the source of truth; this handler discovers
+  them via `Reconstruction.OnDisk` and submits the Ra
+  commands `Reconstruction.reconstruct/2` emits.
 
   ## Opts (map keys)
 
@@ -502,7 +502,7 @@ defmodule NeonFS.CLI.Handler.ClusterRecovery do
 
   # Private
 
-  # The actual Ra minority-recovery mutation (#473). The safety
+  # The actual Ra minority-recovery mutation. The safety
   # gates above gave us a green light; the survivor's local Ra
   # replica gets snapshot-extracted, the Ra server destroyed, and a
   # fresh single-node cluster bootstrapped with the extracted state

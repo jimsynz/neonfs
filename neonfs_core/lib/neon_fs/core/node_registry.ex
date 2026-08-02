@@ -1,6 +1,6 @@
 defmodule NeonFS.Core.NodeRegistry do
   @moduledoc """
-  Read/write facade over the first-class node lifecycle table (#1323) in
+  Read/write facade over the first-class node lifecycle table in
   `NeonFS.Core.MetadataStateMachine`.
 
   A node's *lifecycle* status — `:joining | :active | :draining |
@@ -8,9 +8,9 @@ defmodule NeonFS.Core.NodeRegistry do
   membership) and from its per-service presence in the service registry.
   It is the cluster's intent for the node: an `:active` node takes new
   work; a `:draining` node is being decommissioned and a `:maintenance`
-  node is cordoned for planned, temporary absence (#1376) — both stop
+  node is cordoned for planned, temporary absence — both stop
   placement and routing consumers giving them *new* work (replica
-  placement today; metadata-shard ownership once #1306 lands) while
+  placement today; metadata-shard ownership later) while
   their existing data stays put. The difference is what happens next:
   draining evacuates and is removed; maintenance is left untouched to
   return.
@@ -72,7 +72,7 @@ defmodule NeonFS.Core.NodeRegistry do
   def draining?(node), do: status(node) == :draining
 
   @doc """
-  Whether `node` is currently cordoned for maintenance (#1376).
+  Whether `node` is currently cordoned for maintenance.
   """
   @spec maintenance?(node()) :: boolean()
   def maintenance?(node), do: status(node) == :maintenance
@@ -102,7 +102,7 @@ defmodule NeonFS.Core.NodeRegistry do
   end
 
   @doc """
-  The set of nodes currently in the `:maintenance` state (#1376).
+  The set of nodes currently in the `:maintenance` state.
   Returns an empty set if the table is unreadable.
   """
   @spec maintenance_nodes() :: MapSet.t(node())

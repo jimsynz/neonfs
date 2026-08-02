@@ -43,11 +43,11 @@ defmodule NeonFS.Core.VolumeRegistry do
   Only ever raises: a request at or below the current factor is a no-op
   returning the unchanged volume. Losing a core node or a drive must not
   quietly reduce the durability of cluster-critical data — the surviving
-  copies stay the target and repair re-places the missing one (#1617).
+  copies stay the target and repair re-places the missing one.
 
   The adjustment persists the volume through Ra, so the call budget
   reflects a cluster-wide replicated write on a busy system — not a
-  local lookup (#1154).
+  local lookup.
   """
   @spec adjust_system_volume_replication(pos_integer()) :: {:ok, Volume.t()} | {:error, term()}
   def adjust_system_volume_replication(new_cluster_size)
@@ -224,7 +224,7 @@ defmodule NeonFS.Core.VolumeRegistry do
   Recomputes a volume's usage counters from the file index and writes
   the authoritative absolutes back through Ra, correcting any drift.
 
-  This is the reconcile backstop for the incremental counters (#1462):
+  This is the reconcile backstop for the incremental counters:
   a crash between a file-index write and the counter adjustment, or a
   streamed overwrite, can leave `logical_size` out of step with reality.
   """
@@ -440,7 +440,7 @@ defmodule NeonFS.Core.VolumeRegistry do
   #
   # When the bootstrap layer is empty (Ra not running yet, or no
   # drives registered — common in unit-test setups), provisioning is
-  # deferred to the first metadata write through #785.
+  # deferred to the first metadata write.
   defp provision_system_volume(%Volume{} = volume) do
     if sufficient_drives_for?(volume.durability) do
       case Provisioner.provision(volume) do
@@ -481,12 +481,12 @@ defmodule NeonFS.Core.VolumeRegistry do
   end
 
   # Builds a fresh `RootSegment` for the volume, writes the chunk to
-  # replica drives, and registers the bootstrap-layer entry (#779).
+  # replica drives, and registers the bootstrap-layer entry.
   #
   # Skipped when the bootstrap layer doesn't have enough drives to
   # satisfy the volume's `min_copies` (replicate) or `data_chunks`
   # (erasure). The under-provisioned volume still exists in the
-  # registry — its first metadata write through #785 will allocate
+  # registry — its first metadata write will allocate
   # a root segment lazily once enough drives come online.
   #
   # Tests can pass `:provisioner` opt to override the default
@@ -529,10 +529,10 @@ defmodule NeonFS.Core.VolumeRegistry do
     end
   end
 
-  # Tells the bootstrap layer (#779) to forget the volume's root
+  # Tells the bootstrap layer to forget the volume's root
   # pointer. The Ra `:unregister_volume_root` command is idempotent,
   # so this is safe even on volumes whose `create` predates the
-  # provisioner wiring (#810). On Ra failure we log and continue —
+  # provisioner wiring. On Ra failure we log and continue —
   # the volume is already gone from the registry, and a stale
   # bootstrap entry is recoverable but not blocking.
   defp deprovision_bootstrap_entry(id) do
@@ -900,7 +900,7 @@ defmodule NeonFS.Core.VolumeRegistry do
   # so that quorum loss is properly detected.
   # Ra commands are cluster-wide replicated writes; the 5 s
   # `RaSupervisor.command/2` default is a local-lookup budget that times
-  # out under load (#1165). 20 s nests inside the 30 s GenServer.call
+  # out under load. 20 s nests inside the 30 s GenServer.call
   # timeouts on this module's public API, so the clean `Unavailable`
   # error still fires before the caller's exit.
   @ra_command_timeout 20_000

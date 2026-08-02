@@ -4,7 +4,7 @@ defmodule NeonFS.CLI.Handler.Snapshots do
   delete, addressing snapshots by ULID or by (unique) human-readable
   name.
 
-  Extracted from `NeonFS.CLI.Handler` (#1203). `NeonFS.CLI.Handler`
+  Extracted from `NeonFS.CLI.Handler`. `NeonFS.CLI.Handler`
   delegates its `handle_volume_snapshot_*` RPC entry points here. The
   `resolve_snapshot/3` lookup is public because the volume
   promote/restore/export commands (still in `Handler`) resolve a
@@ -145,7 +145,7 @@ defmodule NeonFS.CLI.Handler.Snapshots do
     }
   end
 
-  # Render the per-shard roots (#1307) as a single hex string for the
+  # Render the per-shard roots as a single hex string for the
   # CLI: one shard → the bare hash (identical to the pre-sharding
   # output); multiple → `shard:hex` pairs joined by `,`.
   defp render_root_hashes(root_chunk_hashes) do

@@ -15,7 +15,7 @@ defmodule NeonFS.Core.PendingWriteLog do
 
   - **Node-local**, not Ra-replicated. Orphaned-chunk recovery only
     concerns the node that wrote them, and per-chunk consensus is
-    explicitly disallowed by the parent issue (#296).
+    explicitly disallowed by the parent issue.
   - Backed by a single **DETS** table under
     `NeonFS.Core.Persistence.meta_dir/0`, fsync'd after each update
     (`:dets.sync/1`). DETS (rather than ETS) because a crash between

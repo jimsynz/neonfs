@@ -29,7 +29,7 @@ defmodule NeonFS.Core.Volume.DriveSelector do
   @type durability :: map()
 
   @typedoc """
-  Drive entry shape as registered in the bootstrap layer (#779).
+  Drive entry shape as registered in the bootstrap layer.
   See `t:NeonFS.Core.MetadataStateMachine.drive_entry/0`.
   """
   @type drive_entry :: MetadataStateMachine.drive_entry()
@@ -50,7 +50,7 @@ defmodule NeonFS.Core.Volume.DriveSelector do
   Opts:
 
     * `:exclude_nodes` — a `MapSet` of nodes to drop from the candidate
-      set before selecting (#1323). Drives on a `:draining` node are
+      set before selecting. Drives on a `:draining` node are
       excluded so new replicas don't land on a node being
       decommissioned; if that drops the candidates below the durability
       minimum, the call returns `QuorumUnavailable` like any other

@@ -1,7 +1,6 @@
 defmodule NeonFS.Core.Volume.Reconstruction.OnDisk do
   @moduledoc """
-  Production on-disk chunk walker for `Volume.Reconstruction` (#839
-  / part of #788).
+  Production on-disk chunk walker for `Volume.Reconstruction`.
 
   Walks a drive's blob directory in pure Elixir — bypasses
   `BlobStore` entirely so reconstruction works even when the
@@ -15,7 +14,7 @@ defmodule NeonFS.Core.Volume.Reconstruction.OnDisk do
   Where `<tier>` is `hot` / `warm` / `cold`, `<prefix_i>` is two
   hex chars from the start of `<hash_hex>`, and `<codec_suffix_hex>`
   is a 16-char hex digest of the chunk's codec choice. Root segment
-  chunks are written via `BlobStoreChunkStore.put` (#813) with
+  chunks are written via `BlobStoreChunkStore.put` with
   default options (Compression::None, encryption=None) so the
   bytes on disk are the raw ETF payload — no decompression /
   decryption needed before `RootSegment.decode/1`.

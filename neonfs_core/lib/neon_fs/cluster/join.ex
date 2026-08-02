@@ -5,7 +5,7 @@ defmodule NeonFS.Cluster.Join do
 
   The joining-side machinery (HTTP invite redemption, credential
   install, distribution restart, state persistence) lives in
-  `NeonFS.Client.Join` so any node type can join (#1160). This module:
+  `NeonFS.Client.Join` so any node type can join. This module:
 
   - serves join requests on existing cluster members (`accept_join/6`),
   - wraps the client join with core's finalize hook (Ra membership,
@@ -57,7 +57,7 @@ defmodule NeonFS.Cluster.Join do
   - `{:ok, :joining}` once the invite is redeemed and credentials are stored.
     The join then completes asynchronously: the node restarts TLS distribution
     (to load the cluster cert), connects to the via node, and joins Ra. Callers
-    confirm completion by polling `cluster status` (#1033).
+    confirm completion by polling `cluster status`.
   - `{:error, reason}` on a synchronous failure (invalid token, unreachable via
     node, already in a cluster).
 
@@ -233,7 +233,7 @@ defmodule NeonFS.Cluster.Join do
   Adds `peer` to this node's persisted `known_peers`, deduped and excluding this
   node itself. Invoked via RPC on existing core peers when a new node joins, so
   every core node holds the full peer set and can resolve every other node's
-  distribution port (#1060/#1061). Idempotent.
+  distribution port. Idempotent.
   """
   @spec add_known_peer(State.peer_info()) :: :ok | {:error, term()}
   def add_known_peer(peer) do
@@ -383,7 +383,7 @@ defmodule NeonFS.Cluster.Join do
   # Tell the existing core peers about the newly-joined core node so every core
   # node holds the complete peer set and the distribution mesh closes. Without
   # this, a node that joined earlier never learns about later joiners and cannot
-  # resolve their dist port (#1060/#1061). Best-effort: a peer that is briefly
+  # resolve their dist port. Best-effort: a peer that is briefly
   # unreachable picks the entry up on its next restart from its own join state.
   defp propagate_new_peer(%State{} = state, joining_node, joiner_peer, type) do
     if ServiceType.core?(type) do
@@ -447,7 +447,7 @@ defmodule NeonFS.Cluster.Join do
     # otherwise escapes the `case` and fails the whole join even though
     # the VolumeRegistry finishes the adjustment server-side (the
     # caller's timeout only drops the reply). Treat it the same as an
-    # error return (#1154).
+    # error return.
     :exit, reason ->
       Logger.warning("Failed to adjust system volume replication",
         core_count: core_count,
@@ -619,7 +619,7 @@ defmodule NeonFS.Cluster.Join do
         # `DriveRegistry`'s ETS but never make it into the
         # Ra-replicated bootstrap-layer drives table — that's the
         # same gap `Cluster.Init.do_init_cluster/1` plugged for the
-        # bootstrap node via #890. Without this call,
+        # bootstrap node. Without this call,
         # `Volume.Provisioner` only ever sees the bootstrap node's
         # drives, so `min_copies > 1` durabilities can't be
         # satisfied even on multi-node clusters.

@@ -84,11 +84,11 @@ defmodule NeonFS.Core.BlobStore do
   # drive a synchronous compress/encrypt NIF on a dirty scheduler. Under a
   # heavily contended host (CI running parallel cargo builds + peer VMs) even
   # a cheap call can sit in the mailbox behind a slow write long enough to
-  # blow the 5s `GenServer` default — the #1254 flake (`write_chunk`
+  # blow the 5s `GenServer` default — the observed flake (`write_chunk`
   # `GenServer.call` timeouts cascading into `{:badrpc, :timeout}` on the
   # metadata write path). 30s gives headroom for transient dirty-scheduler
   # starvation without masking a genuine hang (which exceeds any sane bound).
-  # The async-NIF rework that removes the per-op serialisation is #1197.
+  # The async-NIF rework removes the per-op serialisation.
   @default_call_timeout 30_000
 
   ## Client API
@@ -146,12 +146,12 @@ defmodule NeonFS.Core.BlobStore do
   Interface writers (`NeonFS.Client.ChunkWriter`) ship chunks with the sentinel
   drive_id `"default"`, delegating the choice of drive to the receiving node.
   This maps that sentinel — or any drive_id not registered and active on this
-  node — to a local active drive **in the requested tier** (#1042). It is
+  node — to a local active drive **in the requested tier**. It is
   tier-strict: it never silently places a chunk on a drive of a different tier.
   A drive_id that is already a local active drive is returned unchanged; if the
   node has no active drive in that tier the sentinel is returned as-is so the
   write fails clearly rather than landing on the wrong tier. (Choosing a node
-  that actually has storage in the tier is target-selection's job — #1044.)
+  that actually has storage in the tier is target-selection's job.)
   """
   @spec resolve_drive_id(drive_id(), tier() | String.t()) :: drive_id()
   def resolve_drive_id(drive_id, tier) do
@@ -193,7 +193,7 @@ defmodule NeonFS.Core.BlobStore do
   defp normalise_tier(_), do: :hot
 
   @doc """
-  Returns how each open drive presented itself at open time (#1426):
+  Returns how each open drive presented itself at open time:
   `drive_id => :clean | :dirty | :fresh`. A `:dirty` drive came back
   from an unclean shutdown and needs verification before being trusted;
   `DriveManager` consumes this to mark such drives `:unverified`.
@@ -327,7 +327,7 @@ defmodule NeonFS.Core.BlobStore do
   @doc """
   Drive-scoped chunk-presence check. Returns `true` if `hash` exists
   on `drive_id` (any tier, any codec variant), `false` otherwise.
-  Used by anti-entropy (#921) to detect divergence: a chunk whose
+  Used by anti-entropy to detect divergence: a chunk whose
   `ChunkMeta.locations` lists this drive but isn't actually present
   is a repair target.
 
@@ -347,8 +347,8 @@ defmodule NeonFS.Core.BlobStore do
 
   The handle is the `BlobStoreResource` Rustler reference held by
   the GenServer's state. Callers use it to invoke NIFs that need
-  the store directly — e.g. `Native.index_tree_get/4` (#814) which
-  drives the chunk-backed B-tree (#781) and would otherwise need to
+  the store directly — e.g. `Native.index_tree_get/4` which
+  drives the chunk-backed B-tree and would otherwise need to
   re-open the store on each call.
 
   ## Returns
@@ -368,7 +368,7 @@ defmodule NeonFS.Core.BlobStore do
   Resolves volume-level write options for a put_chunk invocation.
 
   Called by `NeonFS.Transport.Handler` when an interface node sends
-  plaintext chunks on the 8-tuple put_chunk frame (see the #408 design
+  plaintext chunks on the 8-tuple put_chunk frame (see the streaming-writes design
   note). The resolved options are passed straight through to
   `write_chunk/4` as the fourth argument — the BlobStore NIF pipeline
   applies compression-then-encryption per the options supplied.
@@ -772,7 +772,7 @@ defmodule NeonFS.Core.BlobStore do
     * `{:error, reason}` - On failure
 
   Chunking is a stateless `DirtyCpu` NIF, so it runs directly in the caller
-  process — it does not route through the `BlobStore` GenServer (#1491).
+  process — it does not route through the `BlobStore` GenServer.
   """
   @spec chunk_data(binary(), chunk_strategy) ::
           {:ok, [chunk_result]} | {:error, String.t()}
@@ -843,7 +843,7 @@ defmodule NeonFS.Core.BlobStore do
   @impl true
   def init(opts) do
     # trap_exit so terminate/2 runs on graceful shutdown and can stamp
-    # each drive's marker clean (#1426).
+    # each drive's marker clean.
     Process.flag(:trap_exit, true)
     drives_config = Keyword.get(opts, :drives) || Application.get_env(:neonfs_core, :drives, [])
     prefix_depth = Keyword.get(opts, :prefix_depth, 2)
@@ -874,7 +874,7 @@ defmodule NeonFS.Core.BlobStore do
   @impl true
   def terminate(_reason, state) do
     # Graceful shutdown: stamp each open drive's marker clean so the next
-    # boot trusts it without re-verification (#1426).
+    # boot trusts it without re-verification.
     Enum.each(state.stores, fn {_drive_id, handle} ->
       Native.store_mark_clean(handle, node_id())
     end)
@@ -1035,7 +1035,7 @@ defmodule NeonFS.Core.BlobStore do
     case Map.fetch(state.stores, drive_id) do
       {:ok, handle} ->
         # Graceful drive removal — stamp the marker clean before dropping
-        # the handle (#1426).
+        # the handle.
         Native.store_mark_clean(handle, node_id())
         new_stores = Map.delete(state.stores, drive_id)
         new_drives = Map.delete(state.drives, drive_id)
@@ -1121,7 +1121,7 @@ defmodule NeonFS.Core.BlobStore do
     end
   end
 
-  # Classifies the drive via its marker and stamps it dirty (#1425/#1426),
+  # Classifies the drive via its marker and stamps it dirty,
   # degrading to `:fresh` if the marker can't be read so a transient
   # marker error never wrongly flags a drive for verification.
   defp open_marker(handle) do
@@ -1520,9 +1520,9 @@ defmodule NeonFS.Core.BlobStore do
     # Chunks live under `{drive_path}/blobs/{tier}/{prefix}/.../{hash}`.
     # Per-volume metadata (root segments, index tree pages) is just
     # ordinary content-addressed chunks under the same `blobs/` tree
-    # post #792 — no separate `meta/` namespace any more. Empty
+    # no separate `meta/` namespace any more. Empty
     # prefix directories left behind by deleted chunks must not count
-    # as data (issue #753).
+    # as data.
     drive_path |> Path.join("blobs") |> dir_contains_any_file?()
   end
 

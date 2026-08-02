@@ -62,7 +62,7 @@ defmodule NeonFS.Core.Authorise do
     acl =
       case resolve_volume_acl(resource) do
         {:ok, acl} -> acl
-        # A volume with no stored ACL is world-writable by default (#1339):
+        # A volume with no stored ACL is world-writable by default:
         # POSIX governs per object, and the volume is gated at the interface
         # boundary. Evaluate against a default world-writable ACL rather than
         # denying outright.

@@ -2,11 +2,11 @@ defmodule NeonFS.CLI.Handler.CA do
   @moduledoc """
   CLI command handlers for the cluster certificate authority: CA info,
   issued-certificate listing, per-node revocation, and the multi-stage
-  CA rotation (#926, #927) — staging an incoming CA, the rolling
+  CA rotation — staging an incoming CA, the rolling
   per-node cert reissue across the BEAM cluster, dual-CA bundle
   distribution, and finalize/abort.
 
-  Extracted from `NeonFS.CLI.Handler` (#1203). `NeonFS.CLI.Handler`
+  Extracted from `NeonFS.CLI.Handler`. `NeonFS.CLI.Handler`
   delegates its `handle_ca_*` RPC entry points here, so the CLI wire
   contract is unchanged.
   """
@@ -132,7 +132,7 @@ defmodule NeonFS.CLI.Handler.CA do
 
   # Private
 
-  # #926 + #927 — orchestrator. Stages a fresh CA, walks the BEAM
+  # Orchestrator. Stages a fresh CA, walks the BEAM
   # cluster reissuing each node's cert, distributes the dual-CA
   # bundle, then either finalizes immediately (`no-wait: true`) or
   # stops with the rotation in `pending-finalize` state so the
@@ -167,7 +167,7 @@ defmodule NeonFS.CLI.Handler.CA do
     end
   end
 
-  # #927 — per-node retry. After the rolling reissue from #926 fails
+  # Per-node retry. After the rolling reissue fails
   # for one node, the operator runs `cluster ca rotate --node <name>`
   # to pick that one node back up. Reuses the staged incoming CA.
   defp handle_ca_rotate_node(node_name) do

@@ -1,10 +1,10 @@
 defmodule NeonFS.Core.Volume.MetadataReader do
   @moduledoc """
-  Walks bootstrap layer (#779) → root segment (#780) → index tree
-  (#781) for a per-volume metadata read.
+  Walks bootstrap layer → root segment → index tree
+  for a per-volume metadata read.
 
   This module is the Elixir-side companion of the index tree read
-  NIFs (#814). It exposes a generic `get/4` and `range/5` keyed by
+  NIFs. It exposes a generic `get/4` and `range/5` keyed by
   index kind (`:file_index` / `:chunk_index` / `:stripe_index`);
   per-type wrappers (`get_file_meta/2` etc.) and value decoding will
   layer on top in a follow-up sub-issue.
@@ -22,13 +22,13 @@ defmodule NeonFS.Core.Volume.MetadataReader do
      range walk.
 
   Cross-node read-repair (HLC-aware fallback when replicas diverge)
-  is explicitly out of scope per #784 — the routing layer
+  is explicitly out of scope — the routing layer
   (`NeonFS.Client.Router`) is expected to land the call on a node
   with a local replica before this module runs.
 
   Every external dependency is injectable via opts so unit tests
   drive the function with deterministic stubs without spinning up a
-  full cluster (same pattern as `Volume.Provisioner` from #810).
+  full cluster (same pattern as `Volume.Provisioner`).
   """
 
   alias NeonFS.Cluster.State, as: ClusterState
@@ -131,7 +131,7 @@ defmodule NeonFS.Core.Volume.MetadataReader do
     )
   end
 
-  # A point get resolves the single shard the key belongs to (#1307).
+  # A point get resolves the single shard the key belongs to.
   defp do_local_get(volume_id, index_kind, key, opts) do
     shard = Shard.for_key(key)
 
@@ -146,7 +146,7 @@ defmodule NeonFS.Core.Volume.MetadataReader do
   end
 
   # A range scan spans the whole keyspace, so it walks every shard's tree
-  # and merge-sorts the results (#1307). At one shard this is a single
+  # and merge-sorts the results. At one shard this is a single
   # walk; the merge keeps ascending key order across shards.
   defp do_local_range(volume_id, index_kind, start_key, end_key, opts) do
     Shard.all()
@@ -218,10 +218,10 @@ defmodule NeonFS.Core.Volume.MetadataReader do
   List every node chunk hash reachable from the volume's three
   index trees (`file_index`, `chunk_index`, `stripe_index`) — both
   internal-page chunks and leaf-page chunks. Used by the
-  anti-entropy runner (#955) so the per-volume reconciliation pass
+  anti-entropy runner so the per-volume reconciliation pass
   enumerates index-tree pages as well as data chunks, catching
   tree-page divergence between replicas that the read-path
-  cross-node fallback (#947) would otherwise leave undetected.
+  cross-node fallback would otherwise leave undetected.
 
   Returns `{:ok, [hash, ...]}` with hashes from all three trees
   unioned (deduped — internal pages shared across trees are
@@ -318,7 +318,7 @@ defmodule NeonFS.Core.Volume.MetadataReader do
 
   @doc """
   Public `resolve_segment` helper for the write path
-  (`Volume.MetadataWriter`, #785). Returns
+  (`Volume.MetadataWriter`). Returns
   `{:ok, segment, root_entry}` so the writer can both inspect the
   current segment and use the root entry's `drive_locations` to
   pick replicas for the new chunk.
@@ -334,7 +334,7 @@ defmodule NeonFS.Core.Volume.MetadataReader do
 
   @doc """
   Shard-aware variant of `resolve_segment_for_write/2`. The write path
-  resolves the specific `{volume, shard}` root it is about to CAS (#1307).
+  resolves the specific `{volume, shard}` root it is about to CAS.
   """
   @spec resolve_segment_for_write(volume_id :: binary(), non_neg_integer(), keyword()) ::
           {:ok, RootSegment.t(), MetadataStateMachine.volume_root_entry()} | read_error()
@@ -390,7 +390,7 @@ defmodule NeonFS.Core.Volume.MetadataReader do
   # pointer for up to a heartbeat after the writer's call returned —
   # i.e. a read on any node immediately after a successful write
   # against another node may walk the *old* segment and miss the
-  # newly-written file (#935 / #936).
+  # newly-written file.
   #
   # `consistent_query` round-trips through the leader, which has
   # applied by the time it answers. One leader round-trip per
@@ -559,7 +559,7 @@ defmodule NeonFS.Core.Volume.MetadataReader do
   # entropy). A reader landing on a node that doesn't yet have the
   # chunks therefore needs to dispatch the read to a node that does
   # — otherwise read-after-write surfaces as a phantom `:not_found`
-  # against an authoritative bootstrap pointer (see #936).
+  # against an authoritative bootstrap pointer.
   #
   # The fallback runs once: when the local attempt fails for any
   # reason other than an authoritative miss (`:not_found`,

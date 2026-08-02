@@ -15,7 +15,7 @@ defmodule NeonFS.Core.ResolvedLookupCache do
 
   Caches the final composed result of a multi-step lookup (directory
   entry → file meta → chunk list), fronting the per-volume index
-  trees that `MetadataReader` walks. Pre-#792 there was also a
+  trees that `MetadataReader` walks. There used to be a
   per-segment cache on the (now-deleted) `MetadataStore`; this one
   lives on as the cluster-wide resolution cache.
 
