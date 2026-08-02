@@ -1165,7 +1165,7 @@ ZrbuAQ2ClscminzzA+15JSfToEHJkGdObtg8bJUpnjDQ0dhQ/MOeQoez
         };
 
         // Private key — readable only by the owner.
-        assert_eq!(mode("ca.key"), 0o600, "ca.key must be 0600 (#932)");
+        assert_eq!(mode("ca.key"), 0o600, "ca.key must be 0600");
 
         // Public material — readable by everyone.
         assert_eq!(mode("ca.crt"), 0o644);
@@ -1293,7 +1293,7 @@ ZrbuAQ2ClscminzzA+15JSfToEHJkGdObtg8bJUpnjDQ0dhQ/MOeQoez
                 & 0o777
         };
 
-        assert_eq!(mode("node.key"), 0o600, "node.key must be 0600 (#932)");
+        assert_eq!(mode("node.key"), 0o600, "node.key must be 0600");
         assert_eq!(mode("node.crt"), 0o644);
         assert_eq!(mode("serial"), 0o644);
     }
@@ -1428,7 +1428,7 @@ ZrbuAQ2ClscminzzA+15JSfToEHJkGdObtg8bJUpnjDQ0dhQ/MOeQoez
         assert_eq!(name.unwrap(), "prod-west-1");
     }
 
-    // ─── #518 B.2b.3: --new-key fresh-CA generation ────────────────
+    // ─── --new-key fresh-CA generation ─────────────────────────────
 
     #[test]
     fn read_installed_serial_returns_none_when_missing() {
@@ -1597,7 +1597,7 @@ ZrbuAQ2ClscminzzA+15JSfToEHJkGdObtg8bJUpnjDQ0dhQ/MOeQoez
         assert_eq!(on_disk.trim(), "1002");
     }
 
-    // ─── #518 B.2b.4: audit-log JSONL emission ─────────────────────
+    // ─── audit-log JSONL emission ──────────────────────────────────
 
     #[test]
     fn ca_fingerprint_from_pem_returns_lowercase_hex_sha256() {

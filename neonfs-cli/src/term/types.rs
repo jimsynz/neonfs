@@ -436,8 +436,8 @@ impl NodeStatusResult {
 
 /// `cluster freeze` / `cluster thaw` response. `snapshot`,
 /// `drained` and `drain_timed_out` are only present for freeze: freeze
-/// drains outstanding background chunk placements before powering off
-///, reporting how many it drained and whether it bounded out.
+/// drains outstanding background chunk placements before powering off,
+/// reporting how many it drained and whether it bounded out.
 #[derive(Debug, Serialize)]
 pub struct ClusterModeResult {
     pub status: String,

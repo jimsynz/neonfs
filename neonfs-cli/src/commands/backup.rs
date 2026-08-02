@@ -1,6 +1,5 @@
 //! `neonfs backup create | list | restore` — operator-facing
-//! orchestration over the snapshot + export + import primitives
-//!.
+//! orchestration over the snapshot + export + import primitives.
 
 use clap::{Subcommand, ValueEnum};
 use eetf::{Atom, List, Map, Term};

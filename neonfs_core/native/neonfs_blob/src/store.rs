@@ -16,12 +16,12 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Filename of the per-drive clean/dirty superblock marker (#1425),
+/// Filename of the per-drive clean/dirty superblock marker,
 /// stored at the root of the drive's base dir. Chunks live in sharded
 /// subdirectories, so a dotfile here never collides with chunk data.
 const DRIVE_MARKER_FILE: &str = ".neonfs_drive_state";
 
-/// How a drive presented itself when opened (#1425/#1426).
+/// How a drive presented itself when opened.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DriveOpenState {
     /// Last close was graceful (clean marker, this same node) — trust the
@@ -29,10 +29,10 @@ pub enum DriveOpenState {
     Clean,
     /// A dirty / foreign / stale marker was present — the drive was in use
     /// and not cleanly closed, so it needs verification before being
-    /// trusted again (#1380).
+    /// trusted again.
     Dirty,
     /// No marker at all — a brand-new drive that has never been stamped.
-    /// Nothing to verify; the caller just records it going forward (#1426).
+    /// Nothing to verify; the caller just records it going forward.
     Fresh,
 }
 
@@ -187,7 +187,7 @@ impl BlobStore {
     /// `Fresh` (no marker — a brand-new drive), then stamps a fresh
     /// `dirty` marker — bumping the generation — durably (fsync'd file +
     /// parent dir). Call once when opening the drive for use; the returned
-    /// state drives the #1380/#1426 verification scoping.
+    /// state drives the verification scoping.
     pub fn open_marker(&self, node_id: &str) -> Result<DriveOpenState, StoreError> {
         let prior = self.read_marker();
 
@@ -591,7 +591,7 @@ impl BlobStore {
     /// blobs coexist. The caller must delete the old variant *after* it has
     /// committed the chunk metadata's new nonce — deleting here, before the
     /// metadata swap, opens a window where a concurrent read resolves the old
-    /// (now-deleted) path and fails with "chunk not found" (#1266). When the
+    /// (now-deleted) path and fails with "chunk not found". When the
     /// new nonce happens to collide with the old one (suffix unchanged) the
     /// blob is overwritten in place and there is nothing for the caller to
     /// delete.
@@ -812,7 +812,7 @@ fn fsync_parent_dir(path: &Path) -> Result<(), StoreError> {
 ///
 /// Without this, the prefix directories above a deleted chunk persist
 /// as empty dirs and leak into `check_drive_has_data?`-style emptiness
-/// checks (see issue #753).
+/// checks.
 fn remove_file_pruning_empty_parents(path: &Path, floor: &Path) -> Result<(), StoreError> {
     fs::remove_file(path).map_err(|e| StoreError::io_error(path, e))?;
 
@@ -1942,8 +1942,8 @@ mod tests {
         assert_eq!(read_data, data);
 
         // The old variant is intentionally left on disk so a concurrent read
-        // never finds a dangling reference before the metadata nonce swaps
-        // (#1266). It stays readable with the old key until the caller deletes
+        // never finds a dangling reference before the metadata nonce swaps.
+        // It stays readable with the old key until the caller deletes
         // it explicitly.
         let old_read = ReadOptions {
             verify: false,

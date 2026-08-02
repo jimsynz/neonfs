@@ -6,7 +6,7 @@
 //! at every level from the touched leaf back to the root, leaving
 //! all old chunks reachable through the *previous* root hash. This
 //! is the data structure the FileIndex / ChunkIndex / StripeIndex
-//! sub-issues build on (#784, #785).
+//! sub-issues build on.
 //!
 //! The tree is parameterised by a `ChunkStore` so callers can plug
 //! in either the production volume blob store or an in-memory store
@@ -222,10 +222,10 @@ impl<S: ChunkStore> IndexTree<S> {
 
     /// List every node chunk hash reachable from `root` — both
     /// internal-page chunks and leaf-page chunks. Used by the
-    /// anti-entropy runner (#955) so the per-volume reconciliation
+    /// anti-entropy runner so the per-volume reconciliation
     /// pass enumerates index-tree pages as well as data chunks,
     /// catching tree-page divergence between replicas that the
-    /// read-path cross-node fallback (#947) would otherwise leave
+    /// read-path cross-node fallback would otherwise leave
     /// undetected.
     ///
     /// An empty (`None`) root returns an empty vector. The output
