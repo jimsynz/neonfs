@@ -12,7 +12,7 @@ defmodule NeonFS.Transport.CertRenewalTest do
   # locally (renewal completes in <100ms there) and tolerates the
   # scheduling pauses we see on busy CI runners between
   # "initiating renewal" and the success event reaching the test
-  # mailbox. The previous 2s budget flaked on slow runners (#763).
+  # mailbox. The previous 2s budget flaked on slow runners.
   @receive_timeout_ms 5_000
 
   setup %{tmp_dir: tmp_dir} do

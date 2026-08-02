@@ -28,7 +28,7 @@ defmodule NeonFS.Transport.TLSTest do
     test "returns an ECDSA P-256 key" do
       key = TLS.generate_node_key()
       pem = TLS.encode_key(key)
-      # Wrapped in PKCS#8 (`PRIVATE KEY`) since #521 — see
+      # Wrapped in PKCS#8 (`PRIVATE KEY`) — see
       # `TLS.encode_key/1` for the rationale.
       assert pem =~ "BEGIN PRIVATE KEY"
       refute pem =~ "BEGIN EC PRIVATE KEY"
@@ -123,7 +123,7 @@ defmodule NeonFS.Transport.TLSTest do
 
       assert Enum.any?(value, fn {type, _} -> type == :iPAddress end)
 
-      # The exact check that failed in #1033: OTP matches a requested IP against
+      # The exact check that failed: OTP matches a requested IP against
       # an iPAddress SAN, not a dNSName.
       assert :public_key.pkix_verify_hostname(
                X509.Certificate.to_der(cert),
@@ -202,7 +202,7 @@ defmodule NeonFS.Transport.TLSTest do
       key = TLS.generate_node_key()
 
       pem = TLS.encode_key(key)
-      # Wrapped in PKCS#8 (`PRIVATE KEY`) since #521 — see
+      # Wrapped in PKCS#8 (`PRIVATE KEY`) — see
       # `TLS.encode_key/1` for the rationale.
       assert pem =~ "BEGIN PRIVATE KEY"
       refute pem =~ "BEGIN EC PRIVATE KEY"

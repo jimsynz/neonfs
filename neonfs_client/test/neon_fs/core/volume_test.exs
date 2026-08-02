@@ -208,26 +208,26 @@ defmodule NeonFS.Core.VolumeTest do
       assert {:error, "name must be a non-empty string"} = Volume.validate(vol)
     end
 
-    test "rejects names containing a path separator (#1201)" do
+    test "rejects names containing a path separator" do
       for bad <- ["../../tmp", "a/b", "/etc", "foo/"] do
         vol = %{Volume.new("x") | name: bad}
         assert {:error, "name must not contain '/'"} = Volume.validate(vol)
       end
     end
 
-    test "rejects names containing traversal segments (#1201)" do
+    test "rejects names containing traversal segments" do
       for bad <- ["..", "foo..bar", ".."] do
         vol = %{Volume.new("x") | name: bad}
         assert {:error, "name must not contain '..'"} = Volume.validate(vol)
       end
     end
 
-    test "rejects '.' as a name (#1201)" do
+    test "rejects '.' as a name" do
       vol = %{Volume.new("x") | name: "."}
       assert {:error, "name must not be '.'"} = Volume.validate(vol)
     end
 
-    test "rejects NUL and control characters (#1201)" do
+    test "rejects NUL and control characters" do
       for bad <- ["foo\0bar", "tab\there", "nl\nhere", "del\x7f"] do
         vol = %{Volume.new("x") | name: bad}
         assert {:error, "name must not contain NUL or control characters"} = Volume.validate(vol)
@@ -241,21 +241,21 @@ defmodule NeonFS.Core.VolumeTest do
       end
     end
 
-    test "accepts valid nfs_allowed_ips (IPs and CIDRs, v4 and v6) (#1217)" do
+    test "accepts valid nfs_allowed_ips (IPs and CIDRs, v4 and v6)" do
       vol = %{Volume.new("x") | nfs_allowed_ips: ["10.0.0.0/8", "192.168.1.5", "2001:db8::/32"]}
       assert :ok = Volume.validate(vol)
 
       assert :ok = Volume.validate(%{Volume.new("x") | nfs_allowed_ips: []})
     end
 
-    test "rejects malformed nfs_allowed_ips (#1217)" do
+    test "rejects malformed nfs_allowed_ips" do
       for bad <- [["not-an-ip"], ["10.0.0.0/99"], ["10.0.0.0/"], "10.0.0.0/8"] do
         vol = %{Volume.new("x") | nfs_allowed_ips: bad}
         assert {:error, "nfs_allowed_ips must be" <> _} = Volume.validate(vol)
       end
     end
 
-    test "nfs_root_squash defaults on and accepts a boolean (#1216)" do
+    test "nfs_root_squash defaults on and accepts a boolean" do
       assert Volume.new("x").nfs_root_squash == true
       assert Volume.new("x", nfs_root_squash: false).nfs_root_squash == false
       assert :ok = Volume.validate(%{Volume.new("x") | nfs_root_squash: false})
@@ -264,7 +264,7 @@ defmodule NeonFS.Core.VolumeTest do
                Volume.validate(%{Volume.new("x") | nfs_root_squash: "yes"})
     end
 
-    test "update/2 can toggle nfs_root_squash (#1216)" do
+    test "update/2 can toggle nfs_root_squash" do
       vol = Volume.new("x")
       assert Volume.update(vol, nfs_root_squash: false).nfs_root_squash == false
     end

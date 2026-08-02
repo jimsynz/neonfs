@@ -35,7 +35,7 @@ defmodule NeonFS.Client.CLIHandler do
   end
 
   @doc """
-  Joins this node to a cluster using an invite token (#1161).
+  Joins this node to a cluster using an invite token.
 
   Mirrors `NeonFS.CLI.Handler.join_cluster/3` so `neonfs cluster join`
   works against any node type. When `type_str` is omitted, the service
@@ -44,7 +44,7 @@ defmodule NeonFS.Client.CLIHandler do
 
   ## Returns
   - `{:ok, %{"status" => "joining", ...}}` — invite redeemed; the join
-    completes asynchronously (validate via `cluster status`, #1033).
+    completes asynchronously (validate via `cluster status`).
   - `{:error, reason}` on a synchronous failure.
   """
   @spec join_cluster(String.t(), String.t(), String.t() | nil) ::

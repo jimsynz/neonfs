@@ -16,7 +16,7 @@ defmodule NeonFS.Core.FileMeta do
   claim ids) is keeping it alive. Path-based callbacks return
   `:not_found` for detached files; `id`-based callbacks continue to
   work. When the last `pinned_claim_id` is released, the file is
-  fully GC'd. See sub-issue #638 of #306.
+  fully GC'd.
   """
 
   alias NeonFS.Error.InvalidPath
@@ -141,7 +141,7 @@ defmodule NeonFS.Core.FileMeta do
   common write-path case); callers that *do* supply explicit
   values keep them — that's what the NFSv3 SETATTR
   `set_to_client_time` semantic (RFC 1813 §3.3.2) and `utimensat(2)`
-  over an NFS mount need (#634).
+  over an NFS mount need.
 
   `:version` is always rewritten — caller-supplied versions would
   break the monotonic-version invariant the version field exists

@@ -452,7 +452,7 @@ defmodule NeonFS.TestSupport.ClusterCase do
   Visibility is polled with a bounded timeout — mesh reformation after
   `heal_partition` and other cross-node helpers is asynchronous, and a
   one-shot snapshot can catch the distribution layer mid-reconcile even
-  after `wait_for_partition_healed/2` returns (see #438). Callers that
+  after `wait_for_partition_healed/2` returns. Callers that
   want a strict snapshot can pass `timeout: 0`.
 
   ## Options
@@ -616,7 +616,7 @@ defmodule NeonFS.TestSupport.ClusterCase do
   # placement (`Replication.select_replication_targets/3` reads
   # `DriveRegistry.drives_for_tier/1`) can see a single failure domain
   # and under-replicate — production heals via anti-entropy, but tests
-  # that assert immediate cross-node fan-out flake on the race (#1152).
+  # that assert immediate cross-node fan-out flake on the race.
   # Force a sync on every node and wait until each cache sees drives
   # from every expected node.
   @spec wait_for_drive_registry_convergence(map()) :: :ok
@@ -853,7 +853,7 @@ defmodule NeonFS.TestSupport.ClusterCase do
   # view, since the mesh / quorum-ring / drive-registry helpers query
   # `NeonFS.Core` services on every node and interface-only peers don't
   # run them. Convergence must complete before volumes are created so
-  # `factor > 1` metadata sees the full drive set (#1152).
+  # `factor > 1` metadata sees the full drive set.
   defp join_extra_core_peers(_cluster, _core_peer, [], _token), do: :ok
 
   defp join_extra_core_peers(cluster, core_peer, extra_core_peers, token) do
@@ -1026,7 +1026,7 @@ defmodule NeonFS.TestSupport.ClusterCase do
 
   Default timeout 60s. The mesh comes up as `PoolManager` discovery cycles
   reconcile peers, which can exceed 30s on a loaded CI runner; a tighter
-  bound spuriously invalidates the `setup_all` of data-plane tests (#1532).
+  bound spuriously invalidates the `setup_all` of data-plane tests.
   """
   @spec wait_for_data_plane(map(), keyword()) :: :ok
   def wait_for_data_plane(cluster, opts \\ []) do
@@ -1087,9 +1087,9 @@ defmodule NeonFS.TestSupport.ClusterCase do
   `PeerCluster.rpc_until_ready/6` retries it and gets
   `{:error, "Cluster already initialised"}`. The cluster *is* initialised in
   that case, so treat it as success rather than letting the retry's error blow
-  up `setup_all` (#1388). Tests that init the cluster directly in their own
+  up `setup_all`. Tests that init the cluster directly in their own
   `setup_all` should call this instead of matching `{:ok, _}` on
-  `rpc_until_ready(…, :cluster_init, …)` (#1392).
+  `rpc_until_ready(…, :cluster_init, …)`.
   """
   @spec cluster_init_idempotent(map(), atom(), String.t()) :: :ok
   def cluster_init_idempotent(cluster, node_name, cluster_name) do

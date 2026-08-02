@@ -13,7 +13,7 @@ defmodule NeonFS.TestSupport.PeerClusterTelemetry do
       start_applications     xxx.xs total   (xx.xs avg per node)
       wait_for_ra            xxx.xs total   (xx.xs avg per node)
 
-  Used by #420 / #423 to figure out which phase is worth optimising.
+  Shows which phase is worth optimising.
   """
 
   use GenServer

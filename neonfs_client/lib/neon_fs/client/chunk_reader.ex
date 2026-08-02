@@ -17,12 +17,12 @@ defmodule NeonFS.Client.ChunkReader do
   (`read_file_stream/3`) are provided. Streaming iterates chunk by chunk
   so at most one chunk's bytes are held in memory at a time, making it
   safe for interface nodes to serve arbitrarily large files without
-  co-locating a core node (issue #207).
+  co-locating a core node.
 
   Each has a `_by_id` sibling (`read_file_by_id/3`,
   `read_file_stream_by_id/3`) for callers holding an immutable file id
   rather than a path — an open FUSE handle or SMB fd whose name may have
-  been renamed away or unlinked (#1607). Both forms share one pipeline:
+  been renamed away or unlinked. Both forms share one pipeline:
   only the three calls back to core (refs, whole-file read, metadata)
   differ, so every fallback below applies identically to either.
 
@@ -57,7 +57,7 @@ defmodule NeonFS.Client.ChunkReader do
   pulled over the data plane, so `chunk_size / read_length` is the
   read-amplification factor and the event count is the data-plane RPC
   count — the signal behind the small-window large-image-pull
-  pathology (#1350). `duration` is in `:native` time units. Cache hits
+  pathology. `duration` is in `:native` time units. Cache hits
   emit nothing: they cost no data-plane fetch.
   """
 
@@ -100,7 +100,7 @@ defmodule NeonFS.Client.ChunkReader do
   end
 
   @doc """
-  `file_id`-keyed counterpart to `read_file/3` (#1607 of #1590).
+  `file_id`-keyed counterpart to `read_file/3`.
 
   For callers holding an immutable handle — a FUSE `fh`, an SMB open —
   whose path may have been renamed or unlinked since it was opened. A
@@ -144,7 +144,7 @@ defmodule NeonFS.Client.ChunkReader do
   caller's requested byte range. If a chunk fetch fails mid-stream the
   stream raises `NeonFS.Client.ChunkReader.StreamError` rather than
   halting silently — a silent halt would be indistinguishable from a
-  clean end-of-file and hand the consumer a truncated read (#1353).
+  clean end-of-file and hand the consumer a truncated read.
 
   Unlike `NeonFS.Core.read_file_stream/3`, this stream is built entirely
   on the caller's node — it is safe to use from non-co-located interface
@@ -162,7 +162,7 @@ defmodule NeonFS.Client.ChunkReader do
   end
 
   @doc """
-  `file_id`-keyed counterpart to `read_file_stream/3` (#1607 of #1590).
+  `file_id`-keyed counterpart to `read_file_stream/3`.
 
   Same laziness guarantee: chunks are pulled as the stream is consumed,
   so the working set stays at chunk granularity no matter how large the
@@ -293,7 +293,7 @@ defmodule NeonFS.Client.ChunkReader do
   # The content-address invariant: a chunk's bytes must hash to its id.
   # The data plane fetches whole chunks by hash, so verify SHA-256 here —
   # one place, end-to-end (disk rot, transit, handler bugs), inherited by
-  # every interface (#1199). A mismatch means this replica is corrupt:
+  # every interface. A mismatch means this replica is corrupt:
   # emit telemetry (feeds repair/alerting) and fail over to the next
   # location, which may hold a good copy. Compressed/encrypted chunks are
   # fetched range-decoded via the core RPC path, not whole, so they can't
@@ -321,7 +321,7 @@ defmodule NeonFS.Client.ChunkReader do
 
   # Whole chunk pulled over the data plane but only `read_length` bytes are
   # handed back: `chunk_size / read_length` is the amplification, the event
-  # count is the data-plane RPC count (#1350/#1351).
+  # count is the data-plane RPC count.
   defp emit_chunk_fetched(volume_name, ref, bytes, loc, tier, start) do
     :telemetry.execute(
       [:neonfs, :client, :chunk_reader, :chunk_fetched],

@@ -1,7 +1,7 @@
 defmodule NeonFS.TestSupport.MetadataBench do
   @moduledoc """
   Peer-local telemetry counters for the metadata write path, used by the
-  #1292 metadata write-throughput benchmark to attribute Ra
+  Metadata write-throughput benchmark, attributing Ra
   `:cas_update_volume_root` round-trips (and stale-pointer retries) to a
   burst of file creates.
 

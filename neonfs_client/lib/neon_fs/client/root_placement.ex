@@ -2,12 +2,12 @@ defmodule NeonFS.Client.RootPlacement do
   @moduledoc """
   Caches, per volume, the core nodes that hold the volume's root metadata
   segment so the `Router` can dispatch metadata writes to a node that can
-  perform them locally (#1046).
+  perform them locally.
 
   Without this, metadata writes are routed by `CostFunction` with no root
   awareness; a write that lands on a non-root-holding node pays an extra
   remote re-dispatch hop on the core side (the `MetadataWriter` fallback,
-  #1045) on *every* operation. Resolving the root nodes once and caching
+  on *every* operation. Resolving the root nodes once and caching
   them turns that fallback back into the rare case.
 
   The cache is authoritative-source-backed, not a copy: it stores only the
@@ -49,7 +49,7 @@ defmodule NeonFS.Client.RootPlacement do
   @doc """
   Like `get/2` but keyed by the volume's UUID id — resolves via
   `NeonFS.Core.volume_root_nodes_by_id/1` for callers (e.g. FUSE) that hold
-  the id rather than the name (#1087). Cached under a distinct key namespace.
+  the id rather than the name. Cached under a distinct key namespace.
   """
   @spec get_by_id(String.t(), keyword()) :: {:ok, [node()]} | {:error, term()}
   def get_by_id(volume_id, opts \\ []) when is_binary(volume_id) do

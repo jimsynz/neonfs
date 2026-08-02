@@ -18,7 +18,7 @@ defmodule NeonFS.Client.CostFunction do
   @queue_weight 0.3
 
   # The composite cost is in [0, 1] (weights sum to 1, each score 0–1).
-  # An off-duty node — `:draining` (#1324) or `:maintenance` (#1376) —
+  # An off-duty node — `:draining` or `:maintenance` —
   # gets a flat penalty above that ceiling so it always sorts behind any
   # on-duty node, yet is still picked when it's the only option —
   # deprioritise, not exclude.
@@ -169,7 +169,7 @@ defmodule NeonFS.Client.CostFunction do
     # Probe `:cpu_sup.avg1` only when its server is registered on the peer.
     # `os_mon` isn't started on every node, and calling `:cpu_sup` while it's
     # down makes `os_mon` log a warning per probe on the remote — a node we
-    # probe every 10s, so the noise dominated integration logs (#1300).
+    # probe every 10s, so the noise dominated integration logs.
     with pid when is_pid(pid) <- :rpc.call(node, :erlang, :whereis, [:cpu_sup], 2_000),
          load when is_integer(load) <- :rpc.call(node, :cpu_sup, :avg1, [], 2_000) do
       # avg1 returns load * 256, normalise to 0-1 (cap at 4.0 load)

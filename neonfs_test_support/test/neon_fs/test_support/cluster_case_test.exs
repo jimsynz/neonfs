@@ -8,7 +8,7 @@ defmodule NeonFS.TestSupport.ClusterCaseTest do
       assert :ok = ClusterCase.handle_cluster_init_result({:ok, %{cluster_id: "abc"}}, :node1)
     end
 
-    test "treats an already-initialised cluster as success (#1388 retry idempotency)" do
+    test "treats an already-initialised cluster as success (retry idempotency)" do
       # `cluster_init` can time out transiently while actually completing; the
       # retry then returns this. The cluster is initialised, so it must not blow
       # up the caller's setup_all.

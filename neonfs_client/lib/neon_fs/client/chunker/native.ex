@@ -4,10 +4,9 @@ defmodule NeonFS.Client.Chunker.Native do
 
   This module binds to the `neonfs_chunker` crate in
   `neonfs_client/native/`. It exposes the chunker surface that
-  `NeonFS.Client.ChunkWriter` (#450) uses to split a byte stream into
+  `NeonFS.Client.ChunkWriter` uses to split a byte stream into
   content-addressed chunks before shipping each chunk to a data-plane
-  replica (see the #408 design note, the #449 scaffold issue, and the
-  #299 streaming-writes epic).
+  replica.
 
   The chunker output is byte-for-byte compatible with
   `NeonFS.Core.Blob.Native` — dedup across packages depends on

@@ -41,7 +41,7 @@ defmodule NeonFS.Core.VolumeACLTest do
       refute VolumeACL.has_permission?(private, 1001, :read)
       refute VolumeACL.has_permission?(private, 1001, :write)
 
-      # world-writable (the fresh-volume default) → non-owners get world access (#1339)
+      # world-writable (the fresh-volume default) → non-owners get world access
       world = VolumeACL.new(volume_id: "vol-1", owner_uid: 1000, owner_gid: 1000)
 
       assert VolumeACL.has_permission?(world, 1001, :read)

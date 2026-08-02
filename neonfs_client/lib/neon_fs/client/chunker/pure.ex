@@ -1,6 +1,6 @@
 defmodule NeonFS.Client.Chunker.Pure do
   @moduledoc """
-  Pure-Elixir port of the FastCDC v2020 cut algorithm (#797).
+  Pure-Elixir port of the FastCDC v2020 cut algorithm.
 
   Direct translation of `fastcdc::v2020::cut_gear` from the upstream
   Rust crate (v4.0.1) so the chunk-boundary set is bit-exact with

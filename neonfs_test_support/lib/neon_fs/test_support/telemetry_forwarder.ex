@@ -84,7 +84,7 @@ defmodule NeonFS.TestSupport.TelemetryForwarder do
   `{:ok, %{path: String.t()}}` — without writing anything to the
   `_system` volume, so the scheduler's `[:neonfs, :dr_snapshot_scheduler,
   :tick]` telemetry fires once per leader tick at the configured cadence.
-  Used by the peer-cluster scheduling test (#570).
+  Used by the peer-cluster scheduling test.
   """
   @spec dr_snapshot_create_fn(keyword()) :: {:ok, %{path: String.t()}}
   def dr_snapshot_create_fn(_opts \\ []) do

@@ -46,7 +46,7 @@ defmodule NeonFS.Client.Router do
       naming). Pass `:processing_volume_id` alongside it to request that the
       receiving handler resolve the volume's compression / encryption
       settings before storing the chunk — the interface-side chunking path
-      from the #408 design note.
+      from the streaming-writes design.
     * `:get_chunk` — `args`: `[hash: h, volume_id: v]`
     * `:has_chunk` — `args`: `[hash: h]`
 
@@ -90,7 +90,7 @@ defmodule NeonFS.Client.Router do
   end
 
   # A pooled connection to `node` failed — most often a stale pool to a peer
-  # that restarted on a new (OS-assigned) data-plane port (#1450). Drop and
+  # that restarted on a new (OS-assigned) data-plane port. Drop and
   # refresh the peer's pool so the next call rebuilds it against the peer's
   # current endpoint, and fail this call fast so the caller can retry rather
   # than block on the dead connection.
@@ -123,7 +123,7 @@ defmodule NeonFS.Client.Router do
   @doc """
   Routes a volume-scoped metadata *write* to a node that holds the volume's
   root segment, so the core-side `MetadataWriter` performs it locally instead
-  of remote-dispatching on every operation (#1046).
+  of remote-dispatching on every operation.
 
   Resolves the volume's root-holding nodes via `RootPlacement` (cached),
   intersects them with the currently reachable core nodes, and dispatches to
@@ -140,7 +140,7 @@ defmodule NeonFS.Client.Router do
   @doc """
   Like `volume_metadata_call/4` but resolves the volume's root holders by its
   UUID id (via `RootPlacement.get_by_id/1`) — for callers that hold the id
-  rather than the name (e.g. FUSE's id-keyed write APIs, #1087).
+  rather than the name (e.g. FUSE's id-keyed write APIs).
   """
   @spec volume_metadata_call_by_id(String.t(), module(), atom(), [term()]) :: term()
   def volume_metadata_call_by_id(volume_id, module, function, args) when is_binary(volume_id) do

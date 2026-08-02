@@ -2,7 +2,7 @@ defmodule Mix.Tasks.Chunker.Bench do
   @moduledoc """
   Throughput benchmark comparing `NeonFS.Client.Chunker.Native`
   (Rustler NIF over the `fastcdc` crate) against
-  `NeonFS.Client.Chunker.Pure` (the pure-Elixir port from #797).
+  `NeonFS.Client.Chunker.Pure` (the pure-Elixir port).
 
   Reports MB/s and per-chunk overhead at the input sizes mentioned in
   the issue's decision criterion (small ≤ 64 KiB, bulk ≥ 1 MiB).
@@ -10,7 +10,7 @@ defmodule Mix.Tasks.Chunker.Bench do
       $ mix chunker.bench
       $ mix chunker.bench --sizes 65536,262144,1048576
 
-  The deliverable for #797 is the comparison; the issue accepts any
+  The deliverable is the comparison; it accepts any
   ratio above ~30% bulk + faster-on-small as the threshold for
   considering a switch.
   """

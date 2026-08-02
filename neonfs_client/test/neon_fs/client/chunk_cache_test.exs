@@ -1,6 +1,6 @@
 defmodule NeonFS.Client.ChunkCacheTest do
   @moduledoc """
-  Unit tests for the per-node byte-bounded LRU chunk cache (#1355).
+  Unit tests for the per-node byte-bounded LRU chunk cache.
   The cache is not auto-started in `:test` (`start_children?: false`),
   so each test that needs it starts its own with a tight byte cap.
   """

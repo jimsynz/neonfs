@@ -8,7 +8,7 @@ defmodule NeonFS.Client.ChunkReader.StreamError do
   has begun — it is raised instead. Halting the stream silently would
   give the consumer a short read indistinguishable from a clean
   end-of-file: a truncated layer for the containerd content proxy, a
-  truncated object body for S3/WebDAV, a short NFS READ (#1353).
+  truncated object body for S3/WebDAV, a short NFS READ.
 
   The `:reason` field carries the underlying fetch error.
   """

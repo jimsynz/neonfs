@@ -28,13 +28,13 @@ defmodule NeonFS.Client.RegistrarTest do
     refute state.registered?
   end
 
-  test "traps exits so terminate/2 runs on supervisor shutdown (#1386)" do
+  test "traps exits so terminate/2 runs on supervisor shutdown" do
     pid = start_supervised!({Registrar, interval_ms: 60_000, metadata: %{}, type: :nfs})
 
     assert {:trap_exit, true} = Process.info(pid, :trap_exit)
   end
 
-  describe "deregister on shutdown (#1386)" do
+  describe "deregister on shutdown" do
     setup :set_mimic_global
 
     test "deregisters the service when the supervisor stops it" do

@@ -18,7 +18,7 @@ defmodule NeonFS.Client.ChunkReaderTest do
   end
 
   # Real content hash for data-plane tests, which now verify fetched bytes
-  # against the chunk id (#1199).
+  # against the chunk id.
   defp content_hash(content), do: :crypto.hash(:sha256, content)
 
   defp ref(opts) do
@@ -261,7 +261,7 @@ defmodule NeonFS.Client.ChunkReaderTest do
     end
   end
 
-  describe "read_file/3 — content-hash verification (#1199)" do
+  describe "read_file/3 — content-hash verification" do
     test "fails over to the next location when a replica serves corrupt bytes" do
       good = "good"
       n1 = :corrupt@host
@@ -800,7 +800,7 @@ defmodule NeonFS.Client.ChunkReaderTest do
     end
   end
 
-  describe "chunk_fetched telemetry (#1351)" do
+  describe "chunk_fetched telemetry" do
     test "emits read_length, whole-chunk size, timing, and chunk hash per data-plane fetch" do
       chunk = String.duplicate("Z", 64)
 
@@ -868,7 +868,7 @@ defmodule NeonFS.Client.ChunkReaderTest do
     end
   end
 
-  describe "chunk cache (#1355)" do
+  describe "chunk cache" do
     setup do
       start_supervised!({NeonFS.Client.ChunkCache, max_bytes: 1_000_000})
       :ok
@@ -900,7 +900,7 @@ defmodule NeonFS.Client.ChunkReaderTest do
     end
   end
 
-  # By-ID entry points (#1607 of #1590). The pipeline is shared with the
+  # By-ID entry points. The pipeline is shared with the
   # path-based siblings — what these assert is that every route back to
   # core uses the by-ID call, so a handle whose path was renamed away or
   # unlinked still reads.

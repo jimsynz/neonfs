@@ -32,7 +32,7 @@ defmodule NeonFS.EpmdTest do
     {:ok, meta_dir: meta_dir}
   end
 
-  describe "address_please/3 cluster.json fallback (#1137)" do
+  describe "address_please/3 cluster.json fallback" do
     test "resolves a peer port from $NEONFS_DATA_DIR/meta/cluster.json without NEONFS_PEER_PORTS",
          %{tmp_dir: tmp_dir} do
       System.put_env("NEONFS_DATA_DIR", tmp_dir)

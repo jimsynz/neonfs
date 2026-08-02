@@ -166,8 +166,8 @@ defmodule NeonFS.Core.Volume do
   acknowledgement. Override via `config :neonfs_client, :default_durability,
   %{type: :replicate, factor: 1, min_copies: 1}` in environments where the
   3-replica default can't be satisfied (single-drive integration tests in
-  particular — pre-#835 the global metadata quorum hid this from suites that
-  declared no durability on `Volume.new/2`; post-#835 the per-volume write
+  particular — the global metadata quorum used to hide this from suites that
+  declared no durability on `Volume.new/2`; the per-volume write
   path refuses to provision).
   """
   @spec default_durability() :: durability_config()
@@ -378,7 +378,7 @@ defmodule NeonFS.Core.Volume do
   # `../../tmp` would escape the mount root. Reject path separators,
   # traversal segments, NUL and control characters at the source — this
   # also keeps names within the conservative subset valid as S3 bucket
-  # names (#1201). File paths inside volumes are already guarded by
+  # names. File paths inside volumes are already guarded by
   # `FileMeta.validate_path/1`.
   defp validate_name(name) when is_binary(name) and byte_size(name) > 0 do
     cond do
@@ -506,7 +506,7 @@ defmodule NeonFS.Core.Volume do
   defp validate_nfs_root_squash(_), do: {:error, "nfs_root_squash must be a boolean"}
 
   # An empty list means allow-all (the historical posture); otherwise each
-  # entry must be a well-formed IP or CIDR string (#1217).
+  # entry must be a well-formed IP or CIDR string.
   defp validate_nfs_allowed_ips(list) when is_list(list) do
     if Enum.all?(list, &valid_cidr_or_ip?/1) do
       :ok

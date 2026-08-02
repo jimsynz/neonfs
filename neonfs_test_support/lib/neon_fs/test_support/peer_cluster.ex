@@ -2,7 +2,7 @@ defmodule NeonFS.TestSupport.PeerCluster do
   @moduledoc """
   Provides helpers for peer nodes in integration testing.
 
-  Each peer node is started via `:peer.start/1` (no link — see #910)
+  Each peer node is started via `:peer.start/1` (no link)
   and tracked for cleanup. The controller monitors the peer pid so
   unexpected deaths surface via `:DOWN` messages and telemetry, but a
   peer crash does **not** propagate as an `EXIT` signal to the test
@@ -41,7 +41,7 @@ defmodule NeonFS.TestSupport.PeerCluster do
   # back `{:badrpc, :nodedown}` / `{:badrpc, :timeout}` on a loaded CI runner —
   # the peer's distribution channel or applications haven't settled yet. Plain
   # `rpc/6` surfaces that straight into a `{:ok, _} =` match and crashes the
-  # whole describe block (#1361). `rpc_until_ready/6` retries only those
+  # whole describe block. `rpc_until_ready/6` retries only those
   # transient failures with the same widening backoff as the boot retry.
   @rpc_ready_attempts 5
   @rpc_ready_backoff_ms 250
@@ -51,7 +51,7 @@ defmodule NeonFS.TestSupport.PeerCluster do
   # `{:error, _}` (a supervised child's `init` timing out, a dependency not yet
   # settled) when the runner is saturated. Swallowing that and proceeding left
   # the cluster half-started, so a later `setup_all` RPC hit a not-yet-running
-  # process and crashed with `no process … application isn't started` (#1396).
+  # process and crashed with `no process … application isn't started`.
   # Gate bring-up on the apps actually starting, retrying the transient failure
   # with the same widening backoff as the boot/rpc-ready retries before giving
   # up.
@@ -120,7 +120,7 @@ defmodule NeonFS.TestSupport.PeerCluster do
 
   defp span_peer_spawn(peer_opts) do
     :telemetry.span([:neonfs, :peer_cluster, :node, :spawn], %{}, fn ->
-      # `:peer.start/1` rather than `start_link/1` (#910). With the
+      # `:peer.start/1` rather than `start_link/1`. With the
       # link in place, a peer dying during bring-up propagates an
       # EXIT signal to the test process and crashes setup_all/setup
       # with no actionable stacktrace. With `start/1` + a monitor,
@@ -322,7 +322,7 @@ defmodule NeonFS.TestSupport.PeerCluster do
         client_bootstrap_nodes =
           if core_peer? do
             # Core peers bootstrap against every OTHER peer (core or
-            # interface — the existing behaviour from #482).
+            # interface — the existing behaviour).
             Enum.reject(all_peer_names, &(&1 == :"#{peer_name}@localhost"))
           else
             # Interface peers bootstrap only against core peers —
@@ -470,7 +470,7 @@ defmodule NeonFS.TestSupport.PeerCluster do
     |> maybe_add_containerd_config(peer_apps, interface_ports)
   end
 
-  # Per-peer ports keep multi-NFS-peer clusters (#1175) from
+  # Per-peer ports keep multi-NFS-peer clusters from
   # contending over the default 2049/4045 binds on the shared test
   # host — both the NFSv3 listener and the NLM lock server bind fixed
   # ports by default.
@@ -487,7 +487,7 @@ defmodule NeonFS.TestSupport.PeerCluster do
             # periodic resync is the safety net for a missed/delayed event.
             # Its 60 s production default equals the convergence deadline
             # tests assert against, so a single dropped event under CI load
-            # races the deadline (#1363). Tighten the safety net for peers
+            # races the deadline. Tighten the safety net for peers
             # so a missed event reconverges well inside any test timeout.
             export_resync_interval: 2_000
           ]
@@ -598,7 +598,7 @@ defmodule NeonFS.TestSupport.PeerCluster do
   `join_cluster_rpc`). Under a loaded CI runner those first calls
   occasionally fail because the peer's distribution channel or
   applications haven't settled, and plain `rpc/6` crashes the whole
-  describe block on the resulting `{:ok, _} =` match (#1361).
+  describe block on the resulting `{:ok, _} =` match.
 
   Only `:nodedown` and `:timeout` `:badrpc` reasons are retried — a genuine
   `{:badrpc, {:EXIT, _}}`, an application-level error reply, or any
@@ -644,7 +644,7 @@ defmodule NeonFS.TestSupport.PeerCluster do
   # started yet, or an RPC may time out — all of which clear once the node
   # settles. `:rpc.call` surfaces these in several shapes: bare atoms, tagged
   # tuples (`{:timeout, …}` from a `GenServer.call` timeout), and `{:EXIT, …}`
-  # wrappers when the remote call exits. Match them all (#1396); anything else
+  # wrappers when the remote call exits. Match them all; anything else
   # (e.g. a genuine `{:undef, …}` or `ArgumentError`) is a real error.
   @spec transient_rpc_error?(term()) :: boolean()
   def transient_rpc_error?(:nodedown), do: true
@@ -755,7 +755,7 @@ defmodule NeonFS.TestSupport.PeerCluster do
   drifting through "Invalid challenge reply" retries after a
   cookie-driven disconnect — calling code that follows the
   reconnect with `:erpc.call` then burns its full per-RPC timeout
-  against a link the kernel is actively rejecting (#744).
+  against a link the kernel is actively rejecting.
 
   ## Options
 
@@ -968,7 +968,7 @@ defmodule NeonFS.TestSupport.PeerCluster do
     # Under heavy load (e.g. full integration suite), application startup can
     # exceed the default 5s `:peer.call` timeout. 30s used to be enough, but
     # the shared CI runner now consistently exceeds it on the BEAM NFSv3
-    # peer-cluster tests (#647). Bumped to 60s so a slow cold-start doesn't
+    # peer-cluster tests. Bumped to 60s so a slow cold-start doesn't
     # masquerade as a real failure.
     started_at = System.monotonic_time(:millisecond)
 
@@ -986,7 +986,7 @@ defmodule NeonFS.TestSupport.PeerCluster do
       end
     catch
       # `:inet_async, :timeout` and similar distribution-layer exits are the
-      # canonical CI flake (#606 / #647) and clear on a retry. Re-run the same
+      # canonical CI flake and clear on a retry. Re-run the same
       # widening-backoff retry as the `{:error, _}` path before giving up;
       # anything still failing after the budget is exhausted dumps controller
       # diagnostics (cheap; failure path only) and is re-raised with its
@@ -1253,7 +1253,7 @@ defmodule NeonFS.TestSupport.PeerCluster do
     # Wait for Ra system to be ready on the peer. `:ra_system.fetch/1`
     # returns the system's config map once Ra is up, or the atom
     # `:undefined` before it is. Try up to 30 times with a 100ms
-    # delay (3 seconds total). See #429.
+    # delay (3 seconds total).
     Enum.reduce_while(1..30, :not_ready, fn _i, _acc ->
       try do
         case :peer.call(peer, :ra_system, :fetch, [:default]) do
@@ -1379,7 +1379,7 @@ defmodule NeonFS.TestSupport.PeerCluster do
     # restarted peer boots with `:drives = []` and `DriveManager` manages
     # no drives, so it cannot serve or store chunks — invisible in a
     # single-node/rolling restart (survivors serve the data) but fatal to a
-    # simultaneous whole-cluster restart (#1450).
+    # simultaneous whole-cluster restart.
     core_config =
       case Map.get(cluster, :drives_fn) do
         nil -> core_config

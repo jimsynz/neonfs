@@ -29,7 +29,7 @@ defmodule NeonFS.Client.CostFunctionTest do
     end
   end
 
-  describe "draining deprioritisation (#1324)" do
+  describe "draining deprioritisation" do
     test "prefers a cheaper active node over a draining one" do
       inject_costs(%{
         active@host: node_cost(:active@host, 0.2, false),

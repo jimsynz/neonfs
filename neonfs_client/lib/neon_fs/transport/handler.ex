@@ -30,8 +30,8 @@ defmodule NeonFS.Transport.Handler do
   data-plane `put_chunk` response carries.
 
   Shared by the TLS data-plane handler and the `NeonFS.Client.ChunkWriter`
-  RPC fallback used when no data-plane pool exists for the target node
-  (#1094). `dispatch` is the blob-store module (default
+  RPC fallback used when no data-plane pool exists for the target node.
+  `dispatch` is the blob-store module (default
   `NeonFS.Core.BlobStore`); `volume_id` selects volume-level compression /
   encryption while `drive_id` selects the storage drive.
   """
@@ -39,7 +39,7 @@ defmodule NeonFS.Transport.Handler do
           {:ok, map()} | {:error, term()}
   def store_chunk(hash, volume_id, drive_id, tier, data, dispatch \\ @default_dispatch) do
     # Resolve the sentinel/“default” drive_id to a real local drive once, so the
-    # chunk lands on real storage and `local_location` records that drive (#1042).
+    # chunk lands on real storage and `local_location` records that drive.
     drive_id = resolve_drive_id(dispatch, drive_id, tier)
 
     with {:ok, opts} <- resolve_volume_opts(dispatch, volume_id),
@@ -91,7 +91,7 @@ defmodule NeonFS.Transport.Handler do
   # When present, the handler resolves the volume's compression /
   # encryption settings via the dispatch module and applies them
   # before storing the chunk — the interface-side chunking path
-  # established by the #408 design note. Frame layout:
+  # established by the streaming-writes design. Frame layout:
   # `{:put_chunk, ref, hash, volume_id, drive_id, write_id, tier, data}`.
   #
   # `resolve_put_chunk_opts/1` may return `{:error, reason}` — for
@@ -103,11 +103,11 @@ defmodule NeonFS.Transport.Handler do
   # The reply carries the codec the handler actually used (compression
   # atom + optional `ChunkCrypto`) so `CommitChunks.create_chunk_meta/3`
   # on the receiving core can stamp the matching `ChunkMeta` rather
-  # than hard-coding `compression: :none, crypto: nil` (#481).
+  # than hard-coding `compression: :none, crypto: nil`.
   #
   # After the local put succeeds the handler also kicks off replication
   # for volumes with `durability.factor > 1` via the dispatch module's
-  # optional `replicate_after_put/5` callback (#478). The returned
+  # optional `replicate_after_put/5` callback. The returned
   # location list — local plus every successful replica — is stamped
   # into the response so the interface-side `ChunkWriter` can record
   # every replica in the eventual `commit_chunks` payload rather than
@@ -180,7 +180,7 @@ defmodule NeonFS.Transport.Handler do
   # just-written chunk to the `durability.factor - 1` additional
   # replicas. Dispatches that don't expose this callback (older test
   # mocks, single-responsibility blob-store shims) fall back to the
-  # single-location response the pre-#478 path produced.
+  # single-location response the legacy path produced.
   defp replicate_if_supported(dispatch, hash, data, volume_id, drive_id, tier) do
     tier_atom = tier_to_atom(tier)
     local_location = %{node: Node.self(), drive_id: drive_id, tier: tier_atom}
@@ -209,7 +209,7 @@ defmodule NeonFS.Transport.Handler do
   # The `:locations` field carries the full replica location list from
   # `replicate_after_put/5` so `ChunkWriter.chunk_refs_to_commit_opts/1`
   # can emit an accurate multi-entry `:locations` map for the
-  # `commit_chunks` payload (#478).
+  # `commit_chunks` payload.
   defp codec_info_from_opts(opts, original_size, locations) do
     %{
       compression: compression_atom(Keyword.get(opts, :compression)),

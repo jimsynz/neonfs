@@ -1,6 +1,6 @@
 defmodule NeonFS.Client.Join do
   @moduledoc """
-  Joining-side cluster join flow (#1160).
+  Joining-side cluster join flow.
 
   Any node that depends on `neonfs_client` can join a cluster with an
   invite token — interface nodes (NFS, S3, WebDAV, FUSE, Docker, …)
@@ -60,7 +60,7 @@ defmodule NeonFS.Client.Join do
   - `{:ok, :joining}` once the invite is redeemed and credentials are stored.
     The join then completes asynchronously: the node restarts TLS distribution
     (to load the cluster cert), connects to the via node, and finalizes.
-    Callers confirm completion by polling `cluster status` (#1033).
+    Callers confirm completion by polling `cluster status`.
   - `{:error, reason}` on a synchronous failure (invalid token, unreachable via
     node, already in a cluster).
   """
@@ -81,7 +81,7 @@ defmodule NeonFS.Client.Join do
       # cert we just wrote, which only goes live after a distribution restart —
       # and that restart drops the CLI's connection. So the rest of the join
       # (restart → connect → finalize) runs in a detached process; the CLI
-      # reconnects and validates via `cluster status` (#1033). Synchronous
+      # reconnects and validates via `cluster status`. Synchronous
       # failures (bad token, unreachable via node) are still reported directly.
       finalize_join_async(credentials, token, this_node, type, opts)
       {:ok, :joining}
@@ -167,7 +167,7 @@ defmodule NeonFS.Client.Join do
   @doc """
   Appends the default redeem port (#{@default_redeem_port}) to a via address
   that omits one, so a bare `host` reaches the core metrics HTTP server
-  instead of defaulting to port 80 (#1346).
+  instead of defaulting to port 80.
 
   An address that already carries a port — `host:9568` or bracketed IPv6
   `[::1]:9568` — is returned unchanged.
