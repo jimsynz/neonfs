@@ -1,7 +1,7 @@
 defmodule NeonFS.Integration.SnapshotTest do
   @moduledoc """
   Single-node integration test for the snapshot keyspace foundation
-  (#960 / epic #959). The multi-node fan-out test lives in
+  The multi-node fan-out test lives in
   `snapshot_multi_node_test.exs` because each test file pins its own
   peer-cluster shape via module-level `@moduletag`.
   """

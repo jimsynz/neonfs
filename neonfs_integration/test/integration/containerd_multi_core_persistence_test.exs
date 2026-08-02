@@ -1,6 +1,6 @@
 defmodule NeonFS.Integration.ContainerdMultiCorePersistenceTest do
   @moduledoc """
-  Containerd-layer guard for #1186 / #1190 — proves that a blob ingested
+  Containerd-layer guard proving that a blob ingested
   through `neonfs_containerd` on an interface peer has its per-volume
   metadata (the index-tree node chunks) replicated to the *full* metadata
   drive set, so the blob is resolvable from a core node that did **not**
@@ -8,7 +8,7 @@ defmodule NeonFS.Integration.ContainerdMultiCorePersistenceTest do
 
   ## Why this exists separately from `commit_chunks_test.exs`
 
-  The existing #1186 guard (`commit_chunks_test.exs`) exercises the
+  The existing guard (`commit_chunks_test.exs`) exercises the
   cross-node `commit_chunks` round-trip directly against `NeonFS.Core`.
   The containerd suite couldn't express the regression: its tests use a
   single core node with `factor: 1` metadata, so all metadata lives on one
@@ -114,7 +114,7 @@ defmodule NeonFS.Integration.ContainerdMultiCorePersistenceTest do
                    path
                  ]),
                "blob metadata not resolvable from #{core_node} — index-tree chunks " <>
-                 "did not replicate to the full metadata drive set (#1186/#1190)"
+                 "did not replicate to the full metadata drive set"
 
         assert meta.size == byte_size(payload)
       end

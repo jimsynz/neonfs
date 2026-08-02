@@ -1,6 +1,6 @@
 defmodule NeonFS.Integration.PerVolumeMetadataTest do
   @moduledoc """
-  End-to-end peer-cluster verification of #794 — per-volume metadata
+  End-to-end peer-cluster verification of per-volume metadata
   durability.
 
   Asserts that creating a volume with `replicate: factor=N` causes the
@@ -21,9 +21,9 @@ defmodule NeonFS.Integration.PerVolumeMetadataTest do
     currently writes the index-tree chunks (FileIndex / ChunkIndex /
     StripeIndex pages) through a single `pick_store_handle/2` instead
     of the multi-replica `replicate_segment` path. That's tracked in
-    #903 — once it lands the assertions in this test extend to cover
+    the cross-node fan-out — once it lands the assertions here extend to cover
     every chunk hash referenced from the volume's index-tree roots.
-  - Drive-evacuation re-replication (#793): drains belong with that
+  - Drive-evacuation re-replication: drains belong with that
     sub-issue's runner; this test verifies the **write-time** durability
     contract only.
   """
@@ -114,7 +114,7 @@ defmodule NeonFS.Integration.PerVolumeMetadataTest do
     end
   end
 
-  # Each volume root is sharded (#1307); at shard count 1 the volume's
+  # Each volume root is sharded; at shard count 1 the volume's
   # entry lives at shard 0.
   defp wait_for_root_chunk_hash(cluster, volume_id) do
     :ok =

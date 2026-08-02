@@ -433,5 +433,5 @@ defmodule NeonFS.Integration.EventNotificationTest do
 
   # FUSE metadata cache invalidation moved to
   # `neonfs_fuse/test/integration/metadata_cache_invalidation_test.exs`
-  # alongside the other FUSE integration tests (#600 / #582).
+  # alongside the other FUSE integration tests.
 end

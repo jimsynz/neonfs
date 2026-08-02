@@ -1,7 +1,7 @@
 defmodule NeonFS.Integration.AppStartProfileTest do
   @moduledoc """
   Opt-in diagnostic test that profiles per-application start costs on
-  a peer BEAM for the full `neonfs_core` dependency tree (#507).
+  a peer BEAM for the full `neonfs_core` dependency tree.
 
   Not run by default — tagged `:profile` and excluded by
   `test/test_helper.exs` unless explicitly included. Run with:

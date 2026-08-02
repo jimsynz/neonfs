@@ -1,6 +1,6 @@
 defmodule NeonFS.Integration.ContainerdCrossNodeSharingTest do
   @moduledoc """
-  Integration test for #726 (second slice of #554) — proves that a
+  Integration test proving that a
   blob ingested through `neonfs_containerd` on one peer is reachable
   through `neonfs_containerd` on a different peer, with no upstream
   fetch.
@@ -22,7 +22,7 @@ defmodule NeonFS.Integration.ContainerdCrossNodeSharingTest do
   containerd's `Info` → `Read` chain (manifest fetch tells
   containerd to call `Info` on each layer digest *before* deciding
   whether to download), but that path needs a registry source and
-  is parked under #728.
+  is parked.
 
   This test asserts the primitive directly: peer B's `Content.Info`
   and `Content.Read` gRPC handlers return the ingested bytes

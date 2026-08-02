@@ -2,19 +2,19 @@ defmodule NeonFS.Integration.ServiceRegistryTest do
   @moduledoc """
   Cross-node consistency regression for `NeonFS.Core.ServiceRegistry`.
 
-  Pre-#349, every core node kept its own ETS cache of services hydrated
+  Every core node used to keep its own ETS cache of services hydrated
   from Ra on startup and updated on local writes. That produced a
   stale-follower window: a `deregister_service` command applied on the
   leader replicated to followers via Ra, but followers only refreshed
   their local ETS on restart — so `list/0` on a follower could keep
   returning a recently-deregistered service until its next boot.
 
-  With #349, every read goes through `RaSupervisor.local_query/2`, so
+  Every read now goes through `RaSupervisor.local_query/2`, so
   a registration / deregistration committed by any node is immediately
   visible to every other node on their next read.
 
   This test is the canonical cross-node consistency check for the
-  whole #341 bug class — other manager slices (ACL, S3 credentials,
+  whole bug class — other manager slices (ACL, S3 credentials,
   Escalation) follow the same pattern.
   """
   use NeonFS.TestSupport.ClusterCase, async: false

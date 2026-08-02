@@ -20,7 +20,7 @@ defmodule NeonFS.Integration.EncryptionTest do
   @moduletag nodes: 1
   @moduletag cluster_mode: :shared
   # The `enc-ec-volume` is `erasure:2:1`; its shards plus the now-fanned-out
-  # chunk-index metadata (#903/#1186) need ≥2 failure domains, which a
+  # chunk-index metadata need ≥2 failure domains, which a
   # single default drive can't provide. Three local hot drives satisfy
   # placement on one node (`DriveSelector` counts each `{node, drive_id}`).
   @moduletag drives: 3
@@ -110,7 +110,7 @@ defmodule NeonFS.Integration.EncryptionTest do
 
       # Locate the raw on-disk file directly. Going through BlobStore.read_chunk
       # with no codec info can't find the chunk now that encrypted writes have
-      # a nonce-derived codec suffix (#270) — and supplying the nonce would
+      # a nonce-derived codec suffix — and supplying the nonce would
       # trigger decryption. For this assertion we just want to compare raw
       # bytes on disk against the plaintext marker.
       hex = Base.encode16(chunk_hash, case: :lower)

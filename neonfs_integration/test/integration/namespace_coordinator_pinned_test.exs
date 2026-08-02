@@ -1,10 +1,10 @@
 defmodule NeonFS.Integration.NamespaceCoordinatorPinnedTest do
   @moduledoc """
-  Peer-cluster integration test for `claim_pinned/2` (sub-issue #637
-  of #306). Validates that handle-pinned claims replicate across the
+  Peer-cluster integration test for `claim_pinned/2`. Validates that
+  handle-pinned claims replicate across the
   Ra cluster and that holder-tied lifetime works across nodes — when
   the FUSE peer holding the pin dies, *every* node's view of the pin
-  disappears, which is what the unlink-while-open story (#306) needs
+  disappears, which is what the unlink-while-open story needs
   to safely reclaim metadata.
 
   Sibling to `namespace_coordinator_create_test.exs`. Holders are
@@ -39,7 +39,7 @@ defmodule NeonFS.Integration.NamespaceCoordinatorPinnedTest do
         # See the wait_until rationale at the top of the file: cross-
         # node visibility races between leader-commit and follower-
         # apply otherwise show up here as the assertion seeing an
-        # empty list. (#666)
+        # empty list.
         assert :ok =
                  wait_until(fn ->
                    case claims_for_path(cluster, :node2, path) do
@@ -71,7 +71,7 @@ defmodule NeonFS.Integration.NamespaceCoordinatorPinnedTest do
 
         assert id1 != id2
 
-        # Every node should see both pins — `wait_until` per #666.
+        # Every node should see both pins.
         for node <- [:node1, :node2, :node3] do
           assert :ok =
                    wait_until(fn ->
@@ -104,7 +104,7 @@ defmodule NeonFS.Integration.NamespaceCoordinatorPinnedTest do
 
       # Sanity: node2 eventually sees the pin while the holder
       # lives. `wait_until` covers the leader-commit → follower-apply
-      # window, same as the visibility test above (#666).
+      # window, same as the visibility test above.
       assert :ok =
                wait_until(fn ->
                  match?({:ok, [_]}, claims_for_path(cluster, :node2, path))

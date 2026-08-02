@@ -1,7 +1,7 @@
 defmodule NeonFS.Integration.DetachedFileGCTest do
   @moduledoc """
   Peer-cluster end-to-end test for the unlink-while-open story
-  (sub-issue #644 of #638). Validates that:
+  Validates that:
 
     1. A file pinned on `node1` and deleted from `node2` becomes
        invisible by path everywhere but stays reachable by `file_id`
@@ -14,9 +14,9 @@ defmodule NeonFS.Integration.DetachedFileGCTest do
        chunk GC.
 
   The test mirrors the `claim_pinned` peer-cluster shape from
-  `namespace_coordinator_pinned_test.exs` (#637) but exercises the
+  `namespace_coordinator_pinned_test.exs` but exercises the
   whole core-side write path. FUSE / NFS handler wiring is out of
-  scope for this issue (#639, #640).
+  scope for this issue.
   """
 
   use NeonFS.TestSupport.ClusterCase, async: false
@@ -131,7 +131,7 @@ defmodule NeonFS.Integration.DetachedFileGCTest do
     end
   end
 
-  # Pins are keyed by file identity (#1605), so the name a handle was
+  # Pins are keyed by file identity, so the name a handle was
   # opened under stops mattering the moment it is taken: rename on one
   # node, unlink from a third, and the pin taken on the first still
   # tombstones the file instead of losing its chunks.

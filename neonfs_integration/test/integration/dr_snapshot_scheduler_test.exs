@@ -1,8 +1,7 @@
 defmodule NeonFS.Integration.DRSnapshotSchedulerTest do
   @moduledoc """
   Peer-cluster integration test for `NeonFS.Core.DRSnapshotScheduler`'s
-  single-leader scheduling guarantee — sub-issue #570 (deferred from
-  #323).
+  single-leader scheduling guarantee.
 
   The scheduler is started on every core node, but only the current Ra
   leader actually creates a snapshot per tick. This test verifies the
@@ -33,7 +32,7 @@ defmodule NeonFS.Integration.DRSnapshotSchedulerTest do
   @moduletag :integration
   @moduletag nodes: 3
 
-  # A distinct name from the supervised `DRSnapshotScheduler` (#1448): this
+  # A distinct name from the supervised `DRSnapshotScheduler`: this
   # test mounts its own fast-interval instance with an injected create_fn,
   # which would otherwise clash with the daily-interval one now started by
   # the core supervisor. The supervised instance stays dormant (daily tick)
@@ -45,7 +44,7 @@ defmodule NeonFS.Integration.DRSnapshotSchedulerTest do
   # The leader-change wait used to flunk after 5s, but each
   # `current_leader_node/1` poll already reserves up to 15s under CI
   # load (see comment there), so a single slow `:ra.members` round-trip
-  # could exhaust the budget before any progress was made (#606). 30s
+  # could exhaust the budget before any progress was made. 30s
   # leaves room for at least one slow round-trip plus a handful of
   # 50ms-spaced retries.
   @leader_change_deadline_ms 30_000
@@ -186,7 +185,7 @@ defmodule NeonFS.Integration.DRSnapshotSchedulerTest do
 
     # 15s mirrors the sync-segment cap in AntiEntropy; under CI load the
     # default 5s `:ra.members` budget fires `{:inet_async, :timeout}` from
-    # the dist channel rather than the Ra timer (#606).
+    # the dist channel rather than the Ra timer.
     {:ok, _members, {_cluster_name, leader_node}} =
       PeerCluster.rpc(cluster, :node1, :ra, :members, [server_id, 15_000])
 

@@ -2,7 +2,7 @@ defmodule NeonFS.Integration.ClusterFormationMultiNodeTest do
   # Read-only smoke tests on a healthy 3-node cluster. The describe block was
   # split out of ClusterFormationTest so it can use cluster_mode: :shared —
   # the three tests mutate nothing, so paying for three cluster bootstraps
-  # was pure overhead (#421).
+  # was pure overhead.
   use NeonFS.TestSupport.ClusterCase, async: false
 
   @moduletag timeout: 60_000

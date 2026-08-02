@@ -1,6 +1,6 @@
 defmodule NeonFS.Integration.ForceResetTest do
   @moduledoc """
-  Peer-cluster integration test for `cluster force-reset` (#473).
+  Peer-cluster integration test for `cluster force-reset`.
 
   Validates the snapshot-extract + fresh-cluster flow end-to-end:
 
@@ -88,10 +88,10 @@ defmodule NeonFS.Integration.ForceResetTest do
         )
 
       # NOTE: post-reset Ra election does not currently complete
-      # within the test budget — see #688. The snapshot extraction
+      # within the test budget. The snapshot extraction
       # + persistence is verified by the sibling test below; full
       # end-to-end "new cluster accepts new commands" coverage will
-      # land alongside #688's election-readiness fix.
+      # land alongside the election-readiness fix.
     end
 
     test "the on-disk snapshot file matches the survivor's pre-reset state",

@@ -1,7 +1,7 @@
 defmodule NeonFS.Integration.GCSnapshotLifecycleTest do
   @moduledoc """
   End-to-end multi-root garbage-collection lifecycle on a real Ra-backed
-  single-node cluster (#985): write a file, snapshot the volume, delete
+  single-node cluster: write a file, snapshot the volume, delete
   the file from the live head, and run GC — the chunks survive because
   they are still reachable from the snapshot's frozen root. Deleting the
   snapshot and running GC again reclaims them.

@@ -1,11 +1,11 @@
 defmodule NeonFS.Integration.NamespaceCoordinatorByteRangeTest do
   @moduledoc """
   Peer-cluster integration test for `claim_byte_range/4` and
-  `query_byte_range/4` (#673). Validates that byte-range claims
+  `query_byte_range/4`. Validates that byte-range claims
   replicate across the Ra cluster, that overlapping ranges with
   conflicting scopes collide cross-node, and that holder-DOWN bulk
   release reaps byte-range claims the same way it reaps `:pinned`
-  claims (#642's pattern).
+  claims.
 
   Sibling to `namespace_coordinator_pinned_test.exs`. Holders are
   short-lived `Agent`s (started without link via `Agent.start/1`)
@@ -96,7 +96,7 @@ defmodule NeonFS.Integration.NamespaceCoordinatorByteRangeTest do
 
       # Sanity: node3 sees the conflict while the holder lives. Wraps
       # `wait_until` per the leader-commit -> follower-apply window
-      # documented in the create-test (#666).
+      # documented in the create-test.
       assert :ok =
                wait_until(fn ->
                  case query_byte_range(cluster, :node3, path, {50, 100}, :exclusive) do

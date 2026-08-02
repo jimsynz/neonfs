@@ -1,7 +1,7 @@
 defmodule NeonFS.Integration.ContainerdDaemon do
   @moduledoc """
   Spawn and tear down a `containerd` subprocess for integration tests
-  (#725 — first slice of #554).
+  for the containerd content-store tests.
 
   Each test instance gets:
 

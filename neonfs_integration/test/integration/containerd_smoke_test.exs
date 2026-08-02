@@ -1,6 +1,6 @@
 defmodule NeonFS.Integration.ContainerdSmokeTest do
   @moduledoc """
-  Prep slice for #554. Asserts that the CI runner has `containerd` and
+  Asserts that the CI runner has `containerd` and
   `ctr` available so future containerd content-store integration tests
   (which will exercise `neonfs_containerd`'s gRPC plugin against a real
   containerd daemon) have something to talk to.

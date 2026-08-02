@@ -1,7 +1,7 @@
 defmodule NeonFS.Integration.SupervisorStartProfileTest do
   @moduledoc """
   Opt-in diagnostic test that attributes `NeonFS.Core.Supervisor`'s
-  cold-start cost to individual children (#510).
+  cold-start cost to individual children.
 
   Not run by default — tagged `:profile` and excluded by
   `test/test_helper.exs` unless explicitly included. Run with:

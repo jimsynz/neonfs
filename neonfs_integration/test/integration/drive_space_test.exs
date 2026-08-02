@@ -166,7 +166,7 @@ defmodule NeonFS.Integration.DriveSpaceTest do
 
       # Run GC to reclaim orphaned chunks. A full-drive pass (mark phase
       # plus ~100 chunk deletes on a loopback device) exceeds the default
-      # 30 s RPC timeout on loaded CI runners (#1155) — match the 120 s
+      # 30 s RPC timeout on loaded CI runners — match the 120 s
       # slow-runner budget the evacuation test below already uses.
       {:ok, gc_result} =
         PeerCluster.rpc(cluster, :node1, NeonFS.Core.GarbageCollector, :collect, [], 120_000)
@@ -310,7 +310,7 @@ defmodule NeonFS.Integration.DriveSpaceTest do
 
       assert chunks_a == [], "Drive A should have no chunks after evacuation"
 
-      # Verify drive_a is deregistered (the original #750 acceptance criterion —
+      # Verify drive_a is deregistered (the original acceptance criterion —
       # once metadata lives in volumes, drive evacuation collapses into chunk
       # evacuation and the drive comes out of the registry cleanly).
       drive_ids =
@@ -362,9 +362,9 @@ defmodule NeonFS.Integration.DriveSpaceTest do
         ])
 
       # Halt on any non-`{:ok, _}` result, capturing the actual shape. The
-      # write path can return a `{:error, reason, info}` quorum 3-tuple
-      # (#1058), a `{:badrpc, _}` when a peer process is gone mid-test, or a
-      # bare `{:error, reason}` — all are "stop, the drive is full" (#1070).
+      # write path can return a `{:error, reason, info}` quorum 3-tuple,
+      # a `{:badrpc, _}` when a peer process is gone mid-test, or a
+      # bare `{:error, reason}` — all are "stop, the drive is full".
       case result do
         {:ok, _} -> {:cont, [{:ok, path} | acc]}
         other -> {:halt, [other | acc]}
@@ -392,7 +392,7 @@ defmodule NeonFS.Integration.DriveSpaceTest do
   # as one still running, so the wait burns its whole budget and reports
   # "condition not met within 120000ms" — while the job recorded both a status
   # and, in `progress.description`, the error that caused it. That cost a full
-  # CI cycle and a wrong diagnosis on #1683 before anyone read the job log.
+  # CI cycle and a wrong diagnosis before anyone read the job log.
   defp await_evacuation!(cluster, drive_id, timeout) do
     wait_until(fn -> terminal_evacuation?(cluster, drive_id) end, timeout: timeout)
 

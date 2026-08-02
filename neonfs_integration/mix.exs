@@ -7,7 +7,7 @@ defmodule NeonFS.Integration.MixProject do
   recovery, and the cross-node correctness suites that genuinely
   need a peer cluster spanning multiple core nodes. Per-interface
   tests live with their owning packages and pull peer-cluster
-  scaffolding in via `:neonfs_test_support`. See #582 for the
+  scaffolding in via `:neonfs_test_support`. See that package for the
   migration that landed this shape.
   """
   @version "0.5.1"

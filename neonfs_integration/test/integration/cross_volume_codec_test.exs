@@ -1,6 +1,6 @@
 defmodule NeonFS.Integration.CrossVolumeCodecTest do
   @moduledoc """
-  Regression test for issue #270.
+  Regression test for cross-volume codec handling.
 
   Multiple volumes that share a BlobStore write the same plaintext with
   different codec (compression / encryption) settings. Before the codec

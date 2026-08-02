@@ -1,13 +1,13 @@
 defmodule NeonFS.Integration.SyncDurabilityTest do
   @moduledoc """
-  #1500: the `sync_file` durability barrier holds end-to-end on a real
+  The `sync_file` durability barrier holds end-to-end on a real
   3-node peer cluster.
 
   On a `write_ack: :local` volume the extra replicas are placed by a
   fire-and-forget background task after the write acks, so a whole-cluster
   cold restart immediately after a write can leave the metadata pointing at
   replica locations that never actually received the chunk — which is why
-  the #1440 freeze/thaw test wraps its post-restart read-back in a
+  the freeze/thaw test wraps its post-restart read-back in a
   `wait_until` retry loop.
 
   `NeonFS.Core.sync_file/2` closes that gap: it blocks until every chunk of
@@ -99,7 +99,7 @@ defmodule NeonFS.Integration.SyncDurabilityTest do
   end
 
   # Infrastructure readiness after the cold reform — the volume resolves
-  # (metadata) and ChunkIndex is alive on every node. This is not the #1440
+  # (metadata) and ChunkIndex is alive on every node. This is not the freeze/thaw
   # durability workaround: it waits for services to restart, not for a
   # not-yet-durable chunk to converge.
   defp wait_for_read_path_ready(cluster) do

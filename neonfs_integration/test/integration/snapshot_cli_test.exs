@@ -1,6 +1,6 @@
 defmodule NeonFS.Integration.SnapshotCLITest do
   @moduledoc """
-  CLI integration test for the snapshot subcommands (#962 / epic #959).
+  CLI integration test for the snapshot subcommands.
   Exercises `neonfs volume snapshot create / list / show / delete`
   end-to-end against a peer cluster via the real CLI binary.
   """
