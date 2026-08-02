@@ -258,15 +258,39 @@ wait_cloud_init() {
 
 # --- provisioning ----------------------------------------------------------
 
+# True when the cached Samba VFS module's pinned Samba version is the one the
+# node's apt would install. Anything else — a distro point release, a deb built
+# on a different base — means it cannot be installed there.
+vfs_deb_matches_node() {
+  local i="$1" deb="$2" required candidate
+
+  required="$(dpkg-deb -f "${deb}" Depends 2>/dev/null |
+    tr ',' '\n' | sed -n 's/.*samba (= \(.*\))/\1/p' | head -1)"
+  [ -n "${required}" ] || return 0
+
+  candidate="$(node_ssh "$i" "apt-cache policy samba 2>/dev/null | awk '/Candidate:/{print \$2}'" | tr -d '\r')"
+  [ -n "${candidate}" ] || return 0
+
+  [ "${required}" = "${candidate}" ]
+}
+
 provision_node() {
   local i="$1" ip; ip="$(node_ip "$i")"
   log "installing neonfs_omnibus on node ${i}"
 
   node_ssh "$i" "sudo mkdir -p /tmp/debs && sudo chown rig:rig /tmp/debs"
-  # samba-vfs-neonfs is a hard dependency of neonfs-omnibus; its version
-  # tracks the distro Samba, not ${VERSION}, so glob it and ship it too when the
-  # CIFS build produced it — otherwise apt can't satisfy the omnibus dependency.
+  # samba-vfs-neonfs pins the exact distro Samba it was built against, so a
+  # cached one goes stale the moment the distro publishes a point release and
+  # can no longer be installed. `neonfs-omnibus` only *recommends* it, so the
+  # right answer then is to ship no VFS module and carry on without CIFS —
+  # apt skips an unsatisfiable recommendation silently. Passing the .deb to
+  # `apt-get install` regardless makes it a direct target, and its own hard
+  # dependency takes the whole transaction down with it.
   local vfs_deb; vfs_deb="$(ls -t "${DEB_DIR}"/samba-vfs-neonfs_*.deb 2>/dev/null | head -1 || true)"
+  if [ -n "${vfs_deb}" ] && ! vfs_deb_matches_node "$i" "${vfs_deb}"; then
+    log "skipping stale ${vfs_deb##*/} (built for a different Samba); this rig has no CIFS"
+    vfs_deb=""
+  fi
   node_scp "$i" \
     "${DEB_DIR}/neonfs-common_${VERSION}_amd64.deb" \
     "${DEB_DIR}/neonfs-cli_${VERSION}_amd64.deb" \
