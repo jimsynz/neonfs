@@ -1583,8 +1583,27 @@ defmodule NeonFS.Core.FileIndex do
     Enum.each(txns, &reply_after_commit(&1, result))
   end
 
+  # The batch is durable by the time this runs, so a post-commit effect that
+  # blows up must not turn a committed write into a reported failure — nor
+  # strand the *other* transactions in the batch, which is what an escaping
+  # raise did: it propagated out of the enclosing `Enum.each`, took the
+  # GenServer down, and left every caller after this one waiting for a reply
+  # that never came, for metadata that was already on disk.
+  #
+  # These effects are local materialisation — ETS cache writes and event
+  # broadcasts. Losing one costs a cache entry that the next authoritative
+  # read repopulates; reporting the write as failed costs correctness.
   defp reply_after_commit(txn, {:ok, _roots}) do
-    txn.on_commit.()
+    try do
+      txn.on_commit.()
+    catch
+      kind, reason ->
+        Logger.warning("Post-commit effect failed after a durable write",
+          kind: kind,
+          reason: inspect(reason)
+        )
+    end
+
     GenServer.reply(txn.from, txn.reply)
   end
 
