@@ -128,6 +128,7 @@ defmodule NeonFS.Cluster.Init do
          :ok <- DriveManager.register_local_drives_in_bootstrap(),
          :ok <- ensure_drive_available(),
          {:ok, _volume} <- create_system_volume(opts),
+         :ok <- maybe_scale_system_volume_to_drives(opts),
          :ok <- write_cluster_identity(cluster_name),
          {:ok, _ca_cert, _ca_key} <- init_cluster_ca(cluster_name),
          :ok <- issue_first_node_cert(),
@@ -252,6 +253,29 @@ defmodule NeonFS.Cluster.Init do
     end
   rescue
     _ -> :ok
+  end
+
+  # Drives are registered before `_system` exists, so the raise that runs on
+  # drive registration finds no volume. A cluster initialised with several
+  # drives in one shot would otherwise sit at factor 1 until the next
+  # `drive add`. Run the raise once more now the volume is there.
+  #
+  # Through that same raise-only path deliberately, rather than seeding the
+  # factor at creation. The raise leaves `min_copies` alone, so a two-drive
+  # cluster targets two copies but still accepts a write with one; seeding
+  # `factor: 2, min_copies: 2` instead would mean losing either drive blocks
+  # writes to the volume holding the CA key. It also keeps
+  # `init --drive a --drive b` and `init --drive a` + `drive add b` at the
+  # same durability, which they should be — they are the same cluster.
+  #
+  # An explicit `--system-replicas` is the operator's own call, and the raise
+  # would silently overrule a deliberate 1 on a multi-drive cluster.
+  defp maybe_scale_system_volume_to_drives(opts) do
+    if Keyword.has_key?(opts, :system_replicas) do
+      :ok
+    else
+      DriveManager.scale_system_volume_to_drive_count()
+    end
   end
 
   defp create_system_volume(opts) do
