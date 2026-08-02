@@ -18,6 +18,11 @@ defmodule NeonFS.CSI.GRPCDrainTest do
   """
   use ExUnit.Case, async: false
 
+  # Long enough to distinguish a blocking drain from a brutal teardown, which
+  # completes in microseconds; short enough to leave ranch's 5s drain budget
+  # almost entirely available to the call itself.
+  @blocking_probe_ms 50
+
   alias Csi.V1.{
     CapacityRange,
     Controller,
@@ -92,16 +97,37 @@ defmodule NeonFS.CSI.GRPCDrainTest do
     # in-flight connection drains.
     stopper = Task.async(fn -> Supervisor.stop(sup) end)
 
-    # The drain must be waiting on the in-flight call: shutdown cannot
-    # have finished while the handler is still blocked. A non-draining
-    # (brutal) teardown would complete near-instantly and this would
-    # observe `:ok`.
-    refute Task.yield(stopper, 300),
+    # The drain must be waiting on the in-flight call: shutdown cannot have
+    # finished while the handler is still blocked. A non-draining (brutal)
+    # teardown completes in microseconds, so a short window proves it.
+    #
+    # Keep that window short. Everything between `Supervisor.stop/1` and the
+    # handler returning is spent inside ranch's connection-drain budget, which
+    # is a fixed 5s: `grpc_server`'s cowboy adapter builds ranch's transport
+    # options from `num_acceptors`, `max_connections` and `socket_opts` only,
+    # so `adapter_opts` cannot raise it and the test has to live within it.
+    # Every millisecond held here is one the loaded-runner case does not have.
+    refute Task.yield(stopper, @blocking_probe_ms),
            "shutdown completed without waiting for the in-flight gRPC call to drain"
 
     send(handler, {:proceed})
 
-    assert {:ok, %CreateVolumeResponse{}} = Task.await(caller, 5_000)
+    case Task.await(caller, 5_000) do
+      {:ok, %CreateVolumeResponse{}} ->
+        :ok
+
+      {:error, %GRPC.RPCError{message: ":stream_error: :closed"}} ->
+        flunk(
+          "the connection was cut rather than drained. The call was held for " <>
+            "#{@blocking_probe_ms}ms, so this means the whole shutdown-to-response " <>
+            "sequence exceeded ranch's fixed 5s drain window — a loaded runner, not " <>
+            "a drain regression."
+        )
+
+      other ->
+        flunk("unexpected reply from the drained call: #{inspect(other)}")
+    end
+
     assert :ok = Task.await(stopper, 5_000)
   end
 
