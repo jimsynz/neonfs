@@ -47,6 +47,13 @@ defmodule NeonFS.Core.Replication do
     local_drive_id = Keyword.get(opts, :local_drive_id) || local_drive_id_for_tier(tier)
     exclude_drives = Keyword.get(opts, :exclude_drives, [{Node.self(), local_drive_id}])
 
+    # The codec the *primary* copy was written with, threaded through so every
+    # replica lands under the same codec suffix. Re-deriving it here from the
+    # volume would not do: `compression_opts/1` ignores `min_size`, so a chunk
+    # the primary left uncompressed would be compressed on its replicas, and
+    # `ChunkMeta` records one codec for all of them.
+    write_opts = Keyword.get(opts, :write_opts, [])
+
     :telemetry.execute(
       [:neonfs, :replication, :start],
       %{bytes: byte_size(chunk_data)},
@@ -66,7 +73,15 @@ defmodule NeonFS.Core.Replication do
           {:ok, [%{node: Node.self(), drive_id: local_drive_id, tier: tier}]}
 
         _ ->
-          perform_replication(chunk_hash, chunk_data, tier, targets, volume, local_drive_id)
+          perform_replication(
+            chunk_hash,
+            chunk_data,
+            tier,
+            targets,
+            volume,
+            local_drive_id,
+            write_opts
+          )
       end
 
     duration = System.monotonic_time() - start_time
@@ -192,7 +207,15 @@ defmodule NeonFS.Core.Replication do
     with {:ok, data} <- source_chunk_data(chunk),
          {:ok, targets} <- select_replication_targets(needed, tier, existing) do
       new_locations =
-        for {:ok, location} <- replicate_to_targets(chunk.hash, data, tier, targets),
+        for {:ok, location} <-
+              replicate_to_targets(
+                chunk.hash,
+                data,
+                tier,
+                targets,
+                volume.id,
+                write_opts_for_chunk(chunk, volume)
+              ),
             do: location
 
       unless new_locations == [] do
@@ -289,29 +312,29 @@ defmodule NeonFS.Core.Replication do
     :ok
   end
 
-  defp perform_replication(chunk_hash, chunk_data, tier, targets, volume, local_drive_id) do
+  defp perform_replication(chunk_hash, chunk_data, tier, targets, volume, local_drive_id, write_opts) do
     case volume.write_ack do
       :local ->
         # Background replication - spawn async and return immediately
-        spawn_background_replication(chunk_hash, chunk_data, tier, targets, volume.id)
+        spawn_background_replication(chunk_hash, chunk_data, tier, targets, volume.id, write_opts)
         # Return only local location for now
         {:ok, [%{node: Node.self(), drive_id: local_drive_id, tier: tier}]}
 
       :quorum ->
         # Quorum replication - wait for W of N
-        quorum_replicate(chunk_hash, chunk_data, tier, targets, volume, local_drive_id)
+        quorum_replicate(chunk_hash, chunk_data, tier, targets, volume, local_drive_id, write_opts)
 
       :all ->
         # Synchronous replication - wait for all
-        sync_replicate(chunk_hash, chunk_data, tier, targets, volume.id, local_drive_id)
+        sync_replicate(chunk_hash, chunk_data, tier, targets, volume.id, local_drive_id, write_opts)
     end
   end
 
-  defp spawn_background_replication(chunk_hash, chunk_data, tier, targets, volume_id) do
+  defp spawn_background_replication(chunk_hash, chunk_data, tier, targets, volume_id, write_opts) do
     PlacementBarrier.run(fn ->
       Logger.debug("Starting background replication", chunk_hash: Base.encode16(chunk_hash))
 
-      results = replicate_to_targets(chunk_hash, chunk_data, tier, targets)
+      results = replicate_to_targets(chunk_hash, chunk_data, tier, targets, volume_id, write_opts)
 
       # Update chunk metadata with successful locations
       successful_locations =
@@ -332,13 +355,13 @@ defmodule NeonFS.Core.Replication do
     end)
   end
 
-  defp quorum_replicate(chunk_hash, chunk_data, tier, targets, volume, local_drive_id) do
+  defp quorum_replicate(chunk_hash, chunk_data, tier, targets, volume, local_drive_id, write_opts) do
     # Calculate quorum size (W of N)
     # For 3-replica volumes with min_copies=2, we need 1 additional success (already stored locally)
     min_copies = volume.durability.min_copies
     required_successes = max(1, min_copies - 1)
 
-    results = replicate_to_targets(chunk_hash, chunk_data, tier, targets)
+    results = replicate_to_targets(chunk_hash, chunk_data, tier, targets, volume.id, write_opts)
 
     successful_locations =
       results
@@ -365,8 +388,8 @@ defmodule NeonFS.Core.Replication do
     end
   end
 
-  defp sync_replicate(chunk_hash, chunk_data, tier, targets, volume_id, local_drive_id) do
-    results = replicate_to_targets(chunk_hash, chunk_data, tier, targets)
+  defp sync_replicate(chunk_hash, chunk_data, tier, targets, volume_id, local_drive_id, write_opts) do
+    results = replicate_to_targets(chunk_hash, chunk_data, tier, targets, volume_id, write_opts)
 
     # Check if all succeeded
     if Enum.all?(results, &match?({:ok, _}, &1)) do
@@ -388,12 +411,26 @@ defmodule NeonFS.Core.Replication do
     end
   end
 
-  defp replicate_to_targets(chunk_hash, chunk_data, tier, targets) do
+  # A repaired replica has no write-time context to inherit, so it falls back to
+  # the recorded codec. `ChunkMeta` stores the algorithm but not the zstd level,
+  # so the level comes from the volume — correct unless the volume's level has
+  # changed since the chunk was written, which is tracked separately.
+  defp write_opts_for_chunk(chunk, volume) do
+    case Map.get(chunk, :compression) do
+      :zstd -> [compression: "zstd", compression_level: zstd_level(volume)]
+      _ -> []
+    end
+  end
+
+  defp zstd_level(%{compression: %{algorithm: :zstd, level: level}}), do: level
+  defp zstd_level(_volume), do: 3
+
+  defp replicate_to_targets(chunk_hash, chunk_data, tier, targets, volume_id, write_opts) do
     # Replicate to all targets in parallel
     targets
     |> Task.async_stream(
       fn target ->
-        replicate_to_node(chunk_hash, chunk_data, tier, target)
+        replicate_to_node(chunk_hash, chunk_data, tier, target, volume_id, write_opts)
       end,
       timeout: 30_000,
       max_concurrency: 10
@@ -404,13 +441,13 @@ defmodule NeonFS.Core.Replication do
     end)
   end
 
-  defp replicate_to_node(chunk_hash, chunk_data, tier, target) do
+  defp replicate_to_node(chunk_hash, chunk_data, tier, target, volume_id, write_opts) do
     tier_str = Atom.to_string(tier)
     drive_id = target.drive_id
 
     case Router.data_call(target.node, :put_chunk,
            hash: chunk_hash,
-           volume_id: drive_id,
+           volume_id: volume_id,
            write_id: nil,
            tier: tier_str,
            data: chunk_data
@@ -430,7 +467,7 @@ defmodule NeonFS.Core.Replication do
           %{node: target.node, hash: chunk_hash, reason: :no_data_endpoint}
         )
 
-        replicate_to_node_rpc(chunk_hash, chunk_data, tier_str, target)
+        replicate_to_node_rpc(chunk_hash, chunk_data, tier_str, target, write_opts)
 
       {:error, reason} ->
         Logger.warning("Failed to replicate chunk to node",
@@ -442,14 +479,14 @@ defmodule NeonFS.Core.Replication do
     end
   end
 
-  defp replicate_to_node_rpc(chunk_hash, chunk_data, tier_str, target) do
+  defp replicate_to_node_rpc(chunk_hash, chunk_data, tier_str, target, write_opts) do
     drive_id = target.drive_id
 
     case :rpc.call(
            target.node,
            BlobStore,
            :write_chunk,
-           [chunk_data, drive_id, tier_str, []],
+           [chunk_data, drive_id, tier_str, write_opts],
            10_000
          ) do
       {:ok, returned_hash, _chunk_info} ->

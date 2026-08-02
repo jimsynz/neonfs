@@ -1561,7 +1561,7 @@ defmodule NeonFS.Core.WriteOperation do
         build_chunk_meta(hash, size, chunk_info, drive.id, volume, write_ctx.write_id, crypto)
 
       with :ok <- put_chunk_meta(chunk_meta),
-           :ok <- maybe_replicate_chunk(hash, data, volume, tier, drive.id) do
+           :ok <- maybe_replicate_chunk(hash, data, volume, tier, drive.id, write_opts) do
         build_chunk_result(hash, offset, size, chunk_info, index)
       end
     else
@@ -1619,10 +1619,14 @@ defmodule NeonFS.Core.WriteOperation do
   defp parse_compression("zstd:" <> _level), do: :zstd
   defp parse_compression(_), do: :none
 
-  defp maybe_replicate_chunk(hash, data, volume, tier, local_drive_id) do
+  defp maybe_replicate_chunk(hash, data, volume, tier, local_drive_id, write_opts) do
     if volume.durability.factor > 1 do
       hash
-      |> Replication.replicate_chunk(data, volume, tier: tier, local_drive_id: local_drive_id)
+      |> Replication.replicate_chunk(data, volume,
+        tier: tier,
+        local_drive_id: local_drive_id,
+        write_opts: write_opts
+      )
       |> handle_replication_result(volume.write_ack, volume.durability.min_copies)
     else
       :ok

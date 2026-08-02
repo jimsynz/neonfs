@@ -479,7 +479,8 @@ defmodule NeonFS.Core.BlobStore do
     case Replication.replicate_chunk(hash, data, volume,
            tier: local_location.tier,
            local_drive_id: local_location.drive_id,
-           exclude_drives: exclude
+           exclude_drives: exclude,
+           write_opts: Keyword.take(opts, [:compression, :compression_level])
          ) do
       {:ok, locations} ->
         {:ok, merge_local_location(locations, local_location)}
