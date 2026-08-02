@@ -113,7 +113,7 @@ defmodule NeonFS.Core.FileIndexTest do
       assert {:error, %InvalidPath{}} = FileIndex.create(file)
     end
 
-    # #908/#1058: when MetadataWriter.put returns a quorum failure from
+    # When MetadataWriter.put returns a quorum failure from
     # the segment replicator (the ENOSPC shape), the structured
     # `%QuorumUnavailable{}` must propagate to the caller without the
     # GenServer crashing (it used to MatchError on a bare 3-tuple).
@@ -155,7 +155,7 @@ defmodule NeonFS.Core.FileIndexTest do
     end
   end
 
-  describe "create_committing_chunks/3 (#1304)" do
+  describe "create_committing_chunks/3" do
     setup %{store: store} do
       flips = :counters.new(1, [])
 
@@ -611,7 +611,7 @@ defmodule NeonFS.Core.FileIndexTest do
       assert Map.has_key?(vol2_children, "other.txt")
     end
 
-    # #1294: a single-level listing must not bleed in grandchildren. The
+    # A single-level listing must not bleed in grandchildren. The
     # NUL separator between dir path and name keeps `/docs` entries out of
     # the `/` range scan even though `dirent:vol1:/docs<0>x` shares the
     # `dirent:vol1:/` textual prefix.
@@ -685,7 +685,7 @@ defmodule NeonFS.Core.FileIndexTest do
       assert dir.volume_id == "vol1"
     end
 
-    test "rejects a non-leading-slash path, keeping the leading-slash invariant (#1210)" do
+    test "rejects a non-leading-slash path, keeping the leading-slash invariant" do
       assert {:error, %NeonFS.Error.InvalidPath{}} = FileIndex.mkdir("vol1", "documents")
     end
 
@@ -792,7 +792,7 @@ defmodule NeonFS.Core.FileIndexTest do
   # A rename changing both the directory and the basename used to run as a
   # `move` then a `rename`, leaving the file in the destination directory
   # under its old basename in between — a path the caller never asked for and
-  # that a concurrent reader could observe (#1608).
+  # that a concurrent reader could observe.
   describe "move_rename/5" do
     setup do
       ensure_events_infrastructure()
@@ -966,14 +966,14 @@ defmodule NeonFS.Core.FileIndexTest do
     end
   end
 
-  describe "list_volume_authoritative/1 (#1034)" do
+  describe "list_volume_authoritative/1" do
     test "lists files from the authoritative store even when the ETS cache is cold" do
       {:ok, _} = FileIndex.create(FileMeta.new("vol1", "/a.txt"))
       {:ok, _} = FileIndex.create(FileMeta.new("vol1", "/b.txt"))
       {:ok, _} = FileIndex.create(FileMeta.new("vol2", "/c.txt"))
 
       # Simulate a node whose write-through cache never saw these writes
-      # (the cross-node / cross-interface case behind #1034): clear it.
+      # (the cross-node / cross-interface case): clear it.
       :ets.delete_all_objects(:file_index_by_id)
       assert FileIndex.list_volume("vol1") == []
 
@@ -1073,7 +1073,7 @@ defmodule NeonFS.Core.FileIndexTest do
   describe "truncate/2" do
     setup do
       # truncate/2 resolves chunk sizes via `ChunkIndex.get/1`, which goes
-      # through the quorum store (#342). Start a mock-backed ChunkIndex so
+      # through the quorum store. Start a mock-backed ChunkIndex so
       # writes land in both the quorum store and ETS.
       start_chunk_index()
       :ok

@@ -29,7 +29,7 @@ defmodule NeonFS.Core.Volume.MetadataWriterTest do
       assert {:ok, segment} = RootSegment.decode(encoded)
       assert segment.index_roots.file_index == "new-tree-root"
       # The write stamps the segment with its shard so reconstruction can
-      # recover per-shard identity from disk (#1313). Unit count is 1.
+      # recover per-shard identity from disk. Unit count is 1.
       assert segment.shard == 0
 
       assert [{:bootstrap, command}] = :ets.lookup(capture.bootstrap_calls, :bootstrap)
@@ -58,7 +58,7 @@ defmodule NeonFS.Core.Volume.MetadataWriterTest do
       assert is_binary(new_segment.last_written_by_neonfs_version)
     end
 
-    test "replicates every copy-on-write index-tree node chunk the write produced (#903)" do
+    test "replicates every copy-on-write index-tree node chunk the write produced" do
       capture = build_capture()
 
       node_chunks = [{"node-hash-a", "node-bytes-a"}, {"node-hash-b", "node-bytes-b"}]
@@ -149,7 +149,7 @@ defmodule NeonFS.Core.Volume.MetadataWriterTest do
   end
 
   describe "apply_batch/3" do
-    test "applies every mutation but commits a single CAS (#1295)" do
+    test "applies every mutation but commits a single CAS" do
       capture = build_capture()
       opts = build_opts(capture: capture)
 
@@ -203,7 +203,7 @@ defmodule NeonFS.Core.Volume.MetadataWriterTest do
     end
   end
 
-  describe "merge/5 (#1304)" do
+  describe "merge/5" do
     test "read-decode-merges the given fields over the current value and writes it back" do
       capture = build_capture()
 
@@ -417,7 +417,7 @@ defmodule NeonFS.Core.Volume.MetadataWriterTest do
     end
   end
 
-  describe "remote fallback (#1045)" do
+  describe "remote fallback" do
     test "re-dispatches the write to a node holding the root when there is no local replica" do
       capture = build_capture()
       parent = self()

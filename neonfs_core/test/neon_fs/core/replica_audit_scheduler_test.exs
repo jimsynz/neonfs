@@ -1,6 +1,6 @@
 defmodule NeonFS.Core.ReplicaAuditSchedulerTest do
   @moduledoc """
-  Unit tests for the periodic driver behind `ReplicaAudit.audit/0` (#1627).
+  Unit tests for the periodic driver behind `ReplicaAudit.audit/0`.
 
   The audit itself is stubbed — its behaviour is covered by
   `replica_audit_test.exs`. What matters here is that a tick runs it, that a

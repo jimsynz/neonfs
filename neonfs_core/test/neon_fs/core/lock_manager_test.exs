@@ -15,7 +15,7 @@ defmodule NeonFS.Core.LockManagerTest do
     # falls back to local node when ServiceRegistry is unavailable
 
     # Wait-queue events (emitted by the underlying FileLock) let tests wait for
-    # a spawned acquirer to actually block, instead of a fixed sleep (#1208).
+    # a spawned acquirer to actually block, instead of a fixed sleep.
     blocked_ref =
       :telemetry_test.attach_event_handlers(self(), [
         [:neonfs, :lock_manager, :file_lock, :byte_range_blocked],

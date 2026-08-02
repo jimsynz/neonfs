@@ -122,7 +122,7 @@ defmodule NeonFS.Core.ChunkFetcherTest do
     end
   end
 
-  describe "verify-on-read for :unverified drives (#1375)" do
+  describe "verify-on-read for :unverified drives" do
     setup do
       start_ra()
       :ok = RaServer.init_cluster()

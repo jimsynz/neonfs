@@ -253,7 +253,7 @@ defmodule NeonFS.Core.WriteOperationDataPlaneTest do
     # The reason used to be dropped here: callers got a bare
     # `:data_call_failed` and the cause was logged at debug, so a write that
     # aborted on a broken pool surfaced to the operator as "Internal error"
-    # with nothing anywhere saying what broke (#1653).
+    # with nothing anywhere saying what broke.
     test "a failed data-plane call carries the reason to its caller", ctx do
       dead_port = free_port()
       fake_node = :dead_peer@host

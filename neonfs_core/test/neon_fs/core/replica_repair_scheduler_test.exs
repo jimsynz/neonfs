@@ -1,6 +1,6 @@
 defmodule NeonFS.Core.ReplicaRepairSchedulerTest do
   @moduledoc """
-  Unit tests for `NeonFS.Core.ReplicaRepairScheduler` (#707). Uses
+  Unit tests for `NeonFS.Core.ReplicaRepairScheduler`. Uses
   the same MockJobTracker / MockVolumeRegistry pattern as
   `ScrubSchedulerTest` so the scheduler is exercised in isolation
   from real `JobTracker` / `VolumeRegistry` state.
@@ -14,7 +14,7 @@ defmodule NeonFS.Core.ReplicaRepairSchedulerTest do
 
   # The scheduler emits its telemetry after a GenServer round-trip plus
   # (for membership events) a debounce/lookup, so a 1s `assert_receive`
-  # window flakes on a loaded CI runner (#1475). Wait generously — the
+  # window flakes on a loaded CI runner. Wait generously — the
   # events still arrive well under this when the box is idle.
   @recv_timeout 5_000
 
@@ -325,7 +325,7 @@ defmodule NeonFS.Core.ReplicaRepairSchedulerTest do
     end
   end
 
-  describe "membership-change auto-trigger (#708)" do
+  describe "membership-change auto-trigger" do
     test "fires `:all` when a `:core` service deregister telemetry event arrives" do
       MockJobTracker.start_link()
       MockVolumeRegistry.start_link(volumes: [make_volume("v1"), make_volume("v2")])
@@ -389,7 +389,7 @@ defmodule NeonFS.Core.ReplicaRepairSchedulerTest do
       refute_receive {[:neonfs, :replica_repair_scheduler, :triggered], ^ref, _, _}, 200
     end
 
-    test "suppresses the repair trigger for a node cordoned within the grace window (#1416)" do
+    test "suppresses the repair trigger for a node cordoned within the grace window" do
       MockJobTracker.start_link()
       MockVolumeRegistry.start_link(volumes: [make_volume("v1")])
       MockNodeRegistry.start_link(%{status: :maintenance, updated_at: DateTime.utc_now()})
@@ -427,7 +427,7 @@ defmodule NeonFS.Core.ReplicaRepairSchedulerTest do
       refute_receive {[:neonfs, :replica_repair_scheduler, :triggered], ^ref, _, _}, 200
     end
 
-    test "triggers normally for a node cordoned longer ago than the grace window (#1416)" do
+    test "triggers normally for a node cordoned longer ago than the grace window" do
       MockJobTracker.start_link()
       MockVolumeRegistry.start_link(volumes: [make_volume("v1")])
 
@@ -462,7 +462,7 @@ defmodule NeonFS.Core.ReplicaRepairSchedulerTest do
                      @recv_timeout
     end
 
-    test "suppresses the repair trigger cluster-wide while `:recovering` (#1436)" do
+    test "suppresses the repair trigger cluster-wide while `:recovering`" do
       MockJobTracker.start_link()
       MockVolumeRegistry.start_link(volumes: [make_volume("v1")])
 
@@ -498,7 +498,7 @@ defmodule NeonFS.Core.ReplicaRepairSchedulerTest do
       refute_receive {[:neonfs, :replica_repair_scheduler, :triggered], ^ref, _, _}, 200
     end
 
-    test "triggers normally when the cluster is not recovering (#1436)" do
+    test "triggers normally when the cluster is not recovering" do
       MockJobTracker.start_link()
       MockVolumeRegistry.start_link(volumes: [make_volume("v1")])
 

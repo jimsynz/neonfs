@@ -102,7 +102,7 @@ defmodule NeonFS.Cluster.InitTest do
     end
   end
 
-  describe "drive preflight (#1012)" do
+  describe "drive preflight" do
     test "refuses init when the supplied drive path does not exist" do
       drive_config = %{"path" => "/nonexistent/neonfs-preflight-test", "tier" => "hot"}
 
@@ -113,7 +113,7 @@ defmodule NeonFS.Cluster.InitTest do
       assert reason =~ "does not exist"
 
       # Critical: cluster state must NOT exist after a refused init
-      # (#1012 — preflight runs before any mutation).
+      # (preflight runs before any mutation).
       refute State.exists?()
     end
 

@@ -1,12 +1,12 @@
 defmodule NeonFS.Core.ChunkerParityTest do
   @moduledoc """
   Property test that `NeonFS.Client.Chunker.Native` (the new client-
-  side chunker added in #449) produces byte-for-byte identical output
+  side chunker) produces byte-for-byte identical output
   to `NeonFS.Core.Blob.Native` for the same input.
 
   Content-addressed deduplication depends on both chunkers agreeing
   on `(hash, offset, size)` tuples — if they drift, interface-side
-  streaming writes (#450/#299) would break dedup against chunks
+  streaming writes would break dedup against chunks
   written through the co-located path.
 
   The test lives in `neonfs_core` rather than `neonfs_client` because

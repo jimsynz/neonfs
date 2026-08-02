@@ -2,7 +2,7 @@ defmodule NeonFS.Core.BlobStoreReplicateAfterPutTest do
   @moduledoc """
   Unit coverage for `NeonFS.Core.BlobStore.replicate_after_put/5` — the
   core-side fan-out hook used by `NeonFS.Transport.Handler` after an
-  interface-side `put_chunk` finishes the local write (#478).
+  interface-side `put_chunk` finishes the local write.
 
   Multi-node fan-out (factor > 1, real replicas acknowledging) needs a
   peer cluster and is exercised in the peer-cluster integration tests.

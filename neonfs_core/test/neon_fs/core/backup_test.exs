@@ -62,7 +62,7 @@ defmodule NeonFS.Core.BackupTest do
       # The snapshot-aware export can't actually pull bytes through
       # because the planted volume_root points at a chunk that isn't
       # in BlobStore — the test scaffolding lift to register real
-      # drives + provision is tracked under #985. Backup propagates
+      # drives + provision is tracked separately. Backup propagates
       # the export error rather than silently succeeding.
       assert match?({:error, _}, result),
              "expected export error in stub scaffolding, got #{inspect(result)}"

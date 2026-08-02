@@ -136,7 +136,7 @@ defmodule NeonFS.CoreTest do
   # `_by_id` variants resolve through `FileIndex.get/1` instead of the
   # path-based dir-entry walk, so they keep working when a path has
   # been detached by another peer's `delete_file`. The unlink-while-
-  # open story (#638 / #644) needs this so FUSE / NFSv4 fd holders
+  # open story needs this so FUSE / NFSv4 fd holders
   # can drain their cached handle even after another peer unlinks the
   # path.
   describe "read_file_by_id/3" do
@@ -184,7 +184,7 @@ defmodule NeonFS.CoreTest do
     end
   end
 
-  # The metadata half of the by-ID facade (#1606 of #1590) — `stat`,
+  # The metadata half of the by-ID facade — `stat`,
   # `fchmod`/`fchown`/`futimens` and `ftruncate` served from an
   # immutable handle rather than a path that may have moved.
   describe "get_file_meta_by_id/3" do
@@ -384,20 +384,20 @@ defmodule NeonFS.CoreTest do
   end
 
   # The setup volumes carry no volume ACL, so any non-root identity has
-  # no grant and is denied — the enforcement #1215 wires through from
+  # no grant and is denied — the enforcement wired through from
   # the NFS AUTH_SYS credentials. Root (the default uid 0) bypasses.
-  # File ops authorise against POSIX mode (#1215, #1339): reads/writes of an
+  # File ops authorise against POSIX mode: reads/writes of an
   # existing file check the file's mode; creates/deletes/renames check the
   # parent directory's mode. uid 0 bypasses. A fresh volume's root is
   # world-writable (0o777) so any authenticated client can populate it.
-  describe "POSIX-mode authorisation (#1215, #1339)" do
+  describe "POSIX-mode authorisation" do
     test "uid 0 bypasses every check", %{volume_name: vol_name} do
       {:ok, _} = Core.write_file_streamed(vol_name, "/r.txt", ["x"], uid: 0, mode: 0o600)
       assert {:ok, _} = Core.get_file_meta(vol_name, "/r.txt", uid: 0)
       assert {:ok, _} = Core.mkdir(vol_name, "/d0", uid: 0)
     end
 
-    test "a non-root uid can populate the world-writable volume root (#1339)",
+    test "a non-root uid can populate the world-writable volume root",
          %{volume_name: vol_name} do
       start_namespace_coordination()
 
@@ -412,7 +412,7 @@ defmodule NeonFS.CoreTest do
       assert :ok = Core.delete_file(vol_name, "/client.txt", uid: 1000, gids: [1000])
     end
 
-    test "a non-root uid can write inside a directory it just created (#1339)",
+    test "a non-root uid can write inside a directory it just created",
          %{volume_name: vol_name} do
       # mkdir must give the new dir the caller's ownership, else the caller
       # can't populate it.
@@ -472,8 +472,8 @@ defmodule NeonFS.CoreTest do
 
   # write_file_at authorises against the *caller* (`:auth_uid`/`:auth_gids`)
   # while `:uid`/`:gid` set the new file's owner — so an NFS server can
-  # check the AUTH_SYS client yet still assign POSIX ownership (#1230).
-  describe "write authorisation identity vs ownership (#1230)" do
+  # check the AUTH_SYS client yet still assign POSIX ownership.
+  describe "write authorisation identity vs ownership" do
     test "auth_uid drives the check while :uid sets the new file's owner",
          %{volume_name: vol_name} do
       # A root-owned 0755 dir the caller can't write, even though :uid
@@ -553,7 +553,7 @@ defmodule NeonFS.CoreTest do
       assert {:ok, [_ | _]} = Core.list_files_recursive(vol_name, "/")
     end
 
-    test "a path that exactly equals a file returns that file (#1034 S3 exact-key prefix)", %{
+    test "a path that exactly equals a file returns that file (S3 exact-key prefix)", %{
       volume_name: vol_name
     } do
       {:ok, _} = Core.write_file_streamed(vol_name, "/exact.txt", ["x"])
@@ -601,7 +601,7 @@ defmodule NeonFS.CoreTest do
   end
 
   # `mkdir` and `delete_file` (for directories) are wrapped in
-  # `NamespaceCoordinator` claims — sub-issue #305. The default test
+  # `NamespaceCoordinator` claims. The default test
   # setup stops Ra, so this describe block re-enables it to exercise
   # the coordinator-integration path that the unit tests above can't
   # reach.
@@ -673,9 +673,9 @@ defmodule NeonFS.CoreTest do
       assert {:ok, _} = Core.mkdir(vol_name, "/cleanup.txt")
     end
 
-    # File delete (POSIX unlink-while-open, #643 of #638) takes a
+    # File delete (POSIX unlink-while-open) takes a
     # `:shared :path` claim so it coexists with the other shared
-    # holders of the path. Pins live on the file's identity (#1605),
+    # holders of the path. Pins live on the file's identity,
     # so delete asks the coordinator "is this file_id held open?" and
     # tombstones the FileMeta in-place when it is.
     test "file delete with no pins runs the full-delete path",
@@ -716,7 +716,7 @@ defmodule NeonFS.CoreTest do
 
     # The whole point of keying pins by identity: a pinned file can
     # still be renamed, and unlinking it under its *new* name finds
-    # the pin the handle took under the old one (#1605).
+    # the pin the handle took under the old one.
     test "a pinned file renamed then unlinked detaches rather than hard-deletes",
          %{volume_name: vol_name, volume_id: volume_id} do
       {:ok, _} = Core.write_file_streamed(vol_name, "/before-rename.txt", ["data"])
@@ -749,7 +749,7 @@ defmodule NeonFS.CoreTest do
 
     # An unreachable coordinator leaves the pin state unknown. Deleting
     # on an unknown pin state is what discards an open handle's chunks,
-    # so the unlink fails instead (#1605).
+    # so the unlink fails instead.
     test "file delete fails loudly when the coordinator is down",
          %{volume_name: vol_name} do
       {:ok, _} = Core.write_file_streamed(vol_name, "/coordinator-down.txt", ["data"])
@@ -830,7 +830,7 @@ defmodule NeonFS.CoreTest do
   # --- S3 credential operations ---
 
   describe "lookup_credential/1" do
-    # CredentialManager reads via Ra since #347; the outer setup
+    # CredentialManager reads via Ra; the outer setup
     # stops Ra, so this describe re-enables it.
     setup do
       ensure_node_named()

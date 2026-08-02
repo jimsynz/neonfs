@@ -30,7 +30,7 @@ defmodule NeonFS.Core.DriveTest do
 
     test "passes the empty string through unchanged" do
       # Callers want to detect missing path themselves rather than have
-      # `Path.expand` substitute the daemon's CWD (issue #755).
+      # `Path.expand` substitute the daemon's CWD.
       assert Drive.normalize_path("") == ""
     end
 

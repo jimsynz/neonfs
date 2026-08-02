@@ -74,7 +74,7 @@ defmodule NeonFS.Core.StripeIndexTest do
     end
   end
 
-  describe "put_mutations/1 + materialize/1 (#1320)" do
+  describe "put_mutations/1 + materialize/1" do
     test "build batchable stripe-index puts and materialise ETS post-commit" do
       stripe = make_stripe()
 

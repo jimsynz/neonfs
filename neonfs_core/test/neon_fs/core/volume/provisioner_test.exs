@@ -83,7 +83,7 @@ defmodule NeonFS.Core.Volume.ProvisionerTest do
       assert segment.index_roots == %{file_index: nil, chunk_index: nil, stripe_index: nil}
     end
 
-    test "excludes drives on excluded (draining/maintenance) nodes from placement (#1376)" do
+    test "excludes drives on excluded (draining/maintenance) nodes from placement" do
       volume = sample_volume()
 
       drives = [

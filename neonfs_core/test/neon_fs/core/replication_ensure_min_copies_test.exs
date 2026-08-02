@@ -1,6 +1,6 @@
 defmodule NeonFS.Core.ReplicationEnsureMinCopiesTest do
   @moduledoc """
-  Unit tests for `NeonFS.Core.Replication.ensure_min_copies/2` (#1500) —
+  Unit tests for `NeonFS.Core.Replication.ensure_min_copies/2` —
   the synchronous per-chunk durability barrier. `ChunkIndex`, `BlobStore`,
   `DriveRegistry`, and `DriveTrust` are stubbed via Mimic so the decision
   logic (already-durable short-circuit, `:trusted`-only counting, and the
@@ -70,7 +70,7 @@ defmodule NeonFS.Core.ReplicationEnsureMinCopiesTest do
     assert :ok = Replication.ensure_min_copies("h1", volume(1))
   end
 
-  test "unverified replicas don't count toward min_copies (#1375)" do
+  test "unverified replicas don't count toward min_copies" do
     stub(DriveTrust, :unverified, fn -> [{:n2, "d2"}] end)
 
     # Two physical copies, but n2's is :unverified — only one counts, so the

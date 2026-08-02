@@ -55,7 +55,7 @@ defmodule NeonFS.Core.Blob.NativeIndexTreeTest do
       assert byte_size(root) == 32
 
       # The copy-on-write nodes this put produced are reported for
-      # replication, the new root chunk among them (#903).
+      # replication, the new root chunk among them.
       assert [_ | _] = written
       assert Enum.all?(written, fn {h, bytes} -> byte_size(h) == 32 and is_binary(bytes) end)
       assert Enum.any?(written, fn {h, _bytes} -> h == root end)

@@ -1,6 +1,6 @@
 defmodule NeonFS.Core.ReplicaRepairTest do
   @moduledoc """
-  Unit tests for `NeonFS.Core.ReplicaRepair` (#706). Stubs
+  Unit tests for `NeonFS.Core.ReplicaRepair`. Stubs
   `VolumeRegistry`, `ChunkIndex`, `BlobStore`, and `Replication` via
   Mimic so the tests don't need a running cluster — the data-plane
   primitive is exercised against synthetic chunk metadata.
@@ -133,7 +133,7 @@ defmodule NeonFS.Core.ReplicaRepairTest do
       assert is_list(errors)
     end
 
-    test "unverified replicas don't count toward durability; under-replication is repaired (#1375)" do
+    test "unverified replicas don't count toward durability; under-replication is repaired" do
       stub(VolumeRegistry, :get, fn _ -> {:ok, volume()} end)
 
       stub(DriveTrust, :unverified, fn -> [{:n3, "default"}] end)
@@ -159,7 +159,7 @@ defmodule NeonFS.Core.ReplicaRepairTest do
                ReplicaRepair.repair_volume(@volume_id)
     end
 
-    test "over-replication drops only trusted excess, never an unverified copy (#1375)" do
+    test "over-replication drops only trusted excess, never an unverified copy" do
       stub(VolumeRegistry, :get, fn _ -> {:ok, volume()} end)
 
       stub(DriveTrust, :unverified, fn -> [{:n5, "default"}] end)
@@ -310,7 +310,7 @@ defmodule NeonFS.Core.ReplicaRepairTest do
     end
   end
 
-  describe "repair_chunks/2 (#921)" do
+  describe "repair_chunks/2" do
     test "reconciles only the supplied hashes, skipping volume-wide walk" do
       vol = volume()
       stub(VolumeRegistry, :get, fn _ -> {:ok, vol} end)

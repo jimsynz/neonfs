@@ -1,7 +1,7 @@
 defmodule NeonFS.TestSupport.StubIntentLog do
   @moduledoc """
-  An always-granting conflict lease for `NeonFS.Core.FileIndex` unit tests
-  (#1631).
+  An always-granting conflict lease for `NeonFS.Core.FileIndex` unit
+  tests.
 
   The real `NeonFS.Core.IntentLog` needs Ra, and now fails closed when Ra
   is absent rather than pretending acquisition succeeded. `FileIndex`'s
@@ -27,8 +27,8 @@ end
 
 defmodule NeonFS.TestSupport.RefusingIntentLog do
   @moduledoc """
-  A conflict lease that never grants, standing in for an unreachable Ra
-  (#1631). Used to assert that operations refuse rather than proceeding
+  A conflict lease that never grants, standing in for an unreachable Ra.
+  Used to assert that operations refuse rather than proceeding
   unserialised.
   """
 

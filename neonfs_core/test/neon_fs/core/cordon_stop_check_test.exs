@@ -1,6 +1,6 @@
 defmodule NeonFS.Core.CordonStopCheckTest do
   @moduledoc """
-  Unit tests for the cordon-stop safety analysis (#1417). Data sources
+  Unit tests for the cordon-stop safety analysis. Data sources
   are injected via `opts` so each refusal reason is exercised in
   isolation without a running cluster.
   """

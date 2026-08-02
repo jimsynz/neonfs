@@ -1,9 +1,9 @@
 defmodule NeonFS.Core.BlobStoreResolveOptsTest do
   @moduledoc """
   Unit tests for `NeonFS.Core.BlobStore.resolve_put_chunk_opts/1`
-  covering the encryption-propagation half of #451 (tracked as #470).
+  covering the encryption-propagation half.
 
-  The compression branch was landed in #469 and exercised through the
+  The compression branch landed earlier and is exercised through the
   handler integration tests in
   `neonfs_client/test/neon_fs/transport/handler_test.exs`. These tests
   focus on the encryption branch — they require real Ra + KeyManager

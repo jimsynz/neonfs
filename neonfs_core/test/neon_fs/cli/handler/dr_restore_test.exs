@@ -1,9 +1,9 @@
 defmodule NeonFS.CLI.Handler.DRRestoreTest do
   @moduledoc """
-  #1005: full-cluster `dr restore` — stage + apply a DR snapshot, then
+  Full-cluster `dr restore` — stage + apply a DR snapshot, then
   restore each volume's content from its backup archive.
 
-  Runs in-process on a `start_provisioned_cluster/2` cluster (the #1008
+  Runs in-process on a `start_provisioned_cluster/2` cluster (the
   provisioned-cluster helpers, the same ones the DR-restore integration
   path was scoped around) rather than a peer cluster: `dr restore` is a
   single-node bootstrap operation (the operator reattaches the remaining

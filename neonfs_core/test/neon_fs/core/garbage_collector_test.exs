@@ -263,7 +263,7 @@ defmodule NeonFS.Core.GarbageCollectorTest do
     end
   end
 
-  # #912: prior to this fix, `collect(volume_id: vol_a)` only filtered
+  # Prior to this fix, `collect(volume_id: vol_a)` only filtered
   # the *mark* phase, so the sweep walked the whole `:chunk_index` ETS
   # and deleted every chunk that wasn't referenced by `vol_a`'s files —
   # i.e. it would happily wipe out every other volume's data.
@@ -306,7 +306,7 @@ defmodule NeonFS.Core.GarbageCollectorTest do
     end
   end
 
-  # #961: chunks reachable only from a snapshot must survive GC.
+  # Chunks reachable only from a snapshot must survive GC.
   # The mark phase walks the live root **and** each snapshot's frozen
   # root via `MetadataReader` at-root reads.
   describe "collect/1 with snapshots — multi-root mark" do

@@ -1,6 +1,6 @@
 defmodule NeonFS.Cluster.InitTierTest do
   @moduledoc """
-  Regression coverage for `#1009` — `cluster init` used to hard-code
+  Regression coverage — `cluster init` used to hard-code
   the system volume's `initial_tier` to `:hot`, which broke single-disk
   deployments where the operator passed `--tier cold` (or `--tier warm`).
 

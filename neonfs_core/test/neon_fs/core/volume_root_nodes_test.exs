@@ -2,7 +2,7 @@ defmodule NeonFS.Core.VolumeRootNodesTest do
   @moduledoc """
   Covers `NeonFS.Core.volume_root_nodes/1`, the lookup interface nodes use
   (via `NeonFS.Client.RootPlacement`) to route metadata writes to a
-  root-holding node (#1046).
+  root-holding node.
   """
 
   use ExUnit.Case, async: false
@@ -33,7 +33,7 @@ defmodule NeonFS.Core.VolumeRootNodesTest do
     assert {:ok, nodes} = Core.volume_root_nodes(volume.name)
     assert nodes == [node()]
 
-    # by-id variant resolves the same root nodes without name resolution (#1087)
+    # by-id variant resolves the same root nodes without name resolution
     assert {:ok, ^nodes} = Core.volume_root_nodes_by_id(volume.id)
   end
 

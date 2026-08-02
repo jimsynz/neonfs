@@ -77,7 +77,7 @@ defmodule NeonFS.Core.ClusterRecoveryMonitorTest do
     :sys.get_state(pid)
   end
 
-  describe "entry detection (#1437)" do
+  describe "entry detection" do
     test "a fresh cluster (not auto-restarted) never enters :recovering" do
       MockClusterMode.start_link(%{mode: :normal})
       ref = attach([[:neonfs, :cluster_recovery, :entered]])
@@ -138,7 +138,7 @@ defmodule NeonFS.Core.ClusterRecoveryMonitorTest do
     end
   end
 
-  describe "exit (#1437)" do
+  describe "exit" do
     test "leader exits :recovering once reassembled (members back, no unverified drives)" do
       MockClusterMode.start_link(%{
         mode: :recovering,

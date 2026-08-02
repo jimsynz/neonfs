@@ -188,7 +188,7 @@ defmodule NeonFS.Core.Volume.MetadataReaderTest do
     end
   end
 
-  describe "list_referenced_chunks/2 (#955)" do
+  describe "list_referenced_chunks/2" do
     test "unions hashes from all three index trees" do
       tree_root = <<7::256>>
 
@@ -577,7 +577,7 @@ defmodule NeonFS.Core.Volume.MetadataReaderTest do
     end
   end
 
-  describe "cross-node fallback (#936)" do
+  describe "cross-node fallback" do
     test "remote-dispatches when local read fails with root_chunk_unreachable" do
       remote_entry = %{
         volume_id: "vol-1",

@@ -543,7 +543,7 @@ defmodule NeonFS.Core.VolumeRegistryTest do
 
     # Losing a core node or a drive must not quietly reduce the durability
     # target for cluster-critical data — the surviving copies stay the
-    # target and repair re-places the missing one (#1617).
+    # target and repair re-places the missing one.
     test "adjust_system_volume_replication/1 never lowers the factor" do
       assert {:ok, _} = VolumeRegistry.create_system_volume()
       assert {:ok, _} = VolumeRegistry.adjust_system_volume_replication(3)

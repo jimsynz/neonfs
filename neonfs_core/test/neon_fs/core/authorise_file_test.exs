@@ -28,7 +28,7 @@ defmodule NeonFS.Core.AuthoriseFileTest do
         owner_uid: owner_uid,
         owner_gid: owner_gid,
         # Owner-only so the volume-level fallback genuinely denies a
-        # non-owner (the world-writable default would allow — #1339).
+        # non-owner (the world-writable default would allow).
         mode: 0o700
       )
 

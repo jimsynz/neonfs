@@ -277,7 +277,7 @@ defmodule NeonFS.Core.HLCTest do
       assert bin1 < bin2
     end
 
-    test "from_binary decodes with [:safe], rejecting unknown atoms (#1200)" do
+    test "from_binary decodes with [:safe], rejecting unknown atoms" do
       # Hand-craft the external term format for an atom that has never been
       # interned in this VM (writing it as a literal would intern it and
       # defeat the test). `119` is SMALL_ATOM_UTF8_EXT.

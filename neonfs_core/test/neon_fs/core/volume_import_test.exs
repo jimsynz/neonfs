@@ -27,7 +27,7 @@ defmodule NeonFS.Core.VolumeImportTest do
     {:ok, tmp_dir: tmp_dir}
   end
 
-  describe "import_archive/3 — round-trip with #965 export" do
+  describe "import_archive/3 — round-trip with export" do
     test "imports an exported archive into a new volume with byte-equal content",
          %{tmp_dir: tmp_dir} do
       {:ok, src} = VolumeRegistry.create("rt-src", [])
@@ -255,7 +255,7 @@ defmodule NeonFS.Core.VolumeImportTest do
     end
   end
 
-  describe "import_archive/3 — into_existing (#1368)" do
+  describe "import_archive/3 — into_existing" do
     test "restores content into a pre-existing volume instead of creating one",
          %{tmp_dir: tmp_dir} do
       {:ok, src} = VolumeRegistry.create("ie-src", [])

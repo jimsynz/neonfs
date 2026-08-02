@@ -2,7 +2,7 @@ defmodule NeonFS.Core.BlobStoreResolveDriveIdTest do
   @moduledoc """
   `BlobStore.resolve_drive_id/2` maps the `"default"` sentinel that interface
   writers ship to a real local active drive, so cross-node chunk writes land on
-  real storage and record the right drive (#1042).
+  real storage and record the right drive.
   """
   use ExUnit.Case, async: false
 
@@ -54,8 +54,8 @@ defmodule NeonFS.Core.BlobStoreResolveDriveIdTest do
 
     test "is tier-strict: does not cross tiers when the requested tier has none" do
       # No cold drive registered. Rather than silently landing on the hot drive,
-      # the sentinel is returned unresolved so the write fails clearly (#1042) —
-      # choosing a node with cold storage is target-selection's job (#1044).
+      # the sentinel is returned unresolved so the write fails clearly —
+      # choosing a node with cold storage is target-selection's job.
       assert BlobStore.resolve_drive_id("default", "cold") == "default"
     end
   end

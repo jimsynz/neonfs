@@ -11,7 +11,7 @@ defmodule NeonFS.Core.LockManager.FileLockTest do
 
     # Subscribe to the "request parked in a wait queue" events so tests that
     # spawn a blocking acquirer can wait for it to actually block — instead of
-    # a fixed `Process.sleep` fudge (#1208).
+    # a fixed `Process.sleep` fudge.
     blocked_ref =
       :telemetry_test.attach_event_handlers(self(), [
         [:neonfs, :lock_manager, :file_lock, :byte_range_blocked],
