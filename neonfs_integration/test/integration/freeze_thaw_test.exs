@@ -1,6 +1,6 @@
 defmodule NeonFS.Integration.FreezeThawTest do
   @moduledoc """
-  #1440: the #1378 acceptance — a whole cluster can be cleanly frozen,
+  A whole cluster can be cleanly frozen,
   powered off, powered on, and thawed without a repair storm or a
   force-reset, with content and metadata consistent across the cycle.
 
@@ -8,7 +8,7 @@ defmodule NeonFS.Integration.FreezeThawTest do
   cluster: `cluster freeze` → stop every node → restart every node
   (Ra auto-restarts from persisted on-disk state) → `cluster thaw`.
 
-  The recovering-state *suppression logic* is unit-tested in #1436/#1437;
+  The recovering-state *suppression logic* is unit-tested separately;
   here we assert the coordination cycle as a whole: freeze cuts writes, the
   cluster auto-enters `:recovering` on the cold reform, reassembles from
   persisted state (no force-reset), the metadata layer is available on every
@@ -16,7 +16,7 @@ defmodule NeonFS.Integration.FreezeThawTest do
   before the freeze reads back byte-for-byte on every node afterwards.
 
   Byte-level read-back after the cold reform exercises the data-plane recovery
-  path fixed in #1450: a restarted peer rebinds a new data-plane port, so a
+  path: a restarted peer rebinds a new data-plane port, so a
   fetcher's connection pool must re-point at the peer's current endpoint (and
   fall back to distribution RPC while it does) rather than stall on the stale
   one.
@@ -24,9 +24,9 @@ defmodule NeonFS.Integration.FreezeThawTest do
   The pre-freeze data uses a `write_ack: :local`, `factor: 3` volume whose
   extra replicas are placed by fire-and-forget background tasks. The file is
   written and the cluster frozen *without* first establishing readability on
-  every node: freeze drains those outstanding placements before powering off
-  (#1504), so the write survives the cold cycle without the old #1440
-  pre-freeze wait-loop.
+  every node: freeze drains those outstanding placements before powering
+  off, so the write survives the cold cycle without a pre-freeze
+  wait-loop.
   """
   use NeonFS.TestSupport.ClusterCase, async: false
 
@@ -54,7 +54,7 @@ defmodule NeonFS.Integration.FreezeThawTest do
         timeout: 15_000
       )
 
-    # 2. A frozen cluster refuses new client writes (the #1438 write-gate,
+    # 2. A frozen cluster refuses new client writes (the write-gate,
     #    hit via the gated `NeonFS.Core` RPC facade).
     assert {:error, :cluster_frozen} =
              PeerCluster.rpc(cluster, :node1, NeonFS.Core, :write_file_at, [
@@ -109,7 +109,7 @@ defmodule NeonFS.Integration.FreezeThawTest do
 
     # 6b. Every node re-registers its local drive after the cold restart —
     #     `PeerCluster.build_restart_config` now carries `:drives` across
-    #     `restart_node` (part of #1450). Without it a restarted peer
+    #     `restart_node`. Without it a restarted peer
     #     manages no drives and can neither serve nor store chunks.
     for node_name <- [:node1, :node2, :node3] do
       node = PeerCluster.get_node!(cluster, node_name).node
@@ -125,7 +125,7 @@ defmodule NeonFS.Integration.FreezeThawTest do
         )
     end
 
-    # 7. Byte-level read-back (#1450): the file written before the freeze reads
+    # 7. Byte-level read-back: the file written before the freeze reads
     #    back intact on every node after the cold reform. A restarted peer
     #    rebinds a new data-plane port, so the fetcher re-points its pool at the
     #    peer's current endpoint (falling back to distribution RPC meanwhile)
@@ -152,10 +152,10 @@ defmodule NeonFS.Integration.FreezeThawTest do
 
   defp init_cluster_with_data(cluster) do
     # A `write_ack: :local` volume with factor > 1 acks the write once the
-    # primary copy is local and places the extra replicas in the background
-    # (#1504). We deliberately do NOT establish readability on every node
+    # primary copy is local and places the extra replicas in the
+    # background. We deliberately do NOT establish readability on every node
     # before freezing — freeze must drain those outstanding placements
-    # itself so the pre-freeze readability workaround (the old #1440
+    # itself so the pre-freeze readability workaround (the old
     # wait-loop) is no longer needed for the file to survive the cold cycle.
     :ok =
       init_multi_node_cluster(cluster,

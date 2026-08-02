@@ -1,7 +1,6 @@
 defmodule NeonFS.Integration.ReconstructFromDiskTest do
   @moduledoc """
-  Peer-cluster integration coverage for `cluster reconstruct-from-disk`
-  (#840 / #788).
+  Peer-cluster integration coverage for `cluster reconstruct-from-disk`.
 
   The full disaster-recovery story (stop every node, wipe each
   Ra dir, restart, run reconstruction) layers a cluster restart on
@@ -78,7 +77,7 @@ defmodule NeonFS.Integration.ReconstructFromDiskTest do
       ])
 
     # Runs at the live (default) shard count: reconstruction recovers
-    # per-shard identity from disk via `RootSegment.shard` (#1313).
+    # per-shard identity from disk via `RootSegment.shard`.
     %{cluster: cluster, drive_path: drive_path}
   end
 
@@ -106,7 +105,7 @@ defmodule NeonFS.Integration.ReconstructFromDiskTest do
       assert summary.drives >= 1
 
       # One root command per shard per discovered volume — proving all N
-      # shard roots are recovered from disk, not just shard 0 (#1313).
+      # shard roots are recovered from disk, not just shard 0.
       assert summary.commands == summary.drives + shards * summary.volumes
 
       ra_volume_ids = volume_roots(cluster) |> Map.keys() |> MapSet.new()
@@ -175,7 +174,7 @@ defmodule NeonFS.Integration.ReconstructFromDiskTest do
         volume_name,
         # `replicate:2` on a single-node test cluster lands metadata
         # replicas on `default` + `drive1`; chunk replication never
-        # runs here so the #1015 under-replication refusal needs to
+        # runs here so the under-replication refusal needs to
         # be opted-out.
         %{"durability" => "replicate:2", "allow_under_replicated" => true}
       ])

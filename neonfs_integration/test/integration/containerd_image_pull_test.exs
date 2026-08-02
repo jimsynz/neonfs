@@ -1,6 +1,6 @@
 defmodule NeonFS.Integration.ContainerdImagePullTest do
   @moduledoc """
-  Integration test for #728 (last slice of #554) — proves a real
+  Integration test proving a real
   `ctr image pull` against `neonfs_containerd`'s proxy plugin lands
   every layer blob in the dedicated NeonFS volume keyed by digest.
 
@@ -10,7 +10,7 @@ defmodule NeonFS.Integration.ContainerdImagePullTest do
       - `node1`: `:neonfs_core`
       - `node2`: `:neonfs_containerd`
   - Host `containerd` subprocess pointing at the proxy plugin (same
-    pattern as #725 / #726 / #727).
+    pattern as the sibling containerd tests).
   - The CI runner exposes a `registry:2` sidecar at `registry:5000`
     pre-seeded with a committed 2-layer OCI fixture (alpine base +
     a tiny marker layer). The CI workflow wires this up before this
@@ -28,13 +28,13 @@ defmodule NeonFS.Integration.ContainerdImagePullTest do
 
   A second test drives the full `ctr image pull` (which unpacks each
   layer via the snapshotter, reading the blobs back through the proxy)
-  and captures the `ChunkReader` read-amplification telemetry (#1351)
+  and captures the `ChunkReader` read-amplification telemetry
   off the containerd peer.
 
   ## What's deliberately NOT tested here
 
   `ctr run --rm <image> echo hi` — needs a container runtime, parked
-  under #740. The skipped sub-test below has the assertion frame
+  separately. The skipped sub-test below has the assertion frame
   but is `@tag skip:` until that issue lands.
   """
 
@@ -70,7 +70,7 @@ defmodule NeonFS.Integration.ContainerdImagePullTest do
       # streams every blob (manifest, config, layers) into the
       # content store via `Write` RPCs but does NOT try to unpack
       # the layers via the snapshotter — which is what `ctr image
-      # pull` does and what hits #740 right now. Same exercise of
+      # pull` does and what is currently parked. Same exercise of
       # neonfs_containerd's proxy plugin minus the post-pull
       # unpack dance.
       {pull_out, pull_code} =
@@ -102,13 +102,13 @@ defmodule NeonFS.Integration.ContainerdImagePullTest do
       end
     end
 
-    test "ctr image pull unpacks every layer and read amplification is observable (#1351)" do
+    test "ctr image pull unpacks every layer and read amplification is observable" do
       cluster = start_cluster()
       daemon = start_daemon(cluster)
 
       # Forward node2's ChunkReader data-plane fetch telemetry back here.
       # The unpack reads each layer blob through the proxy on node2, so the
-      # read-amplification pathology (#1350) shows up as these events.
+      # read-amplification pathology shows up as these events.
       tel_ref = make_ref()
       test_pid = self()
 
@@ -153,12 +153,12 @@ defmodule NeonFS.Integration.ContainerdImagePullTest do
       amplification = if requested > 0, do: Float.round(fetched / requested, 2), else: 0.0
 
       IO.puts(
-        "\n[#1351] containerd unpack read amplification: #{length(fetches)} data-plane " <>
+        "\ncontainerd unpack read amplification: #{length(fetches)} data-plane " <>
           "fetches, #{fetched} B fetched for #{requested} B returned (#{amplification}x)\n"
       )
     end
 
-    @tag skip: "container runtime integration parked under #740"
+    @tag skip: "container runtime integration parked"
     test "ctr run starts the container after the pull" do
       cluster = start_cluster()
       daemon = start_daemon(cluster)

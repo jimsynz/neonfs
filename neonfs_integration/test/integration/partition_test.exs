@@ -26,8 +26,8 @@ defmodule NeonFS.Integration.PartitionTest do
   @moduletag :partition
   # Whole module is cross-node by definition; setup_all writes on
   # node1 and waits for every peer to read it back. That round-trip
-  # walks the per-volume index tree on the remote, which after #835
-  # only lives on the writer's drive (#903). Re-enable once the
+  # walks the per-volume index tree on the remote, which
+  # only lives on the writer's drive. Re-enable once the
   # writer fans out tree mutations to all replicas.
 
   setup_all %{cluster: cluster} do
@@ -63,7 +63,7 @@ defmodule NeonFS.Integration.PartitionTest do
       # 10 s on the dist-RPC timeout, and the chunk-index update that
       # makes the chunk visible on node2 only fires after both targets
       # report back. Under CI load this regularly trips a tight 30 s
-      # budget (#606). 60 s mirrors the other intra-partition reads
+      # budget. 60 s mirrors the other intra-partition reads
       # in this file.
       assert_eventually timeout: 60_000 do
         read_matches?(cluster, :node2, path, "majority data")
@@ -95,7 +95,7 @@ defmodule NeonFS.Integration.PartitionTest do
     # for the `consistent_query` that resolves volume metadata, so it cannot
     # know its last-committed volume-root pointer is still current and must
     # surface an error rather than serve potentially-stale data. Staying CP
-    # here is the deliberate choice (#1267); the minority holds every chunk
+    # here is the deliberate choice; the minority holds every chunk
     # and index-tree page locally, but quorum-less metadata resolution is
     # what makes the read unavailable.
     test "minority cannot read previously written data", %{cluster: cluster} do
@@ -132,10 +132,10 @@ defmodule NeonFS.Integration.PartitionTest do
       :ok = PeerCluster.heal_partition(cluster)
       :ok = wait_for_partition_healed(cluster, timeout: 30_000)
 
-      # Post-#792, anti-entropy is per-volume. `trigger_anti_entropy`
+      # Anti-entropy is per-volume. `trigger_anti_entropy`
       # dispatches a `Job.Runners.VolumeAntiEntropy` job per volume;
       # jobs run async via JobTracker. Convergence is also handled
-      # by read-path repair (#947) so a single trigger may not need
+      # by read-path repair so a single trigger may not need
       # to land — re-triggering each poll iteration is harmless and
       # covers races between `wait_for_partition_healed` returning
       # and JobTracker actually starting the job.
@@ -205,7 +205,7 @@ defmodule NeonFS.Integration.PartitionTest do
     assert_partitioned(cluster, [:node1, :node2], [:node3], timeout: 60_000)
   end
 
-  # Post-#792 anti-entropy is per-volume, dispatched via the
+  # Anti-entropy is per-volume, dispatched via the
   # `Job.Runners.VolumeAntiEntropy` runner. The old global
   # `AntiEntropy.sync_now` is gone.
   defp trigger_anti_entropy(cluster, _node_names) do
@@ -286,7 +286,7 @@ defmodule NeonFS.Integration.PartitionTest do
   defp assert_node_has_files(cluster, node_name, paths_and_contents) do
     # Same re-trigger-on-poll pattern as the single-file test: a
     # single `sync_now` pass isn't always enough after partition
-    # heal (#564). Same 120s budget as the single-file path (#606).
+    # heal. Same 120s budget as the single-file path.
     assert_eventually timeout: 120_000 do
       trigger_anti_entropy(cluster, [node_name])
 

@@ -1,6 +1,6 @@
 defmodule NeonFS.Integration.ChunkerParityTest do
   @moduledoc """
-  Peer-cluster parity test for the two streaming-write paths (#479):
+  Peer-cluster parity test for the two streaming-write paths:
 
     1. **Co-located path** — `NeonFS.Core.write_file_streamed/4`
        chunks and stores on the same core node.
@@ -17,7 +17,7 @@ defmodule NeonFS.Integration.ChunkerParityTest do
   as data-corruption bugs.
 
   Volumes are created with compression / encryption disabled so the
-  test is insensitive to #481's codec propagation — the hashes are
+  test is insensitive to codec propagation — the hashes are
   computed by the chunker on plaintext bytes regardless.
   """
 
@@ -46,9 +46,9 @@ defmodule NeonFS.Integration.ChunkerParityTest do
 
       volume_name = "parity-vol-#{System.unique_integer([:positive])}"
 
-      # Disable codec so the test is insensitive to #481's codec
+      # Disable codec so the test is insensitive to codec
       # propagation work — chunker output is defined on plaintext
-      # regardless, and the read path (which #481 fixes) is not
+      # regardless, and the read path is not
       # exercised here.
       volume_opts = %{compression: %{algorithm: :none, level: 0, min_size: 0}}
 
@@ -175,7 +175,7 @@ defmodule NeonFS.Integration.ChunkerParityTest do
   defp wait_for_discovery(cluster, node_name) do
     # See Codebase-Patterns.md §Testing: the peer-cluster harness
     # doesn't populate NeonFS.Client.Connection.bootstrap_nodes, so
-    # Discovery's cache stays empty until we seed it. #482 tracks
+    # Discovery's cache stays empty until we seed it. A follow-up tracks
     # fixing this at the harness level.
     services = PeerCluster.rpc(cluster, node_name, NeonFS.Core.ServiceRegistry, :list, [])
     infos = Enum.map(services, &ServiceInfo.from_map/1)

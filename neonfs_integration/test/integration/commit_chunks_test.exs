@@ -1,9 +1,9 @@
 defmodule NeonFS.Integration.CommitChunksTest do
   @moduledoc """
   Peer-cluster integration test for `NeonFS.Core.commit_chunks/4` —
-  the write-side counterpart to `read_file_refs/3` introduced in #410.
+  the write-side counterpart to `read_file_refs/3`.
 
-  Simulates the interface-side chunking flow established by the #408
+  Simulates the interface-side chunking flow established by the
   design decision: from `node2`, chunks are shipped directly to
   `node1`'s blob store via `Router.data_call(:put_chunk, …)` (the same
   data-plane path `NeonFS.Client.ChunkWriter` will use when it lands).

@@ -1,7 +1,7 @@
 defmodule NeonFS.Integration.NamespaceCoordinatorCreateTest do
   @moduledoc """
-  Peer-cluster integration test for `claim_create/2` (sub-issue #591
-  of #303). Validates that the foundation primitive coordinates
+  Peer-cluster integration test for `claim_create/2`. Validates that
+  the foundation primitive coordinates
   atomic create-if-not-exist across nodes — exactly one of two
   concurrent claim_create calls on different nodes wins for the same
   path; the other gets `{:error, %AlreadyExists{}}`.
@@ -97,7 +97,7 @@ defmodule NeonFS.Integration.NamespaceCoordinatorCreateTest do
         # `:claim_namespace_create` command and node2's follower
         # applying it locally during which the local read returns an
         # empty result. `wait_until` covers that lag without
-        # spuriously failing — see #666 for the original race.
+        # spuriously failing.
         assert :ok =
                  wait_until(fn ->
                    case PeerCluster.rpc(cluster, :node2, NamespaceCoordinator, :list_claims, [

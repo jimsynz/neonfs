@@ -2,7 +2,7 @@ defmodule NeonFS.Integration.WriteOperationCreateOnlyTest do
   @moduledoc """
   Peer-cluster integration test for
   `NeonFS.Core.WriteOperation.write_file_streamed/4` with
-  `create_only: true` (sub-issue #592 of #303).
+  `create_only: true`.
 
   Two concurrent streamed writes for the same new path, originating
   from different nodes, race through the namespace coordinator.

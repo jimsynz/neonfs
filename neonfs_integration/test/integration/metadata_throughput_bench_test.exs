@@ -1,9 +1,8 @@
 defmodule NeonFS.Integration.MetadataThroughputBenchTest do
   @moduledoc """
-  Opt-in benchmark establishing a baseline for metadata write throughput
-  (#1292), so the later #1291 slices — per-entry directory entries
-  (#1294), transaction-batched commit (#1295), and root sharding (#1296)
-  — can be measured against a before/after.
+  Opt-in benchmark establishing a baseline for metadata write throughput,
+  so later slices — per-entry directory entries, transaction-batched
+  commit, and root sharding — can be measured against a before/after.
 
   Not run by default — tagged `:benchmark` and excluded by
   `test/test_helper.exs` unless explicitly included. Run with:
@@ -14,9 +13,9 @@ defmodule NeonFS.Integration.MetadataThroughputBenchTest do
   concurrency:
 
     * **single-directory burst** — `@file_count` files into one directory.
-      This is the #1287 hot-directory case. Since #1294 each child is its
+      This is the hot-directory case. Each child is now its
       own `dirent:` key (no shared-blob read-modify-write), so the residual
-      cost is the single `volume_root` CAS flip per create that #1295/#1296
+      cost is the single `volume_root` CAS flip per create that later work
       target.
     * **spread** — `@file_count` files each in its own directory, so there
       is no hot-directory contention.
@@ -24,7 +23,7 @@ defmodule NeonFS.Integration.MetadataThroughputBenchTest do
   For each workload it reports total wall time, creates/sec, and — via
   `NeonFS.TestSupport.MetadataBench` telemetry counters on the Ra leader —
   the number of `volume_root` flips and CAS stale-pointer retries per
-  create. The per-create root-flip count is the structural cost #1291
+  create. The per-create root-flip count is the structural cost the sharding work
   targets.
   """
 
@@ -50,7 +49,7 @@ defmodule NeonFS.Integration.MetadataThroughputBenchTest do
     spread = run_workload(cluster, :spread, fn i -> "/spread/dir_#{i}/file.bin" end)
 
     IO.puts("")
-    IO.puts("==== metadata write-throughput baseline (#1292) ====")
+    IO.puts("==== metadata write-throughput baseline ====")
     IO.puts("  files=#{@file_count} concurrency=#{@concurrency} file_size=#{@file_size}B")
     IO.puts(format_workload("single-directory burst", burst))
     IO.puts(format_workload("spread (one dir per file)", spread))

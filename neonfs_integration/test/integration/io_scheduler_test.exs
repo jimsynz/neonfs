@@ -274,17 +274,18 @@ defmodule NeonFS.Integration.IOSchedulerTest do
       # Each RPC call creates a separate process on the remote node,
       # giving us concurrent writes through the scheduler pipeline.
       #
-      # `max_concurrency` is an interim 10 (was 20) pending the #1291
-      # metadata-write-throughput work (#1293). Every create serialises
+      # `max_concurrency` is an interim 10 (was 20) pending the
+      # metadata-write-throughput work. Every create serialises
       # through the single `FileIndex` GenServer and CAS-flips the one
       # `volume_root` ~4x with stale-pointer retries on top; at 20-wide
       # the queue wait per create crept toward `FileIndex.create/1`'s 15s
       # internal call timeout (~70% of it on CI-class hardware), tipping
-      # into `{:badrpc, {:timeout, ...}}` flakes (#1287). Halving the
+      # into `{:badrpc, {:timeout, ...}}` flakes. Halving the
       # in-flight depth halves the worst-case queue wait without
       # weakening the data-loss net below (still 50 files, still 10-wide
-      # concurrent CAS contention to catch the #1260 lost-update path).
-      # The structural fix is #1291; remove this cap when it lands.
+      # concurrent CAS contention to catch the lost-update path).
+      # The structural fix is the metadata sharding work; remove this cap
+      # when it lands.
       results =
         test_files
         |> Task.async_stream(
@@ -302,13 +303,13 @@ defmodule NeonFS.Integration.IOSchedulerTest do
 
       # Every write must succeed — including not crashing/timing out. A
       # task that exited surfaces as `{:exit, _}`; don't let the
-      # comprehension silently skip it (that masked #1260).
+      # comprehension silently skip it (that masked the lost-update bug).
       for {res, {path, _}} <- results do
         assert match?({:ok, {:ok, _file}}, res),
                "write for #{path} did not succeed: #{inspect(res)}"
       end
 
-      # Every acked file must be readable. Before #1260 was fixed,
+      # Every acked file must be readable. Before the lost-update fix,
       # concurrent index-tree writes silently dropped acked entries — a
       # stale `:cas_update_volume_root` rejection was mis-reported as a
       # successful commit — so the writes returned `{:ok}` but the files
@@ -360,7 +361,7 @@ defmodule NeonFS.Integration.IOSchedulerTest do
 
       # Wait for cross-node replication to reach the target factor. 30s was
       # too tight under CI load — this flaked the integration job on
-      # unrelated PRs (#1262) when a saturated runner pushed convergence
+      # unrelated PRs when a saturated runner pushed convergence
       # past the deadline. 60s (the headroom this file already uses for the
       # sustained-load write step) keeps the assertion robust without
       # hiding a genuine replication stall.

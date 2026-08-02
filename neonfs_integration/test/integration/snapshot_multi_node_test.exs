@@ -1,7 +1,7 @@
 defmodule NeonFS.Integration.SnapshotMultiNodeTest do
   @moduledoc """
   Multi-node fan-out test for the snapshot keyspace foundation
-  (#960 / epic #959). The single-node round-trip lives in
+  The single-node round-trip lives in
   `snapshot_test.exs`.
   """
 

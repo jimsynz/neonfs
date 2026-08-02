@@ -1,7 +1,7 @@
 defmodule NeonFS.Integration.RemoveNodeTest do
   @moduledoc """
   Peer-cluster integration tests for `NeonFS.CLI.Handler.handle_remove_node/2`
-  — the decommission CLI introduced in #455. The unit tests in
+  — the decommission CLI. The unit tests in
   `neonfs_core/test/neon_fs/cli/handler_test.exs` cover the safety-gate
   refusals against an empty cluster; these tests exercise the live Ra
   `:remove_member/3` path against a real 3-node quorum.

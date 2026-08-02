@@ -274,7 +274,7 @@ defmodule NeonFS.Integration.QuorumTest do
     end
   end
 
-  describe "cache coherence (#342)" do
+  describe "cache coherence" do
     test "point read after remote delete does not return stale cached value",
          %{cluster: cluster} do
       :ok = init_quorum_cluster(cluster, "coherence-vol")
@@ -303,7 +303,7 @@ defmodule NeonFS.Integration.QuorumTest do
       # Prime node2's FileIndex ETS cache by reading the file through the
       # public API. get_from_quorum inserts the decoded FileMeta into
       # :file_index_by_id on success — this is the cache entry that the
-      # pre-#342 code would subsequently serve without consulting the
+      # older code would subsequently serve without consulting the
       # quorum store.
       {:ok, ^file} =
         PeerCluster.rpc(cluster, :node2, NeonFS.Core.FileIndex, :get, [file.volume_id, file.id])
@@ -317,15 +317,15 @@ defmodule NeonFS.Integration.QuorumTest do
           "/doomed.bin"
         ])
 
-      # Node2 must report the file gone. Pre-#342 the ETS-first check
+      # Node2 must report the file gone. The old ETS-first check
       # returned the stale {:ok, file}; the fix routes get/2 through
       # the per-volume `MetadataReader` which walks the canonical
-      # index tree from the bootstrap-pointer (post #792) and sees
+      # index tree from the bootstrap-pointer and sees
       # the tombstone, returning :not_found.
       #
       # Bootstrap-pointer updates ack at Ra quorum but tree-page
       # replication is eventual; poll briefly so we do not race the
-      # cross-node fetch (#947 fallback).
+      # cross-node fetch fallback.
       assert_eventually timeout: 10_000 do
         PeerCluster.rpc(cluster, :node2, NeonFS.Core.FileIndex, :get, [file.volume_id, file.id]) ==
           {:error, :not_found}

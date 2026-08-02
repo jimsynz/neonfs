@@ -40,7 +40,7 @@ defmodule NeonFS.Integration.CLITest do
 
       # Create volume via CLI. The default `--replicas 3` would fail
       # the new under-replication gate on this single-node test
-      # cluster (#1015) — pin replicas to 1 instead of using
+      # cluster — pin replicas to 1 instead of using
       # `--allow-under-replicated` so the CLI test exercises a
       # realistic single-node case.
       assert {:ok, _} =
@@ -61,7 +61,7 @@ defmodule NeonFS.Integration.CLITest do
       end
     end
 
-    test "CLI can drain and undrain a node (#1325)", %{cluster: cluster} do
+    test "CLI can drain and undrain a node", %{cluster: cluster} do
       unless File.exists?(@cli_path) do
         flunk(
           "CLI binary not found at #{@cli_path}. Build it with: cd neonfs-cli && cargo build --release"

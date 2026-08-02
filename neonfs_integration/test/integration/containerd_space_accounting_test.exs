@@ -1,6 +1,6 @@
 defmodule NeonFS.Integration.ContainerdSpaceAccountingTest do
   @moduledoc """
-  Integration test for #727 (third slice of #554) — proves that
+  Integration test proving that
   bytes ingested through `neonfs_containerd` show up in
   `NeonFS.Core.StorageMetrics.cluster_capacity/0`'s aggregate
   `used_bytes`.
@@ -35,7 +35,7 @@ defmodule NeonFS.Integration.ContainerdSpaceAccountingTest do
     compression: %{algorithm: :none, level: 0, min_size: 0}
   }
   # 1 MiB — large enough that chunk metadata overhead is a small
-  # fraction of payload, per #727's "<10% overhead for blobs ≥ 1 MiB"
+  # fraction of payload, per the "<10% overhead for blobs ≥ 1 MiB"
   # acceptance bound.
   @payload_bytes 1024 * 1024
 
@@ -103,7 +103,7 @@ defmodule NeonFS.Integration.ContainerdSpaceAccountingTest do
       assert delta >= @payload_bytes,
              "expected used_bytes to grow by at least #{@payload_bytes} (the payload), grew #{delta}"
 
-      # 10% overhead bound from #727's acceptance criteria.
+      # 10% overhead bound from the acceptance criteria.
       max_delta = trunc(@payload_bytes * 1.1)
 
       assert delta <= max_delta,

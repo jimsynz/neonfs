@@ -1,12 +1,12 @@
 defmodule NeonFS.Integration.MetadataContentionBenchTest do
   @moduledoc """
   Opt-in benchmark measuring **cross-node metadata CAS contention** — the
-  YAGNI gate for shard placement / owner-routing (#1306).
+  YAGNI gate for shard placement / owner-routing.
 
-  The #1292 throughput benchmark runs single-node, so all concurrency is
+  The throughput benchmark runs single-node, so all concurrency is
   serialised by one node's per-volume `VolumeCommitter` and never produces
   cross-node root-set conflicts. The
-  question #1306 hangs on is the *cross-node* case: when writers on
+  open question is the *cross-node* case: when writers on
   several core nodes hit the same volume concurrently, each node's
   committer independently CAS-flips the Ra bootstrap pointer for a shard,
   and the losers retry on `{:stale_pointer, …}`.
@@ -27,7 +27,7 @@ defmodule NeonFS.Integration.MetadataContentionBenchTest do
   The contrast in `cas_retries/create` is the signal: if 64-way sharding
   already dilutes concurrent same-volume writes across distinct shards,
   cross-node retries stay near the single-node baseline and owner-routing
-  (#1306) is low value for spread workloads. (A separate observation: at
+  is low value for spread workloads. (A separate observation: at
   `metadata_shard_count: 1` — one shard — the same 3-node burst saturates
   the single root pointer so hard that commits exceed the 15 s
   `FileIndex` call timeout, i.e. unsharded cross-node contention is
@@ -66,14 +66,14 @@ defmodule NeonFS.Integration.MetadataContentionBenchTest do
     %{}
   end
 
-  test "cross-node vs single-node metadata CAS contention (#1306 gate)", %{cluster: cluster} do
+  test "cross-node vs single-node metadata CAS contention", %{cluster: cluster} do
     all_nodes = Enum.map(cluster.nodes, & &1.name)
 
     cross = workload(cluster, all_nodes, "contend-cross")
     single = workload(cluster, [:node1], "contend-single")
 
     IO.puts("")
-    IO.puts("==== cross-node metadata CAS contention (#1306 gate) ====")
+    IO.puts("==== cross-node metadata CAS contention ====")
 
     IO.puts(
       "  nodes=#{length(all_nodes)} files=#{@file_count} concurrency=#{@concurrency} (live shard count)"
@@ -84,7 +84,7 @@ defmodule NeonFS.Integration.MetadataContentionBenchTest do
     IO.puts("  ---")
     IO.puts("  If cross-node CAS retries/create ≈ the single-node baseline,")
     IO.puts("  64-way sharding already absorbs cross-node contention and")
-    IO.puts("  owner-routing (#1306) is low value for spread workloads.")
+    IO.puts("  owner-routing is low value for spread workloads.")
     IO.puts("=========================================================")
     IO.puts("")
   end

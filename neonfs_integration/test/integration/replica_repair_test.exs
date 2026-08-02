@@ -1,11 +1,10 @@
 defmodule NeonFS.Integration.ReplicaRepairTest do
   @moduledoc """
-  Peer-cluster integration test for the replica-repair worker (#710,
-  closes the `#687` chain).
+  Peer-cluster integration test for the replica-repair worker.
 
-  The data-plane primitive (#706), the JobTracker runner +
-  scheduler (#707), the membership-change auto-trigger (#708), and
-  the operator CLI (#709) are unit-tested in `neonfs_core`. This
+  The data-plane primitive, the JobTracker runner +
+  scheduler, the membership-change auto-trigger, and
+  the operator CLI are unit-tested in `neonfs_core`. This
   test exercises the full path against a real 3-node peer cluster:
   write data, kill a node, trigger a repair pass, assert chunks
   reach their target replication factor again — without going
@@ -14,7 +13,7 @@ defmodule NeonFS.Integration.ReplicaRepairTest do
   ## Cluster shape
 
   Three core peers, one volume with `replication_factor: 2`. We
-  use factor 2 (rather than factor 3 from `#687`'s original wording)
+  use factor 2 (rather than factor 3 as originally worded)
   because killing one of three nodes leaves only two survivors —
   factor 3 would be unreachable without bringing the killed node
   back, which doubles the test runtime without adding meaningful

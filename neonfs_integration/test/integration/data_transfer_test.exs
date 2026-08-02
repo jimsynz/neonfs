@@ -218,7 +218,7 @@ defmodule NeonFS.Integration.DataTransferTest do
     test "replicate_chunk to a replicate volume does not fall back to distribution RPC", %{
       cluster: cluster
     } do
-      # Regression guard for #1126: on a healthy multi-node cluster, chunk
+      # Regression guard: on a healthy multi-node cluster, chunk
       # replication must travel over the TLS data plane, not fall back to
       # Erlang distribution RPC. The fallback is otherwise invisible — the
       # data still lands, so result-only assertions pass either way.

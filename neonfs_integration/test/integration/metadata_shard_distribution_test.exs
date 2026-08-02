@@ -1,7 +1,7 @@
 defmodule NeonFS.Integration.MetadataShardDistributionTest do
   @moduledoc """
   End-to-end verification that volume metadata roots are sharded at the
-  live count (#1312, activation of #1307).
+  live count.
 
   A volume is provisioned with one root per shard; a burst of creates
   into a single directory spreads its `file:` / `dirent:` keys across

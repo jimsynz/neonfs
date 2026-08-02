@@ -27,9 +27,9 @@ case System.cmd("cargo", ["build", "--release"],
 end
 
 # Exclude loopback device tests unless running as root with losetup available.
-# Exclude `:profile` diagnostic tests by default (e.g. #507's app-start profiler)
+# Exclude `:profile` diagnostic tests by default (e.g. the app-start profiler)
 # — they print diagnostic output rather than assert. Run with `--include profile`.
-# Exclude `:benchmark` tests by default (e.g. #1292's metadata write-throughput
+# Exclude `:benchmark` tests by default (e.g. the metadata write-throughput
 # baseline) — they print throughput numbers. Run with `--include benchmark`.
 loopback_excludes =
   if NeonFS.TestSupport.LoopbackDevice.available?() do
@@ -39,7 +39,7 @@ loopback_excludes =
   end
 
 # Exclude containerd-dependent tests unless `containerd` and `ctr` are on PATH.
-# Prep work for #554 (containerd content store integration tests).
+# Prep work for the containerd content-store integration tests.
 containerd_excludes =
   if System.find_executable("containerd") && System.find_executable("ctr") do
     []
@@ -50,7 +50,7 @@ containerd_excludes =
 # Exclude tests that need the OCI test-registry sidecar
 # (`registry:5000/neonfs-test-image:v1`) unless we can resolve and
 # dial it. Set up by the `neonfs_integration` CI job's `services:`
-# block (#728); locally, run `registry:2` on port 5000 with the
+# block; locally, run `registry:2` on port 5000 with the
 # `test/fixtures/test-image.tar` fixture pushed in.
 test_registry_excludes =
   case :gen_tcp.connect(~c"registry", 5000, [:binary, active: false], 500) do
@@ -70,7 +70,7 @@ excludes =
 # PeerClusterTelemetry accumulates per-phase timings across every
 # `PeerCluster.start_cluster!` call. We print the summary from an
 # `ExUnit.after_suite` callback so it runs after all tests finish but
-# while the GenServer is still alive. See #423.
+# while the GenServer is still alive.
 {:ok, _telemetry_pid} = NeonFS.TestSupport.PeerClusterTelemetry.start_link()
 
 ExUnit.after_suite(fn _results ->

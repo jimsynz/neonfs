@@ -149,7 +149,7 @@ defmodule NeonFS.Integration.Phase3Test do
         PeerCluster.rpc(cluster, :node1, Node, :self, [])
 
       # Run migration from hot to warm — `volume_id` is required by
-      # the post-#836 `ChunkIndex.get/2`; without it the migration's
+      # the current `ChunkIndex.get/2`; without it the migration's
       # metadata lookup falls through to the `_migration` placeholder
       # volume and fails with `:chunk_not_found`.
       params = %{

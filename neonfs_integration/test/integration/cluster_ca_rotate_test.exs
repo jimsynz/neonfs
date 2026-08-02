@@ -1,7 +1,7 @@
 defmodule NeonFS.Integration.ClusterCARotateTest do
   @moduledoc """
   End-to-end peer-cluster integration test for `cluster ca rotate`
-  (#692, sibling to `force_reset_test.exs`).
+  Sibling to `force_reset_test.exs`.
 
   Exercises the full orchestrator flow on a 3-node cluster:
 

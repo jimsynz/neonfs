@@ -1,7 +1,7 @@
 defmodule NeonFS.Integration.NamespaceCoordinatorRenameTest do
   @moduledoc """
   Peer-cluster integration tests for `NamespaceCoordinator.claim_rename/3`
-  (sub-issue #304). Closes the deferred multi-node test from #561.
+  across a real multi-node cluster.
 
   Mirrors the harness pattern established by
   `NeonFS.Integration.NamespaceCoordinatorTest` — see that module's

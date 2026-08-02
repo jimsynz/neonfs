@@ -1,6 +1,6 @@
 defmodule NeonFS.Integration.ContainerdContentTest do
   @moduledoc """
-  Integration test for #725 (first slice of #554) — proves
+  Integration test proving
   `neonfs_containerd` round-trips bytes through a real `containerd`
   daemon via the `proxy_plugins` mechanism, with the `neonfs_containerd`
   service running on a peer cluster node rather than in the test BEAM.
@@ -15,7 +15,7 @@ defmodule NeonFS.Integration.ContainerdContentTest do
     establishes the data-plane pool, and waits for `Discovery` to see
     `node1`.
   - `PeerCluster` allocates a per-test UDS socket path under the
-    containerd peer's data dir (#733 wired this) and configures
+    containerd peer's data dir and configures
     `:neonfs_containerd` to bind there at startup.
   - The host spawns a `containerd` subprocess with a `[proxy_plugins]`
     config that disables the default content store and routes content

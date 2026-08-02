@@ -1,7 +1,7 @@
 defmodule NeonFS.Integration.ChunkWriterTest do
   @moduledoc """
   Peer-cluster integration smoke test for
-  `NeonFS.Client.ChunkWriter.write_file_stream/4` (landed in #450).
+  `NeonFS.Client.ChunkWriter.write_file_stream/4`.
 
   Unit tests against a mocked `Router` / `Discovery` cover the
   branching in `do_stream` / `process_emitted` / `abort_written`. This
@@ -11,7 +11,7 @@ defmodule NeonFS.Integration.ChunkWriterTest do
   `FileIndex` entries, and `node2` reads the file back byte-identically.
 
   Mirrors the shape of `NeonFS.Integration.CommitChunksTest` from
-  #454 — the difference is that chunking / `put_chunk` is driven by
+  its sibling — the difference is that chunking / `put_chunk` is driven by
   `ChunkWriter.write_file_stream/4` rather than hand-rolled calls to
   `Router.data_call`.
   """

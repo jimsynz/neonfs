@@ -1,7 +1,7 @@
 defmodule NeonFS.Integration.EmergencyBootstrapTest do
   @moduledoc """
   Peer-cluster integration test for `neonfs cluster ca emergency-bootstrap`
-  (#460 / #504, sibling to `cluster_ca_rotate_test.exs`).
+  Sibling to `cluster_ca_rotate_test.exs`.
 
   Exercises the post-expiry recovery flow on a stopped node:
 
@@ -24,8 +24,8 @@ defmodule NeonFS.Integration.EmergencyBootstrapTest do
 
   Does NOT exercise the post-bootstrap `cluster ca rotate` fan-out —
   that path has its own peer-cluster coverage in
-  `cluster_ca_rotate_test.exs` (#928). This test focuses on the
-  primitive #503 introduced.
+  `cluster_ca_rotate_test.exs`. This test focuses on the
+  primitive.
 
   Uses `cluster_mode: :per_test` because emergency-bootstrap rewrites
   one peer's TLS material and restarting that peer cleanly inside a
@@ -112,7 +112,7 @@ defmodule NeonFS.Integration.EmergencyBootstrapTest do
       # Private keys are 0600 — anyone with read access to a node's
       # private key can impersonate the node on the BEAM distribution +
       # data-plane TLS pools. Public material (ca.crt, node.crt, CRL,
-      # serial) stays 0644 (#932).
+      # serial) stays 0644.
       assert_file_mode(Path.join(tls_dir, "node.key"), 0o600)
       assert_file_mode(Path.join(tls_dir, "ca.key"), 0o600)
       assert_file_mode(Path.join(tls_dir, "ca.crt"), 0o644)

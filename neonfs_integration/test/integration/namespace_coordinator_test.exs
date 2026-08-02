@@ -1,9 +1,9 @@
 defmodule NeonFS.Integration.NamespaceCoordinatorTest do
   @moduledoc """
   Peer-cluster integration tests for `NeonFS.Core.NamespaceCoordinator`
-  — closes the deferred test from #300 (namespace coordinator
+  — covers the namespace coordinator
   foundation) and gives later coordinator-related sub-issues
-  (#561 / claim_rename, #570 / DRSnapshotScheduler) a working harness
+  (claim_rename, DRSnapshotScheduler) a working harness
   to copy.
 
   ## Coverage

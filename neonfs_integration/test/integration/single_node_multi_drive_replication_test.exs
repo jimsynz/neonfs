@@ -1,6 +1,6 @@
 defmodule NeonFS.Integration.SingleNodeMultiDriveReplicationTest do
   @moduledoc """
-  End-to-end peer-cluster verification of #1032 — a single node with two
+  End-to-end peer-cluster verification that a single node with two
   drives satisfies `replicate:2` by placing each copy on a distinct
   drive, and `volume create --replicas 2` is accepted without
   `--allow-under-replicated` once the drive count covers the factor.

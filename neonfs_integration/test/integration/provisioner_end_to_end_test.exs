@@ -1,7 +1,7 @@
 defmodule NeonFS.Integration.ProvisionerEndToEndTest do
   @moduledoc """
   End-to-end coverage for `Volume.Provisioner` against a real 1-node
-  Ra cluster + real `BlobStore` (#853).
+  Ra cluster + real `BlobStore`.
 
   The unit tests in `provisioner_test.exs` stub the bootstrap
   registrar with `{:ok, :ok}` (a 2-tuple), which masked the
@@ -10,12 +10,12 @@ defmodule NeonFS.Integration.ProvisionerEndToEndTest do
   shape mismatch made every successful Ra commit surface as
   `{:bootstrap_register_failed, {:ok, :ok, leader}}` and broke
   `create_volume/2` on any cluster with a registered drive — the
-  bug fixed in PR #852.
+  bug fixed earlier.
 
   This test exercises the full path through `cluster_init` →
   `handle_add_drive` → `create_volume` and asserts both the
   bootstrap-layer entry and the on-disk root-segment chunk are
-  produced. It would have caught #852 immediately.
+  produced. It would have caught that bug immediately.
   """
 
   use NeonFS.TestSupport.ClusterCase, async: false
@@ -70,7 +70,7 @@ defmodule NeonFS.Integration.ProvisionerEndToEndTest do
       PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :create_volume, [
         "provisioner-vol",
         # Single-node test cluster — the test wants metadata
-        # replication across `default` + `drive1`; bypass the #1015
+        # replication across `default` + `drive1`; bypass the
         # under-replication refusal.
         %{"durability" => "replicate:2", "allow_under_replicated" => true}
       ])
@@ -98,7 +98,7 @@ defmodule NeonFS.Integration.ProvisionerEndToEndTest do
 
     # The root segment chunk should exist on disk under the drive's
     # blobs/ tree, which is what the on-disk reconstruction walker
-    # in #844 relies on.
+    # the provisioner relies on.
     assert root_chunk_on_disk?(drive_path, root_hash),
            "root segment chunk #{Base.encode16(root_hash, case: :lower)} not found under #{drive_path}/blobs"
   end

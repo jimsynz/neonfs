@@ -6,7 +6,7 @@ defmodule NeonFS.Integration.PartitionRestartTest do
 
   The non-restart partition tests (majority / minority reads + writes,
   partition healing) share a single cluster in
-  `partition_test.exs` with `cluster_mode: :shared` (#506).
+  `partition_test.exs` with `cluster_mode: :shared`.
   """
   use NeonFS.TestSupport.ClusterCase, async: false
 
@@ -154,7 +154,7 @@ defmodule NeonFS.Integration.PartitionRestartTest do
     :ok
   end
 
-  # Post-#792 anti-entropy is per-volume, dispatched via the
+  # Anti-entropy is per-volume, dispatched via the
   # `Job.Runners.VolumeAntiEntropy` runner. The old global
   # `AntiEntropy.sync_now` is gone. We pick one node and dispatch
   # one job per volume; the runner queries every replica for chunk

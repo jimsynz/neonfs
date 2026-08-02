@@ -1,6 +1,6 @@
 defmodule NeonFS.Integration.CommitChunksCodecTest do
   @moduledoc """
-  Peer-cluster regression test for #481 — `CommitChunks.create_chunk_meta/3`
+  Peer-cluster regression test — `CommitChunks.create_chunk_meta/3`
   must stamp the codec (compression + encryption) that `put_chunk`
   actually used, not the hard-coded `compression: :none, crypto: nil`
   shape it wrote before this change.
@@ -139,7 +139,7 @@ defmodule NeonFS.Integration.CommitChunksCodecTest do
   defp wait_for_discovery(cluster, node_name) do
     # See Codebase-Patterns.md §Testing: the peer-cluster harness
     # doesn't populate NeonFS.Client.Connection.bootstrap_nodes, so
-    # Discovery's cache stays empty until we seed it. #482 tracks
+    # Discovery's cache stays empty until we seed it. A follow-up tracks
     # fixing this at the harness level.
     services = PeerCluster.rpc(cluster, node_name, NeonFS.Core.ServiceRegistry, :list, [])
     infos = Enum.map(services, &ServiceInfo.from_map/1)

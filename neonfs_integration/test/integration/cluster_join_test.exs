@@ -44,7 +44,7 @@ defmodule NeonFS.Integration.ClusterJoinTest do
 
       # join_cluster now returns an async ack: it redeems the invite synchronously
       # then finishes the join (restart TLS distribution → connect → Ra membership)
-      # in a detached worker, so the CLI can reconnect and validate (#1033).
+      # in a detached worker, so the CLI can reconnect and validate.
       assert join_result["status"] == "joining"
 
       # Verify node2 completes the join: cluster state is persisted...
@@ -68,7 +68,7 @@ defmodule NeonFS.Integration.ClusterJoinTest do
                )
     end
 
-    test "interface-type node joins via NeonFS.Client.CLIHandler (#1161)", %{cluster: cluster} do
+    test "interface-type node joins via NeonFS.Client.CLIHandler", %{cluster: cluster} do
       {:ok, _} =
         PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :cluster_init, ["client-join-test"])
 

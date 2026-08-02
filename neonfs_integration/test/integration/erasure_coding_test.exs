@@ -19,7 +19,7 @@ defmodule NeonFS.Integration.ErasureCodingTest do
   @moduletag nodes: 1
   @moduletag cluster_mode: :shared
   # `erasure:2:1` needs three shards across distinct failure domains, and
-  # since the #903/#1186 fix the chunk-index metadata also fans out per the
+  # the chunk-index metadata also fans out per the
   # volume's durability (`DriveSelector.select_replicas` requires `data`
   # copies — 2 here). The default single-drive node can't satisfy either, so
   # writes failed with `QuorumUnavailable{select_replicas, required: 2,
@@ -34,7 +34,7 @@ defmodule NeonFS.Integration.ErasureCodingTest do
       PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :create_volume, [
         "ec-volume",
         # Single-node test cluster — `allow_under_replicated` bypasses
-        # the #1015 safety gate that refuses volumes wanting more
+        # the safety gate that refuses volumes wanting more
         # replicas than the cluster has core nodes.
         %{"durability" => "erasure:2:1", "allow_under_replicated" => true}
       ])
@@ -237,7 +237,7 @@ defmodule NeonFS.Integration.ErasureCodingTest do
       {:ok, _} =
         PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :create_volume, [
           "gc-ec-volume",
-          # Single-node test cluster — see #1015 note in the
+          # Single-node test cluster — see the safety-gate note in the
           # `setup_all` block above.
           %{"durability" => "erasure:2:1", "allow_under_replicated" => true}
         ])
