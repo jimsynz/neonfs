@@ -312,7 +312,15 @@ defmodule NeonFS.Core.Replication do
     :ok
   end
 
-  defp perform_replication(chunk_hash, chunk_data, tier, targets, volume, local_drive_id, write_opts) do
+  defp perform_replication(
+         chunk_hash,
+         chunk_data,
+         tier,
+         targets,
+         volume,
+         local_drive_id,
+         write_opts
+       ) do
     case volume.write_ack do
       :local ->
         # Background replication - spawn async and return immediately
@@ -322,11 +330,27 @@ defmodule NeonFS.Core.Replication do
 
       :quorum ->
         # Quorum replication - wait for W of N
-        quorum_replicate(chunk_hash, chunk_data, tier, targets, volume, local_drive_id, write_opts)
+        quorum_replicate(
+          chunk_hash,
+          chunk_data,
+          tier,
+          targets,
+          volume,
+          local_drive_id,
+          write_opts
+        )
 
       :all ->
         # Synchronous replication - wait for all
-        sync_replicate(chunk_hash, chunk_data, tier, targets, volume.id, local_drive_id, write_opts)
+        sync_replicate(
+          chunk_hash,
+          chunk_data,
+          tier,
+          targets,
+          volume.id,
+          local_drive_id,
+          write_opts
+        )
     end
   end
 
@@ -388,7 +412,15 @@ defmodule NeonFS.Core.Replication do
     end
   end
 
-  defp sync_replicate(chunk_hash, chunk_data, tier, targets, volume_id, local_drive_id, write_opts) do
+  defp sync_replicate(
+         chunk_hash,
+         chunk_data,
+         tier,
+         targets,
+         volume_id,
+         local_drive_id,
+         write_opts
+       ) do
     results = replicate_to_targets(chunk_hash, chunk_data, tier, targets, volume_id, write_opts)
 
     # Check if all succeeded
