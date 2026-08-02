@@ -1,6 +1,6 @@
 defmodule NeonFS.Core.DRSnapshotScheduler do
   @moduledoc """
-  Periodic scheduler for DR snapshots — sub-issue #323 of #247.
+  Periodic scheduler for DR snapshots.
 
   Wraps `NeonFS.Core.DRSnapshot.create/1` in a GenServer that fires
   on a configurable cadence (default daily) and applies a
@@ -49,7 +49,7 @@ defmodule NeonFS.Core.DRSnapshotScheduler do
   random offset; opening that as a follow-up if operators ask for
   it. Same for manual / labelled snapshots that should override
   retention — DRSnapshot's manifest doesn't carry a class yet
-  (#324 covers operator-issued snapshots).
+  (Operator-issued snapshots are handled separately.)
   """
 
   use GenServer

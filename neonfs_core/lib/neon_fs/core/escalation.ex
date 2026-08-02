@@ -189,7 +189,7 @@ defmodule NeonFS.Core.Escalation do
     # has caught up to. Without it, an emit fired immediately after a
     # `resolve` / `create` / `delete` ra_command can race the local
     # apply and report stale numbers — which broke `escalation_test`
-    # under contended CI (#565). The cost is one extra leader
+    # under contended CI. The cost is one extra leader
     # round-trip per emit; acceptable for an operator-facing metric.
     pending = list_pending_consistent()
     pending_count = length(pending)
@@ -277,7 +277,7 @@ defmodule NeonFS.Core.Escalation do
   # the leader's fully-applied state, so the read reflects every
   # committed entry up to the call. Used by `emit_pending_metrics/0`
   # so post-resolve / post-create metric emits don't race the local
-  # apply loop. See #565.
+  # apply loop.
   defp list_pending_consistent do
     case RaSupervisor.query(&MetadataStateMachine.get_escalations/1) do
       {:ok, escalations_map} when is_map(escalations_map) ->

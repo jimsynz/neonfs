@@ -5,7 +5,7 @@ defmodule NeonFS.IO.Priority do
   Seven classes ordered by urgency — higher weight means more urgent.
   User-facing operations always preempt background maintenance work.
 
-  `:metadata_commit` (#1305) sits just below `:user_read` and above
+  `:metadata_commit` sits just below `:user_read` and above
   `:user_write`: a metadata commit finalises in-flight user writes and
   makes data visible, so it shouldn't queue behind bulk write data, but
   interactive reads still win. The weight is a deployment tuning knob.

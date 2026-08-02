@@ -1,6 +1,6 @@
 defmodule NeonFS.Core.NamespaceCoordinator do
   @moduledoc """
-  Distributed namespace-aware lock coordinator (sub-issue #300 of #226).
+  Distributed namespace-aware lock coordinator.
 
   Coordinates **claims over regions of the namespace** — separate from
   the DLM's content-level coordination. Where the DLM answers "who can
@@ -13,10 +13,10 @@ defmodule NeonFS.Core.NamespaceCoordinator do
     * Atomic `O_EXCL | O_CREAT` / `If-None-Match: *` (path claims with
       `:exclusive` scope on a name that doesn't yet exist).
     * Atomic cross-directory rename (paired claims on src + dst — see
-      sub-issue #304).
-    * `mkdir` / `rmdir` race resolution (path claims — see #305).
+      cross-directory renames).
+    * `mkdir` / `rmdir` race resolution (path claims).
     * Lock-null resources (RFC 4918 §7.3 — replaces the synthetic-id
-      DLM workaround per #302).
+      DLM workaround).
 
   ## Storage
 
@@ -142,13 +142,13 @@ defmodule NeonFS.Core.NamespaceCoordinator do
   collection lock).
 
   The check against an *already-existing* file at `path` lives in the
-  caller (e.g. `WriteOperation` per #592) — the coordinator treats path
+  caller (e.g. `WriteOperation`) — the coordinator treats path
   strings as opaque coordination tokens and only ensures no two
   `claim_create` calls win for the same path. Callers should perform a
   `FileIndex.get_by_path/2` precheck and only invoke this primitive
   when no entry is found.
 
-  Sub-issue #591 of #303.
+
   """
   @spec claim_create(GenServer.server(), String.t()) ::
           {:ok, claim_id()}
@@ -174,7 +174,7 @@ defmodule NeonFS.Core.NamespaceCoordinator do
   end
 
   @doc """
-  Pin a path as held by an open file handle (sub-issue #637 of #306).
+  Pin a path as held by an open file handle.
   Multiple pins on the same path coexist — each open `fd` is a separate
   pin. Returns `{:ok, claim_id}` on success or `{:error, :conflict,
   conflicting_id}` when the path is covered by an `:exclusive` claim
@@ -183,7 +183,7 @@ defmodule NeonFS.Core.NamespaceCoordinator do
   Pin lifetime is tied to the calling process: when the holder pid
   dies the coordinator's `:DOWN` handler releases the pin via the
   standard bulk-release path. That cleanup is what the unlink-while-
-  open story (#306) relies on — a crashed FUSE peer doesn't leak pins.
+  open story relies on — a crashed FUSE peer doesn't leak pins.
   """
   @spec claim_pinned(GenServer.server(), String.t()) ::
           {:ok, claim_id()}
@@ -208,7 +208,7 @@ defmodule NeonFS.Core.NamespaceCoordinator do
 
   @doc """
   Return every `:pinned` claim at exactly `path`. Used by the unlink-
-  while-open path (#306) to ask "is this file held open anywhere in
+  while-open path to ask "is this file held open anywhere in
   the cluster?". Reads are served locally from the Ra follower's
   state, so this is cheap.
   """
@@ -226,7 +226,7 @@ defmodule NeonFS.Core.NamespaceCoordinator do
   another only once that node has applied the entry. `delete_file`
   decides whether to tombstone or hard-delete from this answer, so it
   cannot afford the follower's lag — a pin it fails to see costs an
-  open handle its chunks (#1605).
+  open handle its chunks.
   """
   @spec consistent_claims_for_path(GenServer.server(), String.t()) ::
           {:ok, [{claim_id(), MetadataStateMachine.namespace_claim()}]} | {:error, term()}
@@ -237,12 +237,12 @@ defmodule NeonFS.Core.NamespaceCoordinator do
   @typedoc """
   POSIX byte-range: `{offset, length}`. `length == 0` is the POSIX
   convention for "to end of file". Used by `claim_byte_range/4` and
-  `query_byte_range/4` (#673).
+  `query_byte_range/4`.
   """
   @type byte_range :: {non_neg_integer(), non_neg_integer()}
 
   @doc """
-  Claim a POSIX byte-range advisory lock (#673). `range` is
+  Claim a POSIX byte-range advisory lock. `range` is
   `{offset, length}` (length 0 = to-EOF). `scope` is `:exclusive`
   (write lock) or `:shared` (read lock).
 
@@ -254,7 +254,7 @@ defmodule NeonFS.Core.NamespaceCoordinator do
 
   Returns `{:ok, claim_id}` on success or `{:error, :conflict,
   conflicting_claim_id}` when an overlapping incompatible claim
-  already exists. The blocking `SETLKW` variant is tracked in #679.
+  already exists. The blocking `SETLKW` variant is not yet supported.
   """
   @spec claim_byte_range(GenServer.server(), String.t(), byte_range(), scope()) ::
           {:ok, claim_id()} | {:error, Conflict.t()} | {:error, term()}
@@ -277,7 +277,7 @@ defmodule NeonFS.Core.NamespaceCoordinator do
   end
 
   @doc """
-  Non-blocking conflict probe for `GETLK` (#673). Returns
+  Non-blocking conflict probe for `GETLK`. Returns
   `{:ok, :unlocked}` when no conflicting byte-range claim covers
   `range` at `scope`, or `{:ok, {:locked, holder, conflicting_range,
   conflicting_scope}}` describing the first conflict found.
@@ -303,7 +303,7 @@ defmodule NeonFS.Core.NamespaceCoordinator do
   @type wait_token :: reference()
 
   @doc """
-  Blocking variant of `claim_byte_range/4` (#679). Same arguments;
+  Blocking variant of `claim_byte_range/4`. Same arguments;
   three possible return shapes:
 
     * `{:ok, claim_id}` — no conflict; claim acquired immediately.
@@ -358,7 +358,7 @@ defmodule NeonFS.Core.NamespaceCoordinator do
   never registered, already fired, or already cancelled returns
   `:ok`.
 
-  Used by FUSE INTERRUPT (#675) to unblock a queued SETLKW when
+  Used by FUSE INTERRUPT to unblock a queued SETLKW when
   userspace interrupts the syscall.
   """
   @spec cancel_wait(GenServer.server(), wait_token()) :: :ok
@@ -367,7 +367,7 @@ defmodule NeonFS.Core.NamespaceCoordinator do
   end
 
   @doc """
-  Blocking variant of `claim_path/3` (#677). Same arguments as
+  Blocking variant of `claim_path/3`. Same arguments as
   `claim_path/3`; the return shape mirrors `claim_byte_range_wait/4`.
 
   On wakeup the holder receives `{:path_acquired, wait_token,
@@ -407,7 +407,7 @@ defmodule NeonFS.Core.NamespaceCoordinator do
   `mv /a /a/b/c`) return `{:error, :einval}` — a cycle the filesystem
   cannot represent.
 
-  See sub-issue #304.
+
   """
   @spec claim_rename(GenServer.server(), String.t(), String.t()) ::
           {:ok, rename_claim_id()}
@@ -474,7 +474,7 @@ defmodule NeonFS.Core.NamespaceCoordinator do
     # (replicated via Ra apply on every replica) wake any local
     # waiters whose conflict has cleared. The handler dispatches
     # back to the coordinator GenServer via cast so the queue work
-    # happens in this process's context (#679).
+    # happens in this process's context.
     attach_release_telemetry(self())
 
     # `holders` maps `pid -> %{ref: monitor_ref, claim_ids: MapSet.t()}`.
@@ -726,7 +726,7 @@ defmodule NeonFS.Core.NamespaceCoordinator do
   defp range_lt?(:infinity, _b), do: false
   defp range_lt?(a, b), do: a < b
 
-  ## Wait-queue helpers (#679)
+  ## Wait-queue helpers
 
   # Try to claim; on no-conflict, behave exactly like
   # `claim_byte_range_for/5`. On conflict, register the calling
@@ -780,7 +780,7 @@ defmodule NeonFS.Core.NamespaceCoordinator do
   # `wait_token` plus the updated state. The `entry_attrs` map carries
   # everything `retry_waiter/2` needs to reattempt the claim — its
   # `claim_type` field selects between `claim_byte_range` and
-  # `claim_path` retries (#677). Monitors the holder pid if we don't
+  # `claim_path` retries. Monitors the holder pid if we don't
   # already have a monitor for it (sharing the existing monitor with
   # `track_claim`'s book-keeping when the same pid both holds and
   # waits — see `drop_waits_for_pid/2` for the symmetric cleanup).

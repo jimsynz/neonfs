@@ -191,7 +191,7 @@ defmodule NeonFS.Core.DriveEvacuation do
   #
   # What evacuation cannot survive is having nowhere to put the data. The
   # blobs stay stranded on a draining drive, and finalisation's
-  # filesystem-empty check is not what will catch that (#1628). So the
+  # filesystem-empty check is not what will catch that. So the
   # replica guard runs only when no target drive exists — which is also
   # the case where `_system` would be stranded, and where its
   # unforceable refusal has to hold.

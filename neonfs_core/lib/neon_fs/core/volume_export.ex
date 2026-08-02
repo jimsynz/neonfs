@@ -1,7 +1,6 @@
 defmodule NeonFS.Core.VolumeExport do
   @moduledoc """
-  Export a volume's tree as a portable TAR archive (#965, part of
-  the snapshots epic #959).
+  Export a volume's tree as a portable TAR archive.
 
   Walks the volume's live `FileIndex`, streams each file's content
   via `ReadOperation.read_file_stream/3`, and writes minimal ustar
@@ -63,7 +62,7 @@ defmodule NeonFS.Core.VolumeExport do
     for JSON binary safety). Restored on import.
 
   - `:baseline_digests` — `%{path => content_digest}` from a prior
-    backup's manifest (#1003). When given, the export is **incremental**:
+    backup's manifest. When given, the export is **incremental**:
     a file whose `content_digest` matches its baseline entry is recorded
     in the manifest but its body is *omitted* from the archive (it's
     carried from the baseline); paths present in the baseline but absent
@@ -71,7 +70,7 @@ defmodule NeonFS.Core.VolumeExport do
     incrementals) in order. Without this opt the export is a full backup
     (every file's body included).
 
-  - `:passphrase` — when given, the archive is encrypted (#1004): a
+  - `:passphrase` — when given, the archive is encrypted: a
     fresh per-archive content key wraps under a PBKDF2 KEK derived from
     the passphrase, each file body is written as AES-256-GCM frames, and
     the wrap envelope lands in the manifest's plaintext `encryption`
@@ -97,7 +96,7 @@ defmodule NeonFS.Core.VolumeExport do
   end
 
   # A file is included (body written) when there's no baseline, or its
-  # content digest differs from (or is absent in) the baseline (#1003).
+  # content digest differs from (or is absent in) the baseline.
   defp included?(_file, nil), do: true
 
   defp included?(file, baseline) when is_map(baseline) do

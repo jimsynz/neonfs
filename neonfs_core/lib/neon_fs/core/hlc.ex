@@ -91,7 +91,7 @@ defmodule NeonFS.Core.HLC do
     # past (clock-step backward), the new wall must not regress past
     # what we've already issued. The `min(_, max_wall)` clamp above
     # guards the *forward* direction; the `max(_, state.last_wall)`
-    # guards the *backward* direction (#801).
+    # guards the *backward* direction.
     clamped = min(max(wall_ms, state.last_wall), max_wall)
     new_wall = max(clamped, state.last_wall)
 
@@ -145,7 +145,7 @@ defmodule NeonFS.Core.HLC do
       # `now/2`. Without this, a `wall_ms` value below
       # `state.last_wall - max_clock_skew_ms` would clamp the new
       # wall down past `last_wall` and break the invariant the
-      # state machine relies on (#801).
+      # state machine relies on.
       new_wall = max(clamped, state.last_wall)
 
       new_counter =
@@ -223,7 +223,7 @@ defmodule NeonFS.Core.HLC do
   @spec from_binary(binary()) :: timestamp()
   def from_binary(<<wall_ms::unsigned-big-64, counter::unsigned-big-32, node_bin::binary>>) do
     # `[:safe]` blocks the RCE-gadget surface a crafted or corrupted replica
-    # could smuggle in (#1200). `node_id` is a node atom, and live-cluster
+    # could smuggle in. `node_id` is a node atom, and live-cluster
     # node names are already interned via distribution, so they decode fine.
     node_id = :erlang.binary_to_term(node_bin, [:safe])
     {wall_ms, counter, node_id}

@@ -3,7 +3,7 @@ defmodule NeonFS.Core.Volume.ChunkReplicator do
   Writes a chunk to a set of drives concurrently, returning success
   once a quorum of replicas is durable.
 
-  The drive set comes from `NeonFS.Core.Volume.DriveSelector` (#803);
+  The drive set comes from `NeonFS.Core.Volume.DriveSelector`;
   this module turns that list into actual `BlobStore.write_chunk`
   calls — across distribution if a drive lives on a remote node.
 
@@ -14,8 +14,8 @@ defmodule NeonFS.Core.Volume.ChunkReplicator do
   on partial-quorum and insufficient-quorum outcomes.
 
   This is the lower-level primitive that `create_volume`'s root
-  segment write (#805) and the per-volume metadata write path
-  (#785) both build on. It is intentionally durability-agnostic:
+  segment write and the per-volume metadata write path
+  both build on. It is intentionally durability-agnostic:
   the caller passes `:min_copies` directly so erasure shards (where
   the minimum is `data_chunks` rather than `min_copies`) can use the
   same helper.
@@ -128,8 +128,8 @@ defmodule NeonFS.Core.Volume.ChunkReplicator do
   # Metadata-commit chunk writes (segments + CoW tree pages — this module
   # is metadata-only) route through the IO scheduler at `:metadata_commit`
   # priority so they're throttled by the per-drive worker and arbitrated
-  # against user I/O by WFQ instead of flooding the drives directly
-  # (#1305). `do_write` runs this on the drive's owning node, so the
+  # against user I/O by WFQ instead of flooding the drives directly.
+  # `do_write` runs this on the drive's owning node, so the
   # operation lands on that node's scheduler. Without a `volume_id` (e.g.
   # a caller that hasn't threaded it) we fall back to a direct write.
   defp default_writer_fn(nil) do

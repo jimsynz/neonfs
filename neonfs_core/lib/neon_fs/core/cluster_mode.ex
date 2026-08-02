@@ -1,6 +1,6 @@
 defmodule NeonFS.Core.ClusterMode do
   @moduledoc """
-  Read/write facade over the whole-cluster lifecycle mode (#1378) in
+  Read/write facade over the whole-cluster lifecycle mode in
   `NeonFS.Core.MetadataStateMachine`.
 
   The cluster is `:normal` (the default), `:frozen`, or `:recovering`.
@@ -17,9 +17,9 @@ defmodule NeonFS.Core.ClusterMode do
     verification throttled so a cold start doesn't trigger a repair storm.
 
   This module is the mechanism; the consumers that act on the mode (repair
-  and verification suppression → #1436, the frozen write-gate → #1438) and
-  the producers that set it (`cluster freeze`/`thaw` orchestration → #1439,
-  mass-restart auto-detection → #1437) build on this facade. Absence of an
+  and verification suppression, the frozen write-gate) and the producers
+  that set it (`cluster freeze`/`thaw` orchestration, mass-restart
+  auto-detection) build on this facade. Absence of an
   entry reads as `:normal`, so the table is empty until something sets it.
   The mode lives in Ra consensus, not here.
   """

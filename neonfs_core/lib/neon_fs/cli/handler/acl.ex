@@ -4,7 +4,7 @@ defmodule NeonFS.CLI.Handler.ACL do
   ACLs, directory default ACLs, volume-level grants/revokes, and the
   audit-log query (which aggregates events across core nodes).
 
-  Extracted from `NeonFS.CLI.Handler` (#1203). `NeonFS.CLI.Handler`
+  Extracted from `NeonFS.CLI.Handler`. `NeonFS.CLI.Handler`
   delegates its `handle_*_acl`, `handle_acl_*` and `handle_audit_list`
   RPC entry points here, so the CLI wire contract is unchanged.
   """

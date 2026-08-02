@@ -49,7 +49,7 @@ defmodule NeonFS.Core.ReplicaRepairScheduler do
   # A cordoned (`:maintenance`) node's planned departure shouldn't fire a
   # repair pass: its absence is expected and anti-entropy already skips
   # unreachable peers, so the pass heals nothing — it just wastes a
-  # full-volume scan (#1416). Suppress the membership trigger for a
+  # full-volume scan. Suppress the membership trigger for a
   # cordoned node, but only within this window of its cordon so a
   # forgotten cordon eventually resumes normal handling. Runtime-tunable
   # via `:replica_repair_maintenance_grace_ms` (default 30 min).
@@ -68,7 +68,7 @@ defmodule NeonFS.Core.ReplicaRepairScheduler do
 
   @doc """
   Returns the current scheduler status — useful for `cluster repair
-  status` (sub-issue #709).
+  status`.
   """
   @spec status() :: map()
   def status do
@@ -88,7 +88,7 @@ defmodule NeonFS.Core.ReplicaRepairScheduler do
   volume, that volume is skipped (running-job dedupe). Calls
   arriving within the membership rate-limit window collapse
   to one effective trigger per scope so a flapping membership
-  storm doesn't churn repair jobs (see #708).
+  storm doesn't churn repair jobs.
   """
   @spec trigger_now(String.t() | [String.t()] | :all) ::
           {:ok, [map()]} | {:skipped, :rate_limited | :already_running}
@@ -388,16 +388,16 @@ defmodule NeonFS.Core.ReplicaRepairScheduler do
     now_ms - state.last_membership_trigger_at < state.membership_rate_limit_ms
   end
 
-  # True while the whole cluster is `:recovering` (#1378) — reassembling
+  # True while the whole cluster is `:recovering` — reassembling
   # after a freeze or an unplanned mass restart. A member vanishing during
   # reassembly is expected, not a failure, so no failure-driven repair pass
-  # is triggered until the cluster returns to `:normal` (#1436). This
+  # is triggered until the cluster returns to `:normal`. This
   # cluster-wide gate takes precedence over the per-node maintenance check.
   defp recovering_suppressed?(state), do: state.cluster_mode_mod.recovering?()
 
   # True when the deregistering node is cordoned (`:maintenance`) and was
   # cordoned within the grace window — its planned departure shouldn't
-  # fire a repair pass (#1416). A cordon older than the window falls
+  # fire a repair pass. A cordon older than the window falls
   # through to normal handling so a forgotten cordon still self-heals.
   defp maintenance_suppressed?(metadata, state) do
     case metadata[:node] && state.node_registry_mod.entry(metadata[:node]) do

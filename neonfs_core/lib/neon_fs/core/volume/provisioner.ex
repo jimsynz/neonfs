@@ -1,20 +1,20 @@
 defmodule NeonFS.Core.Volume.Provisioner do
   @moduledoc """
   Allocates a volume's initial root segment chunk and registers the
-  bootstrap-layer entry on volume create (#805).
+  bootstrap-layer entry on volume create.
 
   The flow:
 
   1. Resolve `cluster_id` / `cluster_name` from `NeonFS.Cluster.State`.
-  2. Read the bootstrap-layer drive registry (#779) for the cluster's
+  2. Read the bootstrap-layer drive registry for the cluster's
      active drives.
-  3. Pick replica drives via `Volume.DriveSelector` (#803) according
+  3. Pick replica drives via `Volume.DriveSelector` according
      to the volume's durability.
-  4. Build the initial `Volume.RootSegment` (#780). `index_roots`
+  4. Build the initial `Volume.RootSegment`. `index_roots`
      stays nil — empty trees don't need a chunk; the first metadata
-     write through #785 will allocate them via copy-on-write.
+     write will allocate them via copy-on-write.
   5. Encode the segment and replicate the chunk via
-     `Volume.ChunkReplicator` (#804).
+     `Volume.ChunkReplicator`.
   6. Submit `:register_volume_roots` to Ra so the bootstrap layer knows
      where every shard's root lives — one command for the whole set, so
      the volume is either provisioned or it is not.

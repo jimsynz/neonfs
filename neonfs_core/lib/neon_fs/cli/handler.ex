@@ -11,7 +11,7 @@ defmodule NeonFS.CLI.Handler do
 
   This module is a pure dispatch facade: every entry point `defdelegate`s to a
   per-command-group handler under `NeonFS.CLI.Handler.*` (the split tracked by
-  #1203). Shared helpers live in `NeonFS.CLI.Handler.Common`. Keeping the RPC
+  Shared helpers live in `NeonFS.CLI.Handler.Common`. Keeping the RPC
   surface here means the CLI wire contract is one stable module regardless of
   how the implementation is partitioned.
   """
@@ -123,21 +123,21 @@ defmodule NeonFS.CLI.Handler do
 
   @doc """
   Begins graceful decommission: marks a node `:draining` (stopping new
-  placement/routing work) and evacuates its drives (#1325). The operator
+  placement/routing work) and evacuates its drives. The operator
   runs `handle_remove_node/2` once the drives are empty.
   """
   @spec handle_drain_node(String.t(), map()) :: {:ok, map()} | {:error, Exception.t()}
   defdelegate handle_drain_node(node_name, opts \\ %{}), to: ClusterRecoveryHandler
 
   @doc """
-  Reverses a drain — marks the node `:active` again (#1325) — to abort a
+  Reverses a drain — marks the node `:active` again — to abort a
   decommission before the node is removed.
   """
   @spec handle_undrain_node(String.t()) :: {:ok, map()} | {:error, Exception.t()}
   defdelegate handle_undrain_node(node_name), to: ClusterRecoveryHandler
 
   @doc """
-  Cordons a node for planned maintenance (#1376): marks it `:maintenance`
+  Cordons a node for planned maintenance: marks it `:maintenance`
   (stopping new placement/routing work) without evacuating drives or
   changing Ra membership.
   """
@@ -145,13 +145,13 @@ defmodule NeonFS.CLI.Handler do
   defdelegate handle_cordon_node(node_name), to: ClusterRecoveryHandler
 
   @doc """
-  Reverses a cordon — marks the node `:active` again (#1376).
+  Reverses a cordon — marks the node `:active` again.
   """
   @spec handle_uncordon_node(String.t()) :: {:ok, map()} | {:error, Exception.t()}
   defdelegate handle_uncordon_node(node_name), to: ClusterRecoveryHandler
 
   @doc """
-  Read-only pre-shutdown safety check (#1417): reports whether stopping
+  Read-only pre-shutdown safety check: reports whether stopping
   a cordoned node would break quorum, strand a chunk, or drop one below
   `min_copies`.
   """
@@ -160,14 +160,14 @@ defmodule NeonFS.CLI.Handler do
 
   @doc """
   Freezes the whole cluster for a coordinated maintenance shutdown
-  (#1378): cuts write ingress, settles in-flight writes, snapshots
+  : cuts write ingress, settles in-flight writes, snapshots
   metadata, and reports ready-to-power-off.
   """
   @spec handle_cluster_freeze() :: {:ok, map()} | {:error, Exception.t()}
   defdelegate handle_cluster_freeze(), to: ClusterRecoveryHandler
 
   @doc """
-  Thaws the cluster after a coordinated restart (#1378): enters the
+  Thaws the cluster after a coordinated restart: enters the
   `:recovering` mode so repair stays suppressed while it reassembles.
   """
   @spec handle_cluster_thaw() :: {:ok, map()} | {:error, Exception.t()}
@@ -178,7 +178,7 @@ defmodule NeonFS.CLI.Handler do
   records the operator-acknowledged data-loss intent in the audit log.
 
   This is the first slice of the force-reset command (tracking issue
-  #458). The Ra minority-recovery mutation itself is deferred to #473;
+  The Ra minority-recovery mutation itself is deferred;
   when every safety gate passes this function writes a durable audit
   entry and then returns an "Ra mutation not yet implemented" error.
   Landing the gates and the audit entry on their own lets operators
@@ -230,10 +230,10 @@ defmodule NeonFS.CLI.Handler do
   on-disk root segments and rebuilds the bootstrap-layer Ra state.
 
   Use this when Ra logs are unrecoverable but the underlying volume
-  data is intact. Drive identity files (#778) and root segment
-  chunks (#780) are the source of truth; this handler discovers
-  them via `Reconstruction.OnDisk` (#844) and submits the Ra
-  commands `Reconstruction.reconstruct/2` (#841) emits.
+  data is intact. Drive identity files and root segment
+  chunks are the source of truth; this handler discovers
+  them via `Reconstruction.OnDisk` and submits the Ra
+  commands `Reconstruction.reconstruct/2` emits.
 
   ## Opts (map keys)
 
@@ -453,7 +453,7 @@ defmodule NeonFS.CLI.Handler do
   @doc """
   Exports a volume via NFS.
 
-  Sets the volume's `nfs_export` flag in cluster state (#1175). Every
+  Sets the volume's `nfs_export` flag in cluster state. Every
   running NFS node observes the change via volume lifecycle events and
   serves the export — no node targeting involved.
 
@@ -461,10 +461,10 @@ defmodule NeonFS.CLI.Handler do
   - `volume_name` - Volume name (string)
   - `allowed_ips` - optional list of IP/CIDR strings; only these clients
     may mount and access the export. An empty list (the default) means
-    allow all (#1217).
+    allow all.
   - `root_squash` - optional boolean (default `true`); when set, a remote
     uid 0 is mapped to `nobody` before authorisation so it can't act as
-    the volume owner (#1216). Pass `false` for `no_root_squash`.
+    the volume owner. Pass `false` for `no_root_squash`.
 
   ## Returns
   - `{:ok, map}` - Export info as map
@@ -492,7 +492,7 @@ defmodule NeonFS.CLI.Handler do
 
   @doc """
   Resolves the NFS mount parameters for `volume_name` so the CLI can
-  perform the `mount.nfs` syscall locally as the calling user (#847).
+  perform the `mount.nfs` syscall locally as the calling user.
 
   Returns the server address, port, and export path (always
   `"/<volume_name>"`) for the volume's NFS export. The export must
@@ -848,14 +848,14 @@ defmodule NeonFS.CLI.Handler do
   defdelegate handle_volume_scrub_status(volume_name), to: MaintenanceHandler
 
   @doc """
-  Triggers an immediate anti-entropy job for the named volume (#922).
+  Triggers an immediate anti-entropy job for the named volume.
   """
   @spec handle_volume_anti_entropy_now(binary()) :: {:ok, map()} | {:error, term()}
   defdelegate handle_volume_anti_entropy_now(volume_name), to: MaintenanceHandler
 
   @doc """
   Updates `RootSegment.schedules.anti_entropy.interval_ms` for the
-  named volume (#922). Minimum 60_000 ms (1 minute).
+  named volume. Minimum 60_000 ms (1 minute).
   """
   @spec handle_volume_anti_entropy_set_interval(binary(), pos_integer()) ::
           {:ok, map()} | {:error, term()}
@@ -864,13 +864,13 @@ defmodule NeonFS.CLI.Handler do
 
   @doc """
   Returns the current anti-entropy schedule for the named volume —
-  interval, last_run, and the latest job (#922).
+  interval, last_run, and the latest job.
   """
   @spec handle_volume_anti_entropy_status(binary()) :: {:ok, map()} | {:error, term()}
   defdelegate handle_volume_anti_entropy_status(volume_name), to: MaintenanceHandler
 
   @doc """
-  Snapshots the named volume's current root chunk (#962 / epic #959).
+  Snapshots the named volume's current root chunk.
 
   ## Parameters
   - `volume_name` — volume name (string).
@@ -900,13 +900,13 @@ defmodule NeonFS.CLI.Handler do
   Deletes the snapshot's pin. Accepts ULID or human-readable name (if
   unique within the volume). Idempotent — deleting a missing ULID is a
   no-op; deleting by an unknown name returns `:not_found`. Chunk
-  reclamation is the GC scheduler's job (#961).
+  reclamation is the GC scheduler's job.
   """
   @spec handle_volume_snapshot_delete(binary(), binary()) :: :ok | {:error, term()}
   defdelegate handle_volume_snapshot_delete(volume_name, snapshot_ref), to: SnapshotsHandler
 
   @doc """
-  Promotes a snapshot to a new top-level volume (#964). The new
+  Promotes a snapshot to a new top-level volume. The new
   volume's `volume_root` points at the snapshot's `root_chunk_hash`;
   no chunks are copied.
 
@@ -916,7 +916,7 @@ defmodule NeonFS.CLI.Handler do
     within the source volume.
   - `new_volume_name` — name for the new volume.
   - `opts` — currently unused; reserved for `--storage-policy`
-    forwarding (#964 body).
+    forwarding.
 
   ## Returns
   - `{:ok, %{volume_id, volume_name, source_volume_id, source_volume_name,
@@ -935,7 +935,7 @@ defmodule NeonFS.CLI.Handler do
               to: VolumeLifecycleHandler
 
   @doc """
-  Rollback a volume's live root to a snapshot (#963).
+  Rollback a volume's live root to a snapshot.
 
   ## Parameters
 
@@ -958,7 +958,7 @@ defmodule NeonFS.CLI.Handler do
 
   @doc """
   Export a volume's live root as a TAR archive at `output_path`
-  on the daemon's filesystem (#965).
+  on the daemon's filesystem.
 
   V1 scope — live root only, local output only. Snapshot export,
   ACL/xattr capture, and S3/file:// URL outputs land in follow-ups.
@@ -970,7 +970,7 @@ defmodule NeonFS.CLI.Handler do
 
   @doc """
   Import a previously-exported tarball into a new volume named
-  `new_volume_name` (#966).
+  `new_volume_name`.
 
   V1 scope — local input path only, default storage policy. S3/
   `file://` URLs, custom storage policy, and post-import
@@ -982,11 +982,11 @@ defmodule NeonFS.CLI.Handler do
 
   @doc """
   Take a snapshot of `volume_name`, export it to `output_path`, then
-  drop the snapshot (#968).
+  drop the snapshot.
 
   Returns `{:ok, summary}` with `:path`, `:volume`, `:snapshot_id`,
   `:file_count`, `:byte_count`. On export failure the snapshot is
-  left in place per #968's "retry without re-snapshotting" semantics.
+  left in place per the "retry without re-snapshotting" semantics.
   """
   @spec handle_backup_create(binary(), binary(), map()) ::
           {:ok, map()} | {:error, term()}
@@ -994,7 +994,7 @@ defmodule NeonFS.CLI.Handler do
     to: VolumeLifecycleHandler
 
   @doc """
-  Read a backup's manifest without unpacking the body (#968).
+  Read a backup's manifest without unpacking the body.
 
   Returns the parsed manifest map verbatim — the CLI surfaces a
   human-readable view of the well-known fields.
@@ -1004,8 +1004,8 @@ defmodule NeonFS.CLI.Handler do
 
   @doc """
   Restore a backup tarball at `input_path` into a brand-new volume
-  named `new_volume_name` (#968). Accepts a `:passphrase` to decrypt an
-  encrypted archive (#1004).
+  named `new_volume_name`. Accepts a `:passphrase` to decrypt an
+  encrypted archive.
   """
   @spec handle_backup_restore(binary(), binary(), map()) ::
           {:ok, map()} | {:error, term()}
@@ -1014,8 +1014,8 @@ defmodule NeonFS.CLI.Handler do
 
   @doc """
   Restore a chain of backup archives (full + incrementals, oldest-first)
-  into a brand-new volume (#1003). Accepts a `:passphrase` to decrypt
-  encrypted archives (#1004).
+  into a brand-new volume. Accepts a `:passphrase` to decrypt
+  encrypted archives.
   """
   @spec handle_backup_restore_chain([binary()], binary(), map()) ::
           {:ok, map()} | {:error, term()}
@@ -1274,8 +1274,7 @@ defmodule NeonFS.CLI.Handler do
   defdelegate handle_escalation_show(id), to: EscalationHandler
 
   @doc """
-  Triggers an immediate DR snapshot. Used by `neonfs dr snapshot create`
-  (#324).
+  Triggers an immediate DR snapshot. Used by `neonfs dr snapshot create`.
 
   Returns `{:ok, map}` with the snapshot id, path, and key manifest
   fields ready for serialisation to JSON.
@@ -1285,43 +1284,42 @@ defmodule NeonFS.CLI.Handler do
 
   @doc """
   Lists every DR snapshot in the `_system` volume's `/dr` directory,
-  newest first. Used by `neonfs dr snapshot list` (#324).
+  newest first. Used by `neonfs dr snapshot list`.
   """
   @spec handle_dr_snapshot_list() :: {:ok, [map()]} | {:error, term()}
   defdelegate handle_dr_snapshot_list(), to: DRHandler
 
   @doc """
   Fetches a single DR snapshot's manifest by id. Used by
-  `neonfs dr snapshot show <id>` (#324).
+  `neonfs dr snapshot show <id>`.
   """
   @spec handle_dr_snapshot_show(String.t()) :: {:ok, map()} | {:error, term()}
   defdelegate handle_dr_snapshot_show(id), to: DRHandler
 
   @doc """
   Applies a DR snapshot's cluster-wide metadata back into live Ra
-  state. Used by `neonfs dr snapshot apply <id>` (#1005).
+  state. Used by `neonfs dr snapshot apply <id>`.
   """
   @spec handle_dr_snapshot_apply(String.t()) :: {:ok, map()} | {:error, term()}
   defdelegate handle_dr_snapshot_apply(id), to: DRHandler
 
   @doc """
   Exports a DR snapshot off-cluster to a filesystem path so it survives
-  a bare-metal disaster. Used by `neonfs dr snapshot export` (#1367).
+  a bare-metal disaster. Used by `neonfs dr snapshot export`.
   """
   @spec handle_dr_snapshot_export(String.t(), String.t()) :: {:ok, map()} | {:error, term()}
   defdelegate handle_dr_snapshot_export(id, dest_dir), to: DRHandler
 
   @doc """
   Stages an exported DR snapshot back into the `_system` volume. Used by
-  `neonfs dr snapshot import` (#1367).
+  `neonfs dr snapshot import`.
   """
   @spec handle_dr_snapshot_import(String.t()) :: {:ok, map()} | {:error, term()}
   defdelegate handle_dr_snapshot_import(source_dir), to: DRHandler
 
   @doc """
   Full-cluster restore: stage + apply a DR snapshot, then restore each
-  volume's content from its backup archive. Used by `neonfs dr restore`
-  (#1005).
+  volume's content from its backup archive. Used by `neonfs dr restore`.
   """
   @spec handle_dr_restore(String.t(), map()) :: {:ok, map()} | {:error, term()}
   defdelegate handle_dr_restore(source_dir, opts \\ %{}), to: DRHandler

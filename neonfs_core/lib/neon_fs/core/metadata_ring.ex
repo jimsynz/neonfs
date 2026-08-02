@@ -7,7 +7,7 @@ defmodule NeonFS.Core.MetadataRing do
   nodes (default 64 per physical node) for even distribution.
 
   This is a pure data structure — no GenServer, no side effects.
-  Post-#792 the per-segment metadata quorum store is gone; this ring
+  The per-segment metadata quorum store is gone; this ring
   now only exists for `NeonFS.Core.LockManager.GraceCoordinator`'s
   membership-change book-keeping.
 

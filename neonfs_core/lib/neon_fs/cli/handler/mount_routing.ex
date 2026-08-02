@@ -4,7 +4,7 @@ defmodule NeonFS.CLI.Handler.MountRouting do
   FUSE mount/unmount/list and NFS export/unexport/list plus the NFS
   mount-parameter resolver.
 
-  Extracted from `NeonFS.CLI.Handler` (#1203). `NeonFS.CLI.Handler`
+  Extracted from `NeonFS.CLI.Handler`. `NeonFS.CLI.Handler`
   delegates its `mount/3`, `unmount/1`, `list_mounts/0`, `nfs_export/3`,
   `nfs_unexport/1`, `handle_nfs_mount_request/1` and `nfs_list_exports/0`
   RPC entry points here, so the CLI wire contract is unchanged.
@@ -13,10 +13,10 @@ defmodule NeonFS.CLI.Handler.MountRouting do
   puts its own hostname in the mount `options` (`"host"`), and a FUSE
   node on that host is preferred so the mount lands where the operator
   ran the command even when the RPC is handled by a core-only node
-  elsewhere (#1359). Failing that it prefers the local node, then
+  elsewhere. Failing that it prefers the local node, then
   `ServiceRegistry`, then connected peers, then the configured fallback —
   a FUSE mount is only visible on its own host, so the operator's own
-  node is the right default (#1358). NFS discovery checks
+  node is the right default. NFS discovery checks
   `ServiceRegistry` first, since an export is cluster state served by
   every NFS node. RPC wrappers carry bounded timeouts so a misbehaving
   interface node can't hang the CLI.
@@ -28,7 +28,7 @@ defmodule NeonFS.CLI.Handler.MountRouting do
   alias NeonFS.Error.{NotFound, Unavailable, VolumeNotFound}
 
   # RPC wrappers for MountManager operations. Bounded timeouts so a misbehaving
-  # FUSE node can't hang the calling CLI command indefinitely (#1035) — a stuck
+  # FUSE node can't hang the calling CLI command indefinitely — a stuck
   # mount surfaces as a clear error rather than an unbounded wait.
   @mount_rpc_timeout 60_000
   @unmount_rpc_timeout 30_000
@@ -40,10 +40,10 @@ defmodule NeonFS.CLI.Handler.MountRouting do
   - `volume_name` - Volume name (string)
   - `mount_point` - Mount point path (string)
   - `options` - Mount options map. A `"host"` entry (the CLI's own
-    hostname) routes the mount to a FUSE node on that host (#1359); it is
+    hostname) routes the mount to a FUSE node on that host; it is
     consumed here and not forwarded to the FUSE node. `"allow_other"` /
     `"allow_root"` booleans are forwarded to the FUSE node's
-    `MountManager` to widen mount access (#1574).
+    `MountManager` to widen mount access.
 
   ## Returns
   - `{:ok, map}` - Mount info as map
@@ -135,7 +135,7 @@ defmodule NeonFS.CLI.Handler.MountRouting do
   @doc """
   Exports a volume via NFS.
 
-  Sets the volume's `nfs_export` flag in cluster state (#1175). Every
+  Sets the volume's `nfs_export` flag in cluster state. Every
   running NFS node observes the change via volume lifecycle events and
   serves the export — no node targeting involved.
 
@@ -143,10 +143,10 @@ defmodule NeonFS.CLI.Handler.MountRouting do
   - `volume_name` - Volume name (string)
   - `allowed_ips` - optional list of IP/CIDR strings; only these clients
     may mount and access the export. An empty list (the default) means
-    allow all (#1217).
+    allow all.
   - `root_squash` - optional boolean (default `true`); when set, a remote
     uid 0 is mapped to `nobody` before authorisation so it can't act as
-    the volume owner (#1216). Pass `false` for `no_root_squash`.
+    the volume owner. Pass `false` for `no_root_squash`.
 
   ## Returns
   - `{:ok, map}` - Export info as map
@@ -210,7 +210,7 @@ defmodule NeonFS.CLI.Handler.MountRouting do
 
   @doc """
   Resolves the NFS mount parameters for `volume_name` so the CLI can
-  perform the `mount.nfs` syscall locally as the calling user (#847).
+  perform the `mount.nfs` syscall locally as the calling user.
 
   Returns the server address, port, and export path (always
   `"/<volume_name>"`) for the volume's NFS export. The export must
@@ -336,12 +336,12 @@ defmodule NeonFS.CLI.Handler.MountRouting do
   # Get the FUSE node and verify it's reachable.
   # A FUSE node co-located with the mounting client wins outright: the mount
   # point only exists on the operator's host, so when the CLI tells us its
-  # hostname we honour it even if the RPC landed on a core-only node elsewhere
-  # (#1359). Otherwise checks in order: local node, ServiceRegistry, connected
+  # hostname we honour it even if the RPC landed on a core-only node elsewhere.
+  # Otherwise checks in order: local node, ServiceRegistry, connected
   # nodes, configured fallback. The local node is preferred because a FUSE mount
   # is only visible on its own host: on an all-omnibus cluster every node
   # registers a `:fuse` service, so routing to the registry head would mount on
-  # an arbitrary node — not the one the operator ran the CLI on (#1358).
+  # an arbitrary node — not the one the operator ran the CLI on.
   defp get_fuse_node(client_host) do
     case same_host_fuse_node(client_host) do
       {:ok, fuse_node} -> {:ok, fuse_node}
@@ -382,7 +382,7 @@ defmodule NeonFS.CLI.Handler.MountRouting do
   end
 
   # Whitelist the known FUSE mount flags into the keyword opts forwarded to
-  # the FUSE node's `MountManager` (#1574). The generic string→atom coercion
+  # the FUSE node's `MountManager`. The generic string→atom coercion
   # can't be used here: `:allow_other` / `:allow_root` are only referenced in
   # the FUSE app, so on a core-only node they aren't in the atom table and
   # `String.to_existing_atom/1` would raise — silently dropping the flags.
@@ -534,7 +534,7 @@ defmodule NeonFS.CLI.Handler.MountRouting do
 
   # Single dispatch point for MountManager RPCs. The RPC module is read from
   # app env (defaulting to `:rpc`) so tests can inject a stub and assert which
-  # node a mount was routed to (#1358).
+  # node a mount was routed to.
   defp fuse_rpc(fuse_node, fun, args, timeout) do
     rpc_mod = Application.get_env(:neonfs_core, :fuse_rpc_mod, :rpc)
 
@@ -581,7 +581,7 @@ defmodule NeonFS.CLI.Handler.MountRouting do
 
   # Tries the supplied identifier as a mount-id, then as a mount
   # point, then as a volume name. The volume-name lookup is the
-  # newest gate (#1016) — operators frequently typed
+  # newest gate — operators frequently typed
   # `neonfs fuse unmount <volume>` and got an unhelpful "Mount not
   # found" when the daemon only resolved mount ids and paths.
   defp do_unmount(mount_id_or_path, fuse_node) do

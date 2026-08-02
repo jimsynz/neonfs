@@ -73,7 +73,7 @@ defmodule NeonFS.Core.Blob.Native do
   def store_open(_base_dir, _prefix_depth), do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
-  Brings a drive up and reports how it presented itself (#1425/#1426).
+  Brings a drive up and reports how it presented itself.
 
   Reads the per-drive clean/dirty marker, classifies the drive, then
   stamps a fresh `dirty` marker durably. Call once after `store_open/2`,
@@ -102,7 +102,7 @@ defmodule NeonFS.Core.Blob.Native do
   def store_open_marker_submit(_store, _ref, _node_id), do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
-  Rewrites a drive's marker `clean` (#1425). Call on graceful shutdown so
+  Rewrites a drive's marker `clean`. Call on graceful shutdown so
   the next `store_open_marker/2` reports the drive clean.
   """
   @spec store_mark_clean(store(), String.t()) :: {:ok, {}} | {:error, String.t()}
@@ -574,7 +574,7 @@ defmodule NeonFS.Core.Blob.Native do
 
   Empty strings / empty binaries mean "not applicable". Callers build this
   from ChunkMeta.compression + ChunkMeta.crypto to locate the right codec
-  variant on disk (#270).
+  variant on disk.
   """
   @type codec_locator :: {compression(), integer(), binary(), binary()}
 
@@ -1067,7 +1067,7 @@ defmodule NeonFS.Core.Blob.Native do
     do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
-  Looks up a key in an in-volume index tree (#781) backed by the
+  Looks up a key in an in-volume index tree backed by the
   given `BlobStore`.
 
   ## Parameters
@@ -1102,7 +1102,7 @@ defmodule NeonFS.Core.Blob.Native do
     do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
-  Range query against an in-volume index tree (#781).
+  Range query against an in-volume index tree.
 
   `start_key` is inclusive, `end_key` is exclusive; an empty binary
   on either side means "open-ended" in that direction. Tombstones
@@ -1130,7 +1130,7 @@ defmodule NeonFS.Core.Blob.Native do
     do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
-  Insert or replace `key`'s value in an index tree (#781). Returns
+  Insert or replace `key`'s value in an index tree. Returns
   the new `root_hash` — the tree is copy-on-write, so every put
   produces a fresh root chunk.
 
@@ -1143,7 +1143,7 @@ defmodule NeonFS.Core.Blob.Native do
       chunk hash plus `written_nodes`, the list of `{chunk_hash,
       chunk_bytes}` copy-on-write node chunks this op wrote. The
       caller replicates `written_nodes` to the volume's other
-      metadata drives (#903).
+      metadata drives.
     * `{:error, reason}` — for malformed input or chunk-store I/O
       failures.
   """
@@ -1231,7 +1231,7 @@ defmodule NeonFS.Core.Blob.Native do
   @doc """
   List every node chunk hash reachable from `root_hash` — both
   internal-page chunks and leaf-page chunks. Used by the per-volume
-  anti-entropy runner (#955) so index-tree pages are enumerated
+  anti-entropy runner so index-tree pages are enumerated
   alongside data chunks.
 
   Empty `root_hash` returns `{:ok, []}` — there's nothing to walk

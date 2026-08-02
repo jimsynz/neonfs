@@ -10,7 +10,7 @@ defmodule NeonFS.Core.Job.Runners.Scrub do
 
   - `:volume_id` (optional) — restrict scrubbing to a single volume's chunks
   - `:drive_id` (optional) — restrict scrubbing to one local drive's chunks
-    (the scoped-verification path for a dirty-restart drive, #1380/#1426)
+    (the scoped-verification path for a dirty-restart drive)
 
   ## Batch resumption
 
@@ -164,7 +164,7 @@ defmodule NeonFS.Core.Job.Runners.Scrub do
     tier = Atom.to_string(local_loc.tier)
     decompress = chunk.compression != :none
     # Pass compression through so the blob store resolves to the correct
-    # codec-suffixed file (issue #270).
+    # codec-suffixed file.
     opts =
       [verify: true, decompress: decompress, tier: tier, compression: chunk.compression] ++
         extra_opts
@@ -269,8 +269,8 @@ defmodule NeonFS.Core.Job.Runners.Scrub do
 
   # A volume-scoped scrub has just walked the volume's chunks, so it's a
   # natural point to reconcile the logical-size counter against the file
-  # index and correct any drift the incremental accounting accumulated
-  # (#1462). Best-effort — a reconcile failure must not fail the scrub.
+  # index and correct any drift the incremental accounting accumulated.
+  # Best-effort — a reconcile failure must not fail the scrub.
   defp maybe_reconcile_volume_stats(%{params: %{volume_id: volume_id}})
        when is_binary(volume_id) do
     case VolumeRegistry.reconcile_stats(volume_id) do
@@ -291,9 +291,9 @@ defmodule NeonFS.Core.Job.Runners.Scrub do
 
   defp maybe_reconcile_volume_stats(_job), do: :ok
 
-  # A drive-scoped scrub (#1426) that found no corruption and left nothing
+  # A drive-scoped scrub that found no corruption and left nothing
   # unverifiable has fully re-verified the drive — clear it back to
-  # `:trusted` (#1375/#1427). Any corruption or key-unavailable (hence
+  # `:trusted`. Any corruption or key-unavailable (hence
   # unverified) chunk leaves the drive `:unverified` for repair and a
   # later re-scrub.
   defp maybe_clear_drive_trust(%{params: %{drive_id: drive_id}}, 0, 0)

@@ -2,29 +2,29 @@ defmodule NeonFS.Core.Backup do
   @moduledoc """
   Thin orchestration layer over `Snapshot.create` + `VolumeExport` +
   `Snapshot.delete` for the operator-facing "back up this volume"
-  verb (#968, part of #248).
+  verb.
 
   A backup is logically: \"freeze the volume at a moment, write its
   contents out somewhere durable, then release the freeze.\" The
   freeze step is a `Snapshot.create` (O(1), shares storage with the
   live volume), the write step is a `VolumeExport` of the snapshot's
-  tree (#992's `--snapshot` slice), and the release is
+  tree (the `--snapshot` slice), and the release is
   `Snapshot.delete` (the export's bytes are now durable at the
   destination — the in-cluster pin isn't needed any more).
 
   ## Failure behaviour
 
   If the export fails between the snapshot-create and the
-  snapshot-delete, the snapshot is *left in place* (per #968's
+  snapshot-delete, the snapshot is *left in place* (per the
   acceptance criteria) so the operator can retry the export without
   paying for another snapshot.
 
   ## Scope
 
   Local-path destinations only. S3 / `file://` URL handling lands
-  alongside the corresponding follow-ups on #992. File-level
-  incremental backups (#1003) and at-rest encryption (#1004) ship via
-  `create/3` options; cross-cluster restore remains tracked in #248.
+  alongside the corresponding follow-ups. File-level
+  incremental backups and at-rest encryption ship via
+  `create/3` options; cross-cluster restore remains outstanding.
   """
 
   alias NeonFS.Core.Snapshot
@@ -54,8 +54,8 @@ defmodule NeonFS.Core.Backup do
 
     * `:name` — snapshot name (default: generated).
     * `:incremental_from` — a prior backup archive to diff against, so
-      unchanged files are carried rather than re-shipped (#1003).
-    * `:passphrase` — encrypt the archive at rest (#1004).
+      unchanged files are carried rather than re-shipped.
+    * `:passphrase` — encrypt the archive at rest.
   """
   @spec create(binary(), Path.t(), keyword()) ::
           {:ok, create_summary()} | {:error, term()}
@@ -73,8 +73,8 @@ defmodule NeonFS.Core.Backup do
 
   # `:incremental_from` names a prior backup archive; read its manifest's
   # per-file `content_digest`s and hand them to the export as the
-  # baseline, so unchanged files are carried rather than re-shipped
-  # (#1003). The prior archive lives at the destination, so no
+  # baseline, so unchanged files are carried rather than re-shipped.
+  # The prior archive lives at the destination, so no
   # cluster-side "last backup" marker is needed.
   defp resolve_baseline(opts) do
     case Keyword.get(opts, :incremental_from) do
@@ -113,7 +113,7 @@ defmodule NeonFS.Core.Backup do
          }}
 
       {:error, _} = err ->
-        # Leave the snapshot in place per #968's "retry without
+        # Leave the snapshot in place per the "retry without
         # re-snapshotting" semantics.
         Logger.warning(
           "backup export failed; leaving snapshot #{snap.id} for #{volume_name} " <>
@@ -139,7 +139,7 @@ defmodule NeonFS.Core.Backup do
 
   @doc """
   Restore a chain of backups — a full archive followed by its
-  incrementals, oldest-first — into a brand-new volume (#1003).
+  incrementals, oldest-first — into a brand-new volume.
 
   Replays each archive in order onto the new volume, reproducing its
   state at the last archive byte-for-byte. A single-element chain is

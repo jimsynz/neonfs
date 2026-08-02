@@ -24,7 +24,7 @@ defmodule NeonFS.Core.Job.Runners.DriveEvacuation do
   `ChunkIndex.lookup_by_hash/1` classification misclassified real data
   chunks as untracked blobs and moved them byte-for-byte without rewriting
   `chunk.locations`, orphaning them once the drained drive was wiped and
-  re-added (#1573).
+  re-added.
 
   Once the drive is empty, the runner walks every Ra-replicated volume root
   and rewrites any `drive_locations` entry that points at the evacuating
@@ -32,7 +32,7 @@ defmodule NeonFS.Core.Job.Runners.DriveEvacuation do
 
   Deregistration then requires all three of: every volume root rewritten,
   the filesystem drained, and no volume's authoritative `chunk_index`
-  tree still naming the drive (#1628). Any of them failing fails the job
+  tree still naming the drive. Any of them failing fails the job
   — the reason shows in `neonfs job show` — and leaves the drive
   `:draining` rather than throwing away copies something still points at.
 
@@ -85,7 +85,7 @@ defmodule NeonFS.Core.Job.Runners.DriveEvacuation do
 
   # The authoritative `hash => ChunkMeta` set of on-drive chunks, scanned
   # from every volume's `chunk_index` tree ONCE per evacuation and cached in
-  # the job's persisted state (#1578). Deriving it per batch re-scans every
+  # the job's persisted state. Deriving it per batch re-scans every
   # volume's chunk tree O(chunks/batch_size) times over an evacuation. It is
   # safe to cache:
   # the drive is `:draining` (no new writes land on it), a migrated chunk's
@@ -125,7 +125,7 @@ defmodule NeonFS.Core.Job.Runners.DriveEvacuation do
 
   # Builds the authoritative `hash => ChunkMeta` map of data chunks that
   # have a location on the evacuating drive, read from every volume's
-  # `chunk_index` tree (#1573). This replaces the cold-ETS
+  # `chunk_index` tree. This replaces the cold-ETS
   # `ChunkIndex.lookup_by_hash/1` classification, which returned `:not_found`
   # for real chunks after a restart. Called once per evacuation (its result
   # is cached, see `tracked_chunks/3`), before any blob has moved, so every
@@ -431,14 +431,14 @@ defmodule NeonFS.Core.Job.Runners.DriveEvacuation do
 
   # Deregistering a drive throws away every copy it still holds, so
   # finalisation has to establish that it holds nothing anyone depends on
-  # — not merely that its filesystem looks empty (#1628).
+  # — not merely that its filesystem looks empty.
   #
   # An empty filesystem is a weaker claim than it appears. The
   # `drive_locations` rewrite immediately above it is best-effort per
   # volume, so a failed `:update_volume_root` used to log a warning and
   # let deregistration proceed with a volume root still pointing at the
   # drive. And a migration that reported success while leaving
-  # `chunk.locations` stale — the #1573 shape — also passes an
+  # `chunk.locations` stale — also passes an
   # empty-filesystem check.
   #
   # All three conditions must hold, and none of them may be skipped on
@@ -451,7 +451,7 @@ defmodule NeonFS.Core.Job.Runners.DriveEvacuation do
     drive_id = job.params.drive_id
 
     # The evacuation is finishing — drop the cached tracked-chunk set so the
-    # completed job record doesn't carry it around (#1578).
+    # completed job record doesn't carry it around.
     job = %{job | state: Map.delete(job.state, :tracked_chunks)}
 
     with :ok <- rewrite_drive_locations(job),
@@ -580,7 +580,7 @@ defmodule NeonFS.Core.Job.Runners.DriveEvacuation do
   # Every rewrite must succeed. This used to be best-effort per volume —
   # a failed `:update_volume_root` logged a warning and the walk carried
   # on — which let finalisation deregister a drive that a volume root
-  # still named (#1628). A failure now aborts finalisation with the
+  # still named. A failure now aborts finalisation with the
   # offending volumes attached.
   defp rewrite_drive_locations(job) do
     evac_node = job.params.node

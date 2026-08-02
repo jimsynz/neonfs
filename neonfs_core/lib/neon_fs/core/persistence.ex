@@ -102,7 +102,7 @@ defmodule NeonFS.Core.Persistence do
 
     # Define table configurations
     # Only VolumeRegistry and AuditLog tables are persisted via DETS here.
-    # JobTracker owns its own DETS table directly (#359).
+    # JobTracker owns its own DETS table directly.
     # ChunkIndex, FileIndex, StripeIndex load from BlobStore on startup (Phase 5).
     tables = [
       %{ets_table: :volumes_by_id, dets_path: Path.join(meta_dir, "volume_registry_by_id.dets")},
@@ -295,7 +295,7 @@ defmodule NeonFS.Core.Persistence do
   # A snapshot tick can fire while the node is shutting down and its data dir
   # has already been removed, so DETS can't create the temp file. That's an
   # expected teardown race (like the `:table_gone` case below), not a fault —
-  # log it at debug so it doesn't flood integration logs (#1300).
+  # log it at debug so it doesn't flood integration logs.
   defp log_open_failure({:file_error, _path, :enoent} = reason, temp_path) do
     Logger.debug("DETS temp dir vanished mid-snapshot, skipping",
       dets_path: temp_path,
@@ -318,7 +318,7 @@ defmodule NeonFS.Core.Persistence do
     # `ArgumentError` from BEAM, crashes Persistence, and the 100 ms
     # snapshot tick used in tests retries the crash on a loop —
     # enough scheduler pressure that unrelated `GenServer.call`s
-    # time out (#988). Treat "table gone" as a clean per-table no-op.
+    # time out. Treat "table gone" as a clean per-table no-op.
     case do_ets_to_dets(ets_table, dets_ref) do
       {:ok, ^dets_ref} ->
         finalize_snapshot(dets_ref, temp_path, dets_path)
@@ -376,7 +376,7 @@ defmodule NeonFS.Core.Persistence do
 
   # POSIX leaves the directory entry created by `File.rename/2` unflushed until
   # the directory itself is fsynced; a power loss before that sync can lose the
-  # renamed snapshot even though its bytes were `:dets.sync`'d (#1379). The BEAM
+  # renamed snapshot even though its bytes were `:dets.sync`'d. The BEAM
   # refuses to open directories (`:eisdir`), so we route through the blob NIF.
   @spec fsync_parent_dir(String.t()) :: :ok | {:error, term()}
   defp fsync_parent_dir(dets_path) do

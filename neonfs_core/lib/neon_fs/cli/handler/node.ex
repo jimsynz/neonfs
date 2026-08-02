@@ -4,7 +4,7 @@ defmodule NeonFS.CLI.Handler.Node do
   the cluster-wide node listing (combining `ServiceRegistry` entries
   with Ra membership to label leader/follower roles).
 
-  Extracted from `NeonFS.CLI.Handler` (#1203). `NeonFS.CLI.Handler`
+  Extracted from `NeonFS.CLI.Handler`. `NeonFS.CLI.Handler`
   delegates its `handle_node_status`/`handle_node_list` RPC entry points
   here, so the CLI wire contract is unchanged.
   """

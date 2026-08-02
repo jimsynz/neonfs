@@ -1,10 +1,10 @@
 defmodule NeonFS.Core.Job.Runners.VolumeAntiEntropy do
   @moduledoc """
-  Per-volume anti-entropy runner (#921). Catches replica divergence
+  Per-volume anti-entropy runner. Catches replica divergence
   the read path and `ReplicaRepair` wouldn't trigger on their own
   — silently-diverged metadata between replica drives.
 
-  ## Algorithm (bootstrap-as-truth iteration, per #920's design call)
+  ## Algorithm (bootstrap-as-truth iteration)
 
   The Ra-replicated bootstrap pointer is the source of truth. For
   each volume:
@@ -27,7 +27,7 @@ defmodule NeonFS.Core.Job.Runners.VolumeAntiEntropy do
   authority (Cassandra / Dynamo). NeonFS has a Ra-replicated
   bootstrap pointer, so there's a single canonical answer at any
   point in time — replicas are reconciled against the canonical, not
-  against each other. See #920 for the full design record.
+  against each other.
 
   ## Scope
 
@@ -38,7 +38,7 @@ defmodule NeonFS.Core.Job.Runners.VolumeAntiEntropy do
   2. Index-tree pages — `file_index`, `chunk_index`, and
      `stripe_index` internal/leaf nodes reachable from the
      volume's segment, walked via
-     `MetadataReader.list_referenced_chunks/2` (#955). The
+     `MetadataReader.list_referenced_chunks/2`. The
      canonical replica set is the volume's bootstrap
      `drive_locations` (tree pages don't have per-chunk locations
      because they're written by `MetadataWriter` to a single drive

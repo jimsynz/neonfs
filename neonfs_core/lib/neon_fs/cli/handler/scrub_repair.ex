@@ -4,7 +4,7 @@ defmodule NeonFS.CLI.Handler.ScrubRepair do
   and replica repair (start/status), each optionally scoped to a single
   volume.
 
-  Extracted from `NeonFS.CLI.Handler` (#1203). `NeonFS.CLI.Handler`
+  Extracted from `NeonFS.CLI.Handler`. `NeonFS.CLI.Handler`
   delegates the matching RPC entry points here. Job-returning commands
   render via the shared `NeonFS.CLI.Handler.Common.job_to_map/1`.
   """

@@ -4,7 +4,7 @@ defmodule NeonFS.CLI.Handler.Drives do
   listing them cluster-wide, evacuating a drive, cluster rebalancing,
   and aggregate storage-capacity stats.
 
-  Extracted from `NeonFS.CLI.Handler` (#1203). `NeonFS.CLI.Handler`
+  Extracted from `NeonFS.CLI.Handler`. `NeonFS.CLI.Handler`
   delegates its `handle_add_drive`/`handle_remove_drive`/
   `handle_list_drives`/`handle_evacuate_drive`/`handle_evacuation_status`/
   `handle_rebalance`/`handle_rebalance_status`/`handle_storage_stats` RPC
@@ -77,7 +77,7 @@ defmodule NeonFS.CLI.Handler.Drives do
   target, falls back to any tier).
 
   `opts` accepts `"force"` to override a below-`min_copies` replica
-  finding (#1618).
+  finding.
   """
   @spec handle_evacuate_drive(String.t(), String.t(), map()) :: {:ok, map()} | {:error, term()}
   def handle_evacuate_drive(node_name, drive_id, opts \\ %{})
@@ -96,7 +96,7 @@ defmodule NeonFS.CLI.Handler.Drives do
 
   @doc """
   Returns a `:draining` drive to `:active` so it can serve writes and be
-  evacuated again (#1634).
+  evacuated again.
   """
   @spec handle_resume_drive(String.t(), String.t()) :: {:ok, map()} | {:error, term()}
   def handle_resume_drive(node_name, drive_id)
@@ -131,7 +131,7 @@ defmodule NeonFS.CLI.Handler.Drives do
 
   @doc """
   Reports replication health: which volumes sit below their `min_copies`
-  floor, and which drives hold the sole copy of anything (#1618).
+  floor, and which drives hold the sole copy of anything.
   """
   @spec handle_replica_status() :: {:ok, map()} | {:error, term()}
   def handle_replica_status do

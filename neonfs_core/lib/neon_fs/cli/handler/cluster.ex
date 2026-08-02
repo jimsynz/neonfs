@@ -3,7 +3,7 @@ defmodule NeonFS.CLI.Handler.Cluster do
   Cluster-lifecycle CLI command handlers: status, init, invite creation
   and join.
 
-  Extracted from `NeonFS.CLI.Handler` (#1203). `NeonFS.CLI.Handler`
+  Extracted from `NeonFS.CLI.Handler`. `NeonFS.CLI.Handler`
   delegates its `cluster_status/0`, `cluster_init/3`, `create_invite/1`
   and `join_cluster/3` RPC entry points here, so the CLI wire contract is
   unchanged. The dangerous recovery operations (force-reset, remove-node,
@@ -133,7 +133,7 @@ defmodule NeonFS.CLI.Handler.Cluster do
         # (dropping this connection) and then connects + completes Ra membership.
         # The audit-log entry and quorum-ring rebuild now happen in that worker
         # once the node is connected. The CLI reconnects and validates via
-        # `cluster status` (#1033).
+        # `cluster status`.
         {:ok,
          %{
            "status" => "joining",
@@ -203,7 +203,7 @@ defmodule NeonFS.CLI.Handler.Cluster do
          "Ra cluster bootstrapped but the initial drive failed to register: " <>
            "#{inspect(reason)}. The cluster will report `running` from `neonfs cluster status` " <>
            "but has no drives or system volume yet — re-run `neonfs drive add <path>` to " <>
-           "finish bootstrap. (#980)"
+           "finish bootstrap."
      )}
   end
 
@@ -224,7 +224,7 @@ defmodule NeonFS.CLI.Handler.Cluster do
     |> length()
   end
 
-  # Cluster generation (#1005): read straight from Ra state, degrading
+  # Cluster generation: read straight from Ra state, degrading
   # to 0 if the read fails (or Ra isn't up) so `cluster status` never
   # errors on it.
   defp get_generation do

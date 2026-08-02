@@ -161,12 +161,12 @@ if Mix.env() == :test do
 
   config :neonfs_client,
     start_children?: false,
-    # Single-drive test harness: post-#835 the per-volume metadata
+    # Single-drive test harness: the per-volume metadata
     # write path refuses to provision when fewer drives than
     # `min_copies` are available, so the production default of
     # `replicate: factor=3, min_copies=2` breaks every integration
     # test that calls `Volume.new/2` with no explicit durability.
-    # Pre-#835 the global metadata quorum hid this; the migration
+    # The global metadata quorum used to hide this; the migration
     # exposes it.
     default_durability: %{type: :replicate, factor: 1, min_copies: 1}
 

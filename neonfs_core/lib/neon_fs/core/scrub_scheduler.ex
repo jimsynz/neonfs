@@ -134,9 +134,9 @@ defmodule NeonFS.Core.ScrubScheduler do
     state =
       if state.cluster_mode_mod.recovering?() do
         # Routine, staleness-driven scrubs are deferrable: while the cluster
-        # is `:recovering` (#1378), pause them so verification doesn't
-        # saturate a reassembling cluster (#1436). Crash-recovery's
-        # drive-scoped scrub (#1426) is NOT gated here — it must proceed to
+        # is `:recovering`, pause them so verification doesn't
+        # saturate a reassembling cluster. Crash-recovery's
+        # drive-scoped scrub is NOT gated here — it must proceed to
         # clear drives back to `:trusted` and let the cluster exit recovering.
         :telemetry.execute([:neonfs, :scrub_scheduler, :recovering_paused], %{}, %{})
         state

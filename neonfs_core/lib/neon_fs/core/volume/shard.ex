@@ -1,6 +1,6 @@
 defmodule NeonFS.Core.Volume.Shard do
   @moduledoc """
-  Maps a metadata key to one of a volume's fixed root shards (#1307).
+  Maps a metadata key to one of a volume's fixed root shards.
 
   A volume's metadata root is split into `count/0` independent
   copy-on-write shards, each its own CAS pointer in the bootstrap layer.
@@ -12,9 +12,9 @@ defmodule NeonFS.Core.Volume.Shard do
   :metadata_shard_count`, default 64): the key→shard
   mapping must be stable for the life of a deployment, since changing it
   would re-home every key. Growing aggregate throughput is a matter of
-  the per-`{volume, shard}` commit pipeline (#1308), not of changing this
+  the per-`{volume, shard}` commit pipeline, not of changing this
   number. Dynamic shard→node placement / rebalancing is a separate
-  concern (#1306).
+  concern.
 
   The `neonfs_core` unit tests pin the count to 1 (their metadata mock is
   a single store that doesn't model per-shard trees); the integration

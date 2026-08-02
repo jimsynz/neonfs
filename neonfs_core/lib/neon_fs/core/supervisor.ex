@@ -73,10 +73,10 @@ defmodule NeonFS.Core.Supervisor do
   @doc """
   Rebuilds the quorum metadata ring with the current set of core nodes.
 
-  No-op since #792 — the segment-based metadata quorum was retired
+  No-op — the segment-based metadata quorum was retired
   in favour of per-volume index trees on the bootstrap-pointer
   substrate. Membership changes are now handled by the per-volume
-  anti-entropy runner (#921) per drive_locations, not by a global
+  anti-entropy runner per drive_locations, not by a global
   ring rebuild. Kept as an export so callers that haven't been
   audited yet don't crash.
   """
@@ -121,7 +121,7 @@ defmodule NeonFS.Core.Supervisor do
         # Registry for DriveState process naming (must start before BlobStore)
         {Registry, keys: :unique, name: NeonFS.Core.DriveStateRegistry},
 
-        # Per-IP rate limiter for the invite-redemption HTTP endpoint (#1198).
+        # Per-IP rate limiter for the invite-redemption HTTP endpoint.
         # No dependencies; fails open if absent.
         NeonFS.Cluster.RedeemRateLimiter,
 
@@ -158,7 +158,7 @@ defmodule NeonFS.Core.Supervisor do
           {Task.Supervisor, name: NeonFS.Core.BackgroundTaskSupervisor},
 
           # Task.Supervisor whose children are the outstanding background
-          # chunk placements a cluster freeze drains before powering off (#1504)
+          # chunk placements a cluster freeze drains before powering off
           {Task.Supervisor, name: NeonFS.Core.PlacementTaskSupervisor},
 
           # BackgroundWorker provides priority queues and rate limiting
@@ -192,13 +192,13 @@ defmodule NeonFS.Core.Supervisor do
           # VolumeRegistry depends on FileIndex
           NeonFS.Core.VolumeRegistry,
 
-          # MetadataCache for per-volume reads (#822 / part of #816).
+          # MetadataCache for per-volume reads.
           # Owns an ETS table; depends on no other Volume.* state.
           NeonFS.Core.Volume.MetadataCache,
 
           # PendingWriteRecovery opens the pending-write DETS log and
           # reclaims chunks orphaned by interrupted streaming writes
-          # on startup (#296). Must start AFTER ChunkIndex so the
+          # on startup. Must start AFTER ChunkIndex so the
           # recovery sweep can call WriteOperation.abort_chunks/1.
           NeonFS.Core.PendingWriteRecovery,
 
@@ -230,7 +230,7 @@ defmodule NeonFS.Core.Supervisor do
           NeonFS.Core.NamespaceCoordinator,
 
           # DetachedFileGC reclaims POSIX unlink-while-open tombstones
-          # when their last `:pinned` claim releases (#644 of #638).
+          # when their last `:pinned` claim releases.
           # Subscribes to namespace-claim release telemetry; depends
           # on FileIndex (for decrement_pin / purge_detached) and
           # NamespaceCoordinator (which is what emits the telemetry).
@@ -255,11 +255,11 @@ defmodule NeonFS.Core.Supervisor do
 
           # ClusterRecoveryMonitor auto-detects a cold whole-cluster reform
           # and drives the `:recovering` mode that gates the two schedulers
-          # above (#1437).
+          # above.
           NeonFS.Core.ClusterRecoveryMonitor,
 
           # DRSnapshotScheduler takes periodic leader-only DR snapshots of
-          # the full Ra state to the system volume (#1448). Leader-gated and
+          # the full Ra state to the system volume. Leader-gated and
           # runtime-configurable (`:neonfs_core, DRSnapshotScheduler`); reads
           # config itself, so no opts needed here.
           NeonFS.Core.DRSnapshotScheduler,
@@ -298,7 +298,7 @@ defmodule NeonFS.Core.Supervisor do
     # Wrap every child so its start-time emits a telemetry span. Overhead
     # when no handlers are attached is single-digit microseconds per
     # child; worthwhile for operational visibility into supervisor-tree
-    # cold starts (#510). Handlers attached e.g. by
+    # cold starts. Handlers attached e.g. by
     # `NeonFS.Integration.SupervisorStartTimer` in test builds capture
     # per-child durations.
     Enum.map(children_with_ra, &timed/1)

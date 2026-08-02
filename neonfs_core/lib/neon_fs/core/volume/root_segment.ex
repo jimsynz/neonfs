@@ -7,7 +7,7 @@ defmodule NeonFS.Core.Volume.RootSegment do
   bootstrap reads of the volume's metadata trees:
 
   - Cluster identity (`cluster_id`, `cluster_name`) — for crash-recovery
-    of the bootstrap layer (#779) and to refuse to mount a volume whose
+    of the bootstrap layer and to refuse to mount a volume whose
     chunks belong to a different cluster.
   - Versions (`format_version`, `created_by_neonfs_version`,
     `last_written_by_neonfs_version`, `on_disk_format_version`).
@@ -17,7 +17,7 @@ defmodule NeonFS.Core.Volume.RootSegment do
     StripeIndex tree roots within the volume.
   - Per-volume schedules for GC, scrub, and anti-entropy.
 
-  The bootstrap layer (#779) holds the chunk hash of the *current*
+  The bootstrap layer holds the chunk hash of the *current*
   root segment for each volume; reading the volume goes:
 
       bootstrap layer → root chunk hash → root segment → index tree roots
@@ -28,7 +28,7 @@ defmodule NeonFS.Core.Volume.RootSegment do
   chunk hash is the commit point. This module handles the encode /
   decode / validation half of that flow; the BlobStore round-trip and
   bootstrap-layer pointer swap live in the read/write path sub-issues
-  (#784, #785) and the bootstrap layer (#779).
+  and the bootstrap layer.
 
   ## Wire format
 
@@ -68,7 +68,7 @@ defmodule NeonFS.Core.Volume.RootSegment do
   - `schedules` — per-volume cadence for GC / scrub / anti-entropy.
   - `shard` — the shard index (`0..count-1`) this segment's root belongs
     to, stamped on the first write that diverges the shard from the
-    shared empty root (#1313). `nil` on the provision-time empty segment,
+    shared empty root. `nil` on the provision-time empty segment,
     which is content-addressed-shared by every shard — so a fresh
     volume's 64 shards all point at one `shard: nil` chunk. Reconstruction
     uses this to recover per-shard identity from disk: a `shard: n`
@@ -206,7 +206,7 @@ defmodule NeonFS.Core.Volume.RootSegment do
   `{:error, {:unsupported_format_version, version}}` for a future-
   version blob; the caller is expected to surface this to the operator
   rather than attempt an in-place upgrade (per the no-migration design
-  call on epic #750).
+  design call).
   """
   @spec decode(binary()) :: {:ok, t()} | {:error, decode_error()}
   def decode(bin) when is_binary(bin) do

@@ -42,7 +42,7 @@ defmodule NeonFS.Core.RaServer do
 
   The reply itself is a constant-time state read, so the call has no
   inherent work bound. The default 5s GenServer call timeout was
-  flaking under runner contention (#766) when an `:init_cluster` /
+  flaking under runner contention when an `:init_cluster` /
   `:join_cluster` call (each up to 60s) was already in the mailbox —
   callers like `ServiceRegistry.maybe_ra_command/2` would crash and
   invalidate every test in `setup_all`. `:infinity` lets the
@@ -63,7 +63,7 @@ defmodule NeonFS.Core.RaServer do
 
   A `true` result means this node was previously part of a cluster and is
   returning — the signal `NeonFS.Core.ClusterRecoveryMonitor` uses to tell
-  a cold whole-cluster reform from a first-time cluster formation (#1437).
+  a cold whole-cluster reform from a first-time cluster formation.
   """
   @spec auto_restarted?() :: boolean()
   def auto_restarted? do
@@ -98,7 +98,7 @@ defmodule NeonFS.Core.RaServer do
   end
 
   @doc """
-  Operator-invoked quorum recovery from a surviving minority (#473).
+  Operator-invoked quorum recovery from a surviving minority.
 
   Snapshot-extracts the local Ra replica's state, force-deletes the
   Ra server (and its log), and rebootstraps a fresh single-node
@@ -645,7 +645,7 @@ defmodule NeonFS.Core.RaServer do
   # `{:error, {:badrpc, {:EXIT, {:badarg, …}}}}` a closed dets produces,
   # so the exception escapes and kills this GenServer along with
   # whoever called it. A server that went down with its application is
-  # already in the state these calls are trying to reach (#1611).
+  # already in the state these calls are trying to reach.
   defp tolerate_ra_down(fun) do
     fun.()
   rescue
@@ -689,7 +689,7 @@ defmodule NeonFS.Core.RaServer do
     end
   end
 
-  # ─── Force-reset helpers (#473) ────────────────────────────────────
+  # ─── Force-reset helpers ────────────────────────────────────
 
   @doc """
   Strip every reference to a departed node out of an extracted Ra
@@ -700,7 +700,7 @@ defmodule NeonFS.Core.RaServer do
   registry) and `segment_assignments` (per-segment replica sets) in
   particular. Carrying entries from departed nodes through the
   rebootstrap leaves the new cluster trying to query / replicate
-  to nodes that no longer exist, surfacing as #688's symptom: Ra
+  to nodes that no longer exist, surfacing as: Ra
   starts but the gen_statem can't reach a stable state because
   every observer probe fails.
 

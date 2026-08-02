@@ -14,7 +14,7 @@ defmodule NeonFS.Core.Drive.Identity do
     the local cluster. Same rationale.
 
   This file is also part of the **reconstruction invariant** for the
-  per-volume-metadata epic (#750): walking every drive's identity file
+  per-volume-metadata epic: walking every drive's identity file
   is what lets the cluster rebuild its bootstrap-layer Ra state from
   on-disk truth alone.
 

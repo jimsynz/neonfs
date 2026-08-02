@@ -1,6 +1,6 @@
 defmodule NeonFS.Core.DriveTrust do
   @moduledoc """
-  Read/write facade over the per-drive trust state (#1375) in
+  Read/write facade over the per-drive trust state in
   `NeonFS.Core.MetadataStateMachine`.
 
   A replica is `:trusted` (the default) or `:unverified` — *present but
@@ -11,8 +11,8 @@ defmodule NeonFS.Core.DriveTrust do
 
   Only `:unverified` drives are stored, keyed `{node, drive_id}`, so the
   table is empty in steady state. This module is the mechanism; the
-  producers that mark drives `:unverified` (node return → #1376, crash
-  marker → #1380) and the consumers that act on it (durability maths,
+  producers that mark drives `:unverified` (node return, crash marker)
+  and the consumers that act on it (durability maths,
   verify-on-read) build on this facade. The table lives in Ra consensus,
   not here.
   """
@@ -43,7 +43,7 @@ defmodule NeonFS.Core.DriveTrust do
   @doc """
   Marks **all** of `node`'s currently-registered drives `:unverified` in
   one Ra command — the "node implies its drives" path for a node
-  returning from a planned reboot (#1376). Each drive clears back to
+  returning from a planned reboot. Each drive clears back to
   `:trusted` independently as it verifies.
   """
   @spec mark_node_unverified(node()) :: :ok | {:error, term()}

@@ -89,7 +89,7 @@ defmodule NeonFS.Core.DriveManager do
     # 60 s rather than the default 5 s — inner operations (BlobStore.open_store,
     # the bootstrap-layer Ra writes) already pass `:infinity`, and on real
     # hardware the first add_drive after `RaServer.init_cluster()` can land in
-    # the leader-settle window, blowing the 5 s budget (#980).
+    # the leader-settle window, blowing the 5 s budget.
     GenServer.call(__MODULE__, {:add_drive, config}, 60_000)
   end
 
@@ -118,7 +118,7 @@ defmodule NeonFS.Core.DriveManager do
   @spec remove_drive(String.t(), keyword()) :: :ok | {:error, term()}
   def remove_drive(drive_id, opts \\ []) do
     # Same 60 s budget as `add_drive/1` — the inner data-presence check can be
-    # slow on large drives (#980).
+    # slow on large drives.
     GenServer.call(__MODULE__, {:remove_drive, drive_id, opts}, 60_000)
   end
 
@@ -128,8 +128,7 @@ defmodule NeonFS.Core.DriveManager do
   Runs the same shape, path-exists, and path-writable checks as
   `add_drive/1`, but with no side effects. Cluster bootstrap calls
   this *before* persisting cluster state or starting Ra so a
-  read-only drive path fails fast and leaves the daemon untouched
-  (#1012).
+  read-only drive path fails fast and leaves the daemon untouched.
 
   Returns `:ok` on success or `{:error, reason}` with a
   human-readable string explaining the failure.
@@ -143,8 +142,7 @@ defmodule NeonFS.Core.DriveManager do
   end
 
   @doc """
-  Registers every locally-managed drive in the Ra bootstrap layer
-  (#779).
+  Registers every locally-managed drive in the Ra bootstrap layer.
 
   Drives configured at startup land in `DriveRegistry`'s ETS table
   before Ra is up, so they never make it into the bootstrap layer
@@ -189,12 +187,12 @@ defmodule NeonFS.Core.DriveManager do
   end
 
   @doc """
-  Reacts to how a drive presented itself at open (#1426). A `:dirty`
+  Reacts to how a drive presented itself at open. A `:dirty`
   drive (one that came back from an unclean shutdown) is marked
   `:unverified` — so it stops counting toward `min_copies` and reads
-  verify-on-read (#1375) — and a drive-scoped scrub (#1429) is queued to
-  verify it at high priority; on a clean clear it returns to `:trusted`
-  (#1427). `:clean` and `:fresh` drives need nothing.
+  verify-on-read — and a drive-scoped scrub is queued to
+  verify it at high priority; on a clean clear it returns to `:trusted`.
+  `:clean` and `:fresh` drives need nothing.
 
   The `:mark_fn` and `:scrub_fn` deps are injectable for tests; they
   default to `DriveTrust.mark_unverified/2` and a drive-scoped
@@ -286,7 +284,7 @@ defmodule NeonFS.Core.DriveManager do
           drive: drive_to_event_map(drive)
         })
 
-        # A drive added at runtime may itself be returning dirty (#1426) —
+        # A drive added at runtime may itself be returning dirty —
         # Ra is already up here, so react immediately.
         recover_drive(drive.id, Map.get(BlobStore.drive_open_states(), drive.id))
 
@@ -358,21 +356,21 @@ defmodule NeonFS.Core.DriveManager do
   end
 
   # Mirrors the ETS register_drive into the Ra-replicated bootstrap
-  # layer (#779). During multi-node cluster formation the joining
+  # layer. During multi-node cluster formation the joining
   # node's `:register_drive` command can transiently fail (`:noproc`,
   # leadership in flux, a command timeout) before Ra settles; a bounded
   # retry closes that window rather than silently dropping the drive
   # from the bootstrap layer, where `Volume.Provisioner` and the
-  # create-time durability gate (#1032) would never see it (#1102).
+  # create-time durability gate would never see it.
   # Still best-effort after the retries are exhausted — the ETS write
-  # is the source of truth and anti-entropy / #809 reconciles — but the
+  # is the source of truth and anti-entropy reconciles — but the
   # give-up is surfaced via telemetry rather than a silent single-shot.
   # Cluster-critical data — the CA key, cluster identity, serial and CRL —
   # lives on `_system`, whose replication factor used to track core-node
   # count alone. A single-core cluster therefore kept exactly one copy of
   # it however many drives were attached, so "add a drive for resilience"
-  # bought none for the data whose loss is unrecoverable (#1617, the
-  # enabling condition behind #1573). Raise the factor with the drive
+  # bought none for the data whose loss is unrecoverable. Raise the
+  # factor with the drive
   # count instead, capped at 3 — past that the extra copies cost more
   # than they buy for a volume this small.
   #
@@ -646,7 +644,7 @@ defmodule NeonFS.Core.DriveManager do
   end
 
   # Removal abandons whatever is on the drive, so it is guarded on what
-  # would survive rather than on `drive_has_data?` alone (#1618). `:force`
+  # would survive rather than on `drive_has_data?` alone. `:force`
   # reaches the guard rather than skipping it: it overrides a
   # below-`min_copies` finding, but not `_system` being left with no
   # surviving copy.
@@ -720,13 +718,13 @@ defmodule NeonFS.Core.DriveManager do
   # Marking a drive `:unverified` is a Ra command, so the boot-time
   # reaction waits until Ra has a leader, then reacts to every drive that
   # opened dirty. Retries on a fixed interval until Ra is ready or the
-  # retry budget runs out (#1426).
+  # retry budget runs out.
   defp attempt_dirty_drive_recovery(attempt) do
     cond do
       RaServer.initialized?() ->
         react_to_dirty_drives()
         # If this node was cordoned and came back clean (or its drives have
-        # already cleared), resume immediately (#1420).
+        # already cleared), resume immediately.
         attempt_auto_uncordon()
 
       attempt < @dirty_recovery_max_retries ->
@@ -741,11 +739,11 @@ defmodule NeonFS.Core.DriveManager do
     end
   end
 
-  # Auto-uncordon (#1420): a node that was cordoned for maintenance
+  # Auto-uncordon: a node that was cordoned for maintenance
   # resumes on its own once it's back and its drives are trusted again —
   # zero operator step on the happy path. A clean reboot's drives are
   # already `:trusted` (so it resumes immediately); a dirty one's drives
-  # clear once their scoped scrub passes (#1426/#1427), and the
+  # clear once their scoped scrub passes, and the
   # `set_drive_trust` telemetry re-drives this check as each clears.
   defp attempt_auto_uncordon do
     if auto_uncordon?(NodeRegistry.status(Node.self()), local_drive_unverified?()) do
@@ -774,8 +772,8 @@ defmodule NeonFS.Core.DriveManager do
 
   @auto_uncordon_handler_id "neonfs-drive-manager-auto-uncordon"
 
-  # React to a local drive clearing back to `:trusted` (#1427) by
-  # re-checking whether this cordoned node can now resume (#1420). The
+  # React to a local drive clearing back to `:trusted` by
+  # re-checking whether this cordoned node can now resume. The
   # captured pid makes a post-restart stale handler a harmless no-op (a
   # cast to a dead pid is dropped); init re-attaches fresh.
   defp attach_trust_telemetry do

@@ -125,7 +125,7 @@ defmodule NeonFS.Core.Replication do
       copies_by_node = Enum.frequencies_by(exclude, fn {node, _drive_id} -> node end)
 
       # Keep new replicas off drives that are present-but-not-durable-yet
-      # (#1375) — a returning node mid-resync or a crash-recovered drive
+      # — a returning node mid-resync or a crash-recovered drive
       # mid-scrub. Fetch the (normally empty) unverified set once rather
       # than querying per drive; a transient Ra hiccup degrades to "no
       # exclusions" so placement never hard-fails on it.
@@ -153,13 +153,13 @@ defmodule NeonFS.Core.Replication do
   regardless of the volume's `write_ack` policy.
 
   This is the per-chunk primitive behind the `sync_file` durability
-  barrier (#1500). `replicate_chunk/4`'s `:local` path is
+  barrier. `replicate_chunk/4`'s `:local` path is
   fire-and-forget — it returns after the local copy before the extra
   replicas land — so it cannot be used to *wait* for durability. This
   function always blocks until `min_copies` durable replicas exist or
   the placement fails.
 
-  Only `:trusted` replicas count toward `min_copies` (#1375): a
+  Only `:trusted` replicas count toward `min_copies`: a
   present-but-unverified copy — a returning node mid-resync or a
   crash-recovered drive mid-scrub — is ignored so the barrier is not
   satisfied by a replica still being verified.

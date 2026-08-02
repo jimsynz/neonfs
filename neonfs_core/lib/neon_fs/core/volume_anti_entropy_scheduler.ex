@@ -1,6 +1,6 @@
 defmodule NeonFS.Core.VolumeAntiEntropyScheduler do
   @moduledoc """
-  Per-volume anti-entropy scheduler (#921). Mirrors
+  Per-volume anti-entropy scheduler. Mirrors
   `NeonFS.Core.VolumeScrubScheduler` / `NeonFS.Core.VolumeGCScheduler`.
 
   On every tick the scheduler walks `VolumeRegistry.list/0`, reads

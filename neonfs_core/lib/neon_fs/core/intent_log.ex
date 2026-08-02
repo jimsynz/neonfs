@@ -18,7 +18,7 @@ defmodule NeonFS.Core.IntentLog do
 
   Cross-shard atomicity comes from consensus instead — a single Ra command
   that validates every participating shard's expected root and flips them
-  all or none (#1589). Treat this module as concurrency control only.
+  all or none. Treat this module as concurrency control only.
 
   ## Conflict Key Types
 
@@ -68,7 +68,7 @@ defmodule NeonFS.Core.IntentLog do
   A caller that treats unavailability as acquisition proceeds with nothing
   serialising it against a concurrent writer on another node, which is
   exactly the situation a lease exists to prevent and exactly when it is
-  most likely (#1631). Callers decide what to do without the lease; they
+  most likely. Callers decide what to do without the lease; they
   must not be told they hold one.
   """
   @spec try_acquire(Intent.t()) ::

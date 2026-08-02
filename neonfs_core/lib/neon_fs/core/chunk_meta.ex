@@ -2,7 +2,7 @@ defmodule NeonFS.Core.ChunkMeta do
   @moduledoc """
   Chunk metadata structure tracking everything about a chunk across the cluster.
 
-  Per the design call on #874, chunks carry the **set** of volumes that
+  Per the design call, chunks carry the **set** of volumes that
   pin them (`volume_ids`) rather than a single owning volume — this
   restores cross-volume content-addressed dedup while still letting
   per-volume background runners look up a representative `volume_id`

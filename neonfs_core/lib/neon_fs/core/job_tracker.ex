@@ -89,7 +89,7 @@ defmodule NeonFS.Core.JobTracker do
   connected to returns `:not_found` for a job owned by a peer. This checks
   the local DETS first, then fans out to the other connected core nodes
   (mirroring `list_cluster/1`), so `neonfs job show` / `--wait` resolve a
-  job regardless of which core the CLI reached (#1575).
+  job regardless of which core the CLI reached.
   """
   @spec get_cluster(String.t()) :: {:ok, Job.t()} | {:error, :not_found}
   def get_cluster(job_id) when is_binary(job_id) do
@@ -310,7 +310,7 @@ defmodule NeonFS.Core.JobTracker do
   # failure. Leave the job resumable (`resume_incomplete_jobs/1` only picks up
   # :running / :pending) so it continues after restart instead of being
   # abandoned as terminal `:failed`, and log at :info rather than burning it as
-  # an error (#1268).
+  # an error.
   defp handle_step_error(reason, job) do
     if Job.interrupted_by_shutdown?(reason) do
       interrupted = %{job | status: :pending, updated_at: DateTime.utc_now()}

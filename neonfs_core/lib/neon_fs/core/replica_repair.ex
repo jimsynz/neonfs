@@ -5,19 +5,18 @@ defmodule NeonFS.Core.ReplicaRepair do
   replicas via `Replication.replicate_chunk/4`; over-replicated
   chunks have the excess deleted via `BlobStore.delete_chunk/3`.
   Exactly-replicated chunks are skipped. Only `:trusted` replicas count
-  toward the target — `:unverified` ones (#1375) are excluded from the
+  toward the target — `:unverified` ones are excluded from the
   durability maths.
 
-  This is the data-plane primitive for the replica-repair worker
-  (issue #687). The Job-runner integration, periodic scheduler,
+  This is the data-plane primitive for the replica-repair worker.
+  The Job-runner integration, periodic scheduler,
   membership-change auto-trigger, CLI surface, and peer-cluster
-  integration test all land in dependent sub-issues
-  (#707 / #708 / #709 / #710).
+  integration test all land in dependent sub-issues.
 
   ## Resumability
 
   `repair_volume/2` accepts a `:cursor` option (an integer offset
-  into the volume's chunk list) so the runner from #707 can drive
+  into the volume's chunk list) so the runner can drive
   the walk in batched cycles without monopolising the
   BackgroundWorker pool. The returned `:next_cursor` is either a
   resumable offset or `:done`.
@@ -128,7 +127,7 @@ defmodule NeonFS.Core.ReplicaRepair do
     %{acc | errors: [{hash, reason} | acc.errors]}
   end
 
-  # Only `:trusted` replicas count toward durability (#1375). A
+  # Only `:trusted` replicas count toward durability. A
   # present-but-not-durable-yet copy — a returning node mid-resync or a
   # crash-recovered drive mid-scrub — is excluded from the count, so an
   # under-replicated chunk isn't masked by an unverified replica, and an
@@ -201,7 +200,7 @@ defmodule NeonFS.Core.ReplicaRepair do
   # can prefer drives in `:draining` / `:failed` state, then
   # least-recently-accessed — `select_replication_targets/3` already
   # has the hooks for the inverse direction. Out of scope per
-  # issue #687.
+
   defp pick_excess_replicas(locations, count), do: Enum.take(locations, count)
 
   # The `{node, drive_id}` set of replicas that don't count toward
