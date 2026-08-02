@@ -1,7 +1,7 @@
 # The metadata mock (`build_mock_metadata_*_opts`) is a single ETS store
 # that doesn't model per-shard index trees, so unit tests run at one shard
 # (behaviour-identical to pre-sharding). True N-shard distribution is
-# exercised by the integration suite (#1312).
+# exercised by the integration suite.
 Application.put_env(:neonfs_core, :metadata_shard_count, 1)
 
 # The FileIndex flush routes each volume's commit to this stateless worker
@@ -32,7 +32,7 @@ Mimic.copy(NeonFS.Core.StripeIndex)
 Mimic.copy(NeonFS.Transport.Listener)
 Mimic.copy(NeonFS.Transport.PoolManager)
 
-# Exclude `:benchmark` tests by default (e.g. #1481's blob-NIF throughput
+# Exclude `:benchmark` tests by default (e.g. the blob-NIF throughput
 # baseline) — they print throughput numbers and take a while. Run one with
 # `mix test path/to/bench_test.exs --include benchmark`.
 ExUnit.start(capture_log: true, exclude: [:benchmark])

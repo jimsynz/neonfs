@@ -1,7 +1,7 @@
 defmodule NeonFS.Core.BlobStore.CodecTest do
   @moduledoc """
   Unit tests for the pure codec-resolution helpers extracted from
-  `NeonFS.Core.BlobStore` in #1207.
+  `NeonFS.Core.BlobStore`.
   """
 
   use ExUnit.Case, async: true

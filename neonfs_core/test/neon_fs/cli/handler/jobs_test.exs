@@ -15,7 +15,7 @@ defmodule NeonFS.CLI.Handler.JobsTest do
   ]
 
   describe "job_runners/0" do
-    test "discovers every shipped Job.Runner, including ReplicaRepair (#1580)" do
+    test "discovers every shipped Job.Runner, including ReplicaRepair" do
       runners = Jobs.job_runners()
 
       for mod <- @shipped_runners do
@@ -29,7 +29,7 @@ defmodule NeonFS.CLI.Handler.JobsTest do
   end
 
   describe "runner_for_label/1" do
-    test "resolves replica-repair to ReplicaRepair (#1580)" do
+    test "resolves replica-repair to ReplicaRepair" do
       assert Jobs.runner_for_label("replica-repair") == Runners.ReplicaRepair
     end
 

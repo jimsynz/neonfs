@@ -105,9 +105,9 @@ defmodule NeonFS.Core.Volume.MetadataWriterRootSetTest do
     assert map_size(published) == 1
   end
 
-  # ── Fault injection at the commit boundaries (#1633) ────────────────────
+  # ── Fault injection at the commit boundaries ────────────────────
   #
-  # #1589's acceptance bar. Each of these injects a failure at one boundary
+  # The cross-shard acceptance bar. Each of these injects a failure at one boundary
   # and asserts the property the atomic root set is supposed to give: a
   # reader sees all-old or all-new, never a subset.
 

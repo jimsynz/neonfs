@@ -10,7 +10,7 @@ defmodule NeonFS.Core.NamespaceCoordinatorTest do
   # These `assert_receive`s wait on spawned processes acquiring a claim via a
   # GenServer call. The default 100ms is far too tight, and even a one-second
   # budget flaked when a contended CI runner took ~2× normal to schedule the
-  # spawned process (#1507). Size the readiness budget for a loaded runner —
+  # spawned process. Size the readiness budget for a loaded runner —
   # the assertions are about ordering, not latency.
   @receive_timeout 5_000
 
@@ -207,7 +207,7 @@ defmodule NeonFS.Core.NamespaceCoordinatorTest do
   end
 
   # `claim_create/2` is the namespace-coordinator primitive for
-  # atomic create-if-not-exist (sub-issue #591 of #303). It pins the
+  # atomic create-if-not-exist. It pins the
   # path as `:exclusive :create`, reports `{:error, %AlreadyExists{}}` when
   # another `claim_create` already holds the same path (so callers can
   # map directly to `EEXIST` / `PreconditionFailed` / `AlreadyExists`),
@@ -308,7 +308,7 @@ defmodule NeonFS.Core.NamespaceCoordinatorTest do
   end
 
   # `claim_pinned/2` is the namespace-coordinator primitive for handle-
-  # pinned files — sub-issue #637 of #306 (POSIX unlink-while-open).
+  # pinned files (POSIX unlink-while-open).
   # Multiple pins on the same path coexist (each open `fd` is a
   # separate pin); a pin only conflicts with a covering `:exclusive`
   # claim. Holder lifetime ties pin lifetime, so a crashed FUSE peer
@@ -436,7 +436,7 @@ defmodule NeonFS.Core.NamespaceCoordinatorTest do
   end
 
   # `claim_rename/3` is the namespace-coordinator primitive for atomic
-  # cross-directory rename — sub-issue #304. The two paths must be
+  # cross-directory rename. The two paths must be
   # pinned together (no half-claimed window) and the destination must
   # not sit inside the source's own subtree.
   describe "claim_rename/3" do
@@ -553,7 +553,7 @@ defmodule NeonFS.Core.NamespaceCoordinatorTest do
   # `NeonFS.Client.Router.call/4`): the RPC handler `self()` would die
   # the moment the call returns and take every claim with it. Explicit
   # holder lets callers pass a long-lived pid on their own node so the
-  # coordinator monitors something stable. See sub-issue #301.
+  # coordinator monitors something stable.
   describe "claim_path_for/4 / claim_subtree_for/4" do
     test "monitors the explicit holder pid, not the caller", %{server: server} do
       parent = self()
@@ -602,9 +602,9 @@ defmodule NeonFS.Core.NamespaceCoordinatorTest do
   end
 
   # Release telemetry carries enough context for downstream subscribers
-  # (e.g. the unlink-while-open detached-file GC, #644) to identify
+  # (e.g. the unlink-while-open detached-file GC) to identify
   # which tombstones a release affects without re-querying the state
-  # machine. Sub-issue #642 of #306.
+  # machine.
   describe "release telemetry metadata" do
     test "release_namespace_claim emits claim_path / claim_type / claim_holder",
          %{server: server} do
@@ -722,7 +722,7 @@ defmodule NeonFS.Core.NamespaceCoordinatorTest do
     end
   end
 
-  describe "claim_byte_range/4 (#673)" do
+  describe "claim_byte_range/4" do
     test "returns a claim id on first claim", %{server: server} do
       assert {:ok, "ns-claim-" <> _} =
                NamespaceCoordinator.claim_byte_range(server, "/file", {0, 100}, :exclusive)
@@ -864,7 +864,7 @@ defmodule NeonFS.Core.NamespaceCoordinatorTest do
     end
   end
 
-  describe "query_byte_range/4 (#673)" do
+  describe "query_byte_range/4" do
     test "returns :unlocked when no byte-range claim covers the range",
          %{server: server} do
       assert {:ok, :unlocked} =
@@ -899,7 +899,7 @@ defmodule NeonFS.Core.NamespaceCoordinatorTest do
     end
   end
 
-  describe "claim_byte_range_wait/4 (#679)" do
+  describe "claim_byte_range_wait/4" do
     test "no conflict: returns {:ok, claim_id} like the non-blocking variant",
          %{server: server} do
       assert {:ok, "ns-claim-" <> _} =
@@ -997,7 +997,7 @@ defmodule NeonFS.Core.NamespaceCoordinatorTest do
         end)
 
       # Wait for A to register its waiter before spawning B, so the FIFO
-      # order under test is deterministic (was a fixed `Process.sleep`, #1208).
+      # order under test is deterministic (was a fixed `Process.sleep`).
       assert_receive :a_queued, @receive_timeout
 
       task_b =
@@ -1040,7 +1040,7 @@ defmodule NeonFS.Core.NamespaceCoordinatorTest do
     end
   end
 
-  describe "cancel_wait/2 (#679)" do
+  describe "cancel_wait/2" do
     test "cancelling a queued waiter prevents the signal from firing",
          %{server: server} do
       parent = self()
@@ -1087,7 +1087,7 @@ defmodule NeonFS.Core.NamespaceCoordinatorTest do
     end
   end
 
-  describe "wait queue and waiter death (#679)" do
+  describe "wait queue and waiter death" do
     test "waiter pid death drops the wait entry without firing a signal",
          %{server: server} do
       parent = self()

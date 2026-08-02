@@ -166,7 +166,7 @@ defmodule NeonFS.Core.Job.Runners.VolumeAntiEntropyTest do
     end
   end
 
-  describe "step/1 — index-tree page enumeration (#955 / #999)" do
+  describe "step/1 — index-tree page enumeration" do
     test "tree-page hash present on every drive_location → no repair" do
       stub(ChunkIndex, :get_chunks_for_volume, fn @volume_id -> [] end)
 

@@ -3,7 +3,7 @@ defmodule NeonFS.IO.PriorityTest do
 
   alias NeonFS.IO.Priority
 
-  test ":metadata_commit is a valid class weighted below user_read and above user_write (#1305)" do
+  test ":metadata_commit is a valid class weighted below user_read and above user_write" do
     assert Priority.valid?(:metadata_commit)
     assert :metadata_commit in Priority.all()
 

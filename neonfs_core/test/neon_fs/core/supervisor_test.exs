@@ -19,7 +19,7 @@ defmodule NeonFS.Core.SupervisorTest do
       assert NeonFS.Core.ChunkIndex in child_ids
       assert NeonFS.Core.FileIndex in child_ids
       assert NeonFS.Core.VolumeRegistry in child_ids
-      # DR snapshots are taken by a supervised, leader-gated scheduler (#1448).
+      # DR snapshots are taken by a supervised, leader-gated scheduler.
       assert NeonFS.Core.DRSnapshotScheduler in child_ids
     end
 

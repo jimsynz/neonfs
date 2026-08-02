@@ -9,12 +9,12 @@ defmodule NeonFS.Core.BlobStorePropertyTest do
 
   # Each property runs ~100 synchronous compress/encrypt writes. These finish
   # in seconds locally but can exceed ExUnit's default 60s per-test timeout on
-  # a heavily contended CI runner, flaking the suite (#1394). Raise the
+  # a heavily contended CI runner, flaking the suite. Raise the
   # per-test budget — the assertions are about correctness, not latency.
   @moduletag timeout: 120_000
 
   # The default 5s `GenServer.call` timeout is too tight on a heavily contended
-  # CI runner (#1132), so give every call generous headroom too.
+  # CI runner, so give every call generous headroom too.
   @call_timeout 30_000
 
   setup %{tmp_dir: tmp_dir} do
@@ -23,7 +23,7 @@ defmodule NeonFS.Core.BlobStorePropertyTest do
     # Register the tmp-dir cleanup *before* start_supervised so it runs
     # *after* the BlobStore is stopped (on_exit callbacks fire LIFO). If it
     # ran first, `File.rm_rf!` would race the still-alive server flushing
-    # chunks into the directory and fail with `:eexist` (#1507).
+    # chunks into the directory and fail with `:eexist`.
     on_exit(fn -> File.rm_rf!(tmp_dir) end)
 
     server = :"blob_prop_#{System.unique_integer([:positive, :monotonic])}"
@@ -113,7 +113,7 @@ defmodule NeonFS.Core.BlobStorePropertyTest do
               max_runs: 100
             ) do
         # Write with key_a and the same nonce. Since encrypted chunks live
-        # at a nonce-derived codec suffix on disk (issue #270), writing
+        # at a nonce-derived codec suffix on disk, writing
         # with key_b + same nonce overwrites the file in place. The test
         # verifies that the resulting ciphertext really did change by
         # attempting to decrypt with the old key — it must now fail.

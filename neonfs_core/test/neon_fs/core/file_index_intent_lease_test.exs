@@ -1,6 +1,6 @@
 defmodule NeonFS.Core.FileIndexIntentLeaseTest do
   @moduledoc """
-  The conflict lease must fail closed (#1631).
+  The conflict lease must fail closed.
 
   `FileIndex` used to wrap `IntentLog.try_acquire/1` in a helper that
   returned `{:ok, intent.id}` — a **fabricated** id — whenever Ra was

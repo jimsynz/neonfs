@@ -23,7 +23,7 @@ defmodule NeonFS.Core.AuthoriseTest do
 
   # Owner-only mode (no world bits) by default, so a non-owner/non-entry
   # principal is genuinely denied — named `entries` still grant via POSIX.1e
-  # precedence. Pass `mode: 0o777` for the world-writable cases (#1339).
+  # precedence. Pass `mode: 0o777` for the world-writable cases.
   defp setup_acl(volume_id, owner_uid, owner_gid, entries \\ [], mode \\ 0o700) do
     acl =
       VolumeACL.new(
@@ -59,7 +59,7 @@ defmodule NeonFS.Core.AuthoriseTest do
   end
 
   describe "check/3 no ACL" do
-    test "a volume with no ACL is world-accessible (#1339)" do
+    test "a volume with no ACL is world-accessible" do
       # No stored ACL → world-writable default, so POSIX governs per object
       # and the volume is gated at the interface boundary, rather than a
       # hard deny that made fresh volumes unusable over NFS.

@@ -69,7 +69,7 @@ defmodule NeonFS.Core.ClusterModeTest do
                    1_000
   end
 
-  describe "frozen write gate (#1438)" do
+  describe "frozen write gate" do
     test "`NeonFS.Core` reflects the frozen mode via cluster_frozen?/0" do
       refute Core.cluster_frozen?()
       assert :ok = ClusterMode.set_mode(:frozen)

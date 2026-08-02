@@ -141,7 +141,7 @@ defmodule NeonFS.Core.Job.Runners.ScrubTest do
     end
   end
 
-  describe "step/1 — drive-scoped scrub (#1426)" do
+  describe "step/1 — drive-scoped scrub" do
     test "scrubs only the named local drive's chunks" do
       {:ok, vol} = VolumeRegistry.create("scrub-drive-scope", [])
       {:ok, _file} = WriteOperation.write_file_streamed(vol.id, "/d.txt", ["drive scoped data"])
@@ -167,7 +167,7 @@ defmodule NeonFS.Core.Job.Runners.ScrubTest do
       assert updated.state.corruption_count > 0
     end
 
-    test "a clean drive-scoped scrub clears the drive back to :trusted (#1427)" do
+    test "a clean drive-scoped scrub clears the drive back to :trusted" do
       # DriveTrust is Ra-backed; the mock metadata layer doesn't serve it.
       start_ra()
       :ok = RaServer.init_cluster()
@@ -183,7 +183,7 @@ defmodule NeonFS.Core.Job.Runners.ScrubTest do
       refute DriveTrust.unverified?(node(), "default")
     end
 
-    test "a drive-scoped scrub that finds corruption leaves the drive :unverified (#1427)" do
+    test "a drive-scoped scrub that finds corruption leaves the drive :unverified" do
       start_ra()
       :ok = RaServer.init_cluster()
 

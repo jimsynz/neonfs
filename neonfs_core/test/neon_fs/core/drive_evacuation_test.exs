@@ -124,7 +124,7 @@ defmodule NeonFS.Core.DriveEvacuationTest do
     end
   end
 
-  describe "replica guard (#1618)" do
+  describe "replica guard" do
     setup do
       # A single-copy chunk pinned to drive1, so evacuating drive1 would
       # leave the volume with no fallback if the migration failed.
@@ -251,7 +251,7 @@ defmodule NeonFS.Core.DriveEvacuationTest do
       assert updated_job.progress.completed >= 0
     end
 
-    test "classifies chunks via authoritative metadata when the ETS cache is cold (#1573)" do
+    test "classifies chunks via authoritative metadata when the ETS cache is cold" do
       ensure_cluster_state()
 
       {:ok, volume} =
@@ -291,7 +291,7 @@ defmodule NeonFS.Core.DriveEvacuationTest do
       refute "drive1" in drive_ids
     end
 
-    test "caches the authoritative tracked-chunk set in job state (#1578)" do
+    test "caches the authoritative tracked-chunk set in job state" do
       ensure_cluster_state()
 
       {:ok, volume} =
@@ -319,7 +319,7 @@ defmodule NeonFS.Core.DriveEvacuationTest do
       assert Map.has_key?(updated.state.tracked_chunks, hash)
     end
 
-    test "reuses the cached tracked set instead of rescanning (#1578)" do
+    test "reuses the cached tracked set instead of rescanning" do
       # No volume is registered, so a fresh scan would find no volumes and
       # classify the on-disk chunk as untracked. Seeding the cache proves the
       # step honours it rather than rescanning: the chunk migrates as tracked
@@ -349,7 +349,7 @@ defmodule NeonFS.Core.DriveEvacuationTest do
     end
 
     test "completes when no chunks remain" do
-      # Finalisation verifies against Ra (#1628); with no volume roots to
+      # Finalisation verifies against Ra; with no volume roots to
       # rewrite and nothing referencing the drive, all three checks pass.
       Mimic.stub(RaSupervisor, :local_query, fn _fun -> {:ok, %{}} end)
 
@@ -429,7 +429,7 @@ defmodule NeonFS.Core.DriveEvacuationTest do
     end
   end
 
-  describe "finalisation safety (#1628)" do
+  describe "finalisation safety" do
     test "a volume root that could not be rewritten blocks deregistration" do
       # A root still naming drive1, and a Ra command that rejects the rewrite.
       Mimic.stub(RaSupervisor, :local_query, fn _fun ->
@@ -458,7 +458,7 @@ defmodule NeonFS.Core.DriveEvacuationTest do
 
     test "a stale chunk.locations entry blocks deregistration" do
       # Nothing to rewrite, drive is empty on disk, but a volume's
-      # authoritative chunk metadata still names it — the #1573 shape.
+      # authoritative chunk metadata still names it.
       Mimic.stub(RaSupervisor, :local_query, fn _fun -> {:ok, %{}} end)
 
       Mimic.stub(VolumeRegistry, :list, fn _opts ->
@@ -557,7 +557,7 @@ defmodule NeonFS.Core.DriveEvacuationTest do
   # A drive left `:draining` had no way back: `restore_active/2` existed but
   # its only caller was `on_cancel/1`, which a terminal job never reaches
   # (`JobTracker` answers `:already_terminal`). The drive kept serving reads,
-  # took no writes, and refused a retry with `:already_draining` (#1634).
+  # took no writes, and refused a retry with `:already_draining`.
   describe "resume_drive/2" do
     test "returns a draining drive to active" do
       DriveRegistry.update_state("drive1", :draining)

@@ -6,7 +6,7 @@ defmodule NeonFS.Core.DetachedFileGCTest do
 
   # Synchronise with the asynchronous DetachedFileGC handler. Telemetry
   # is forwarded to the GenServer's mailbox so the handler doesn't run
-  # inline on the Ra apply path (#904); after firing an event, calling
+  # inline on the Ra apply path; after firing an event, calling
   # `:sys.get_state/1` flushes the mailbox by serialising behind any
   # in-flight `handle_info/2`.
   defp sync_gc, do: :sys.get_state(DetachedFileGC)

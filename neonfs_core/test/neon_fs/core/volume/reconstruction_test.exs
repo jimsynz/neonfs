@@ -177,7 +177,7 @@ defmodule NeonFS.Core.Volume.ReconstructionTest do
       assert result.volumes["vol-a"][nil].hash == new_hash
     end
 
-    test "restores diverged shards by their recorded index and fills the rest from the empty chunk (#1313)" do
+    test "restores diverged shards by their recorded index and fills the rest from the empty chunk" do
       identity = sample_identity("drv-1")
 
       # An empty (shard: nil) provision chunk shared by un-diverged shards,
@@ -235,7 +235,7 @@ defmodule NeonFS.Core.Volume.ReconstructionTest do
       assert drive_ids == ["drv-a", "drv-b"]
     end
 
-    test ":dry_run? still populates the result struct (#855)" do
+    test ":dry_run? still populates the result struct" do
       identity = sample_identity("drv-1")
       segment = sample_segment("vol-a")
 

@@ -53,7 +53,7 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
     end
   end
 
-  describe "drive trust state (#1375)" do
+  describe "drive trust state" do
     test "absent drive defaults to :trusted" do
       assert MetadataStateMachine.drive_trust(base_state(), :n1@host, "d1") == :trusted
       assert MetadataStateMachine.unverified_drives(base_state()) == []
@@ -1525,7 +1525,7 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
     end
   end
 
-  describe "cas_update_volume_root command (CAS for #830)" do
+  describe "cas_update_volume_root command (CAS)" do
     test "applies the update when expected_previous_hash matches" do
       entry = %{
         volume_id: "vol-1",
@@ -1827,7 +1827,7 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
     end
   end
 
-  describe "snapshot commands (#960)" do
+  describe "snapshot commands" do
     defp snapshot_entry(volume_id, opts) do
       %{
         id: Keyword.get(opts, :id, "snap-#{System.unique_integer([:positive])}"),
@@ -1964,7 +1964,7 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
     end
   end
 
-  describe "node lifecycle commands (#1323)" do
+  describe "node lifecycle commands" do
     test "set_node_status upserts an entry and bumps version" do
       {state, :ok, []} =
         MetadataStateMachine.apply(%{}, {:set_node_status, :node1@host, :draining}, base_state())
@@ -2013,7 +2013,7 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
       assert MetadataStateMachine.draining_nodes(state) == MapSet.new([:a@host, :c@host])
     end
 
-    test "set_node_status accepts :maintenance (#1376)" do
+    test "set_node_status accepts :maintenance" do
       {state, :ok, []} =
         MetadataStateMachine.apply(
           %{},
@@ -2024,7 +2024,7 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
       assert MetadataStateMachine.get_node(state, :node1@host).status == :maintenance
     end
 
-    test "maintenance_nodes returns only the maintenance set, distinct from draining (#1376)" do
+    test "maintenance_nodes returns only the maintenance set, distinct from draining" do
       state =
         base_state()
         |> apply_ok({:set_node_status, :a@host, :maintenance})
@@ -2035,7 +2035,7 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
       assert MetadataStateMachine.draining_nodes(state) == MapSet.new([:b@host])
     end
 
-    test "excluded_nodes unions draining and maintenance, omitting active/joining (#1376)" do
+    test "excluded_nodes unions draining and maintenance, omitting active/joining" do
       state =
         base_state()
         |> apply_ok({:set_node_status, :a@host, :draining})
@@ -2071,7 +2071,7 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
     new_state
   end
 
-  describe "bulk_restore command (#1005)" do
+  describe "bulk_restore command" do
     test "merges entries into each cluster-wide keyspace and bumps version" do
       keyspaces = [
         :volumes,
@@ -2147,7 +2147,7 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
     end
   end
 
-  describe "generation counter (#1005)" do
+  describe "generation counter" do
     test "bump_generation increments and returns the new value" do
       assert {state, {:ok, 1}, []} =
                MetadataStateMachine.apply(%{}, :bump_generation, base_state())

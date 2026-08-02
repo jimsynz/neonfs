@@ -3,7 +3,7 @@ defmodule NeonFS.Core.CommitChunksTest do
   Unit tests for `NeonFS.Core.CommitChunks`, the write-side counterpart to
   `read_file_refs`.
 
-  The tests simulate the "interface-side chunking" flow from #408 by
+  The tests simulate the "interface-side chunking" flow by
   writing chunks straight into the local `BlobStore` (standing in for a
   remote `Router.data_call(:put_chunk, …)`) and then driving
   `commit_chunks/4` with the resulting hashes. The reconcile and commit

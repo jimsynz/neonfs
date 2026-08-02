@@ -177,7 +177,7 @@ defmodule NeonFS.Core.ScrubSchedulerTest do
                        %{job_id: _, volume_id: "vol-1"}}
     end
 
-    test "pauses routine scrubs while the cluster is `:recovering` (#1436)" do
+    test "pauses routine scrubs while the cluster is `:recovering`" do
       MockVolumeRegistry.set_volumes([make_volume("vol-1")])
 
       ref =

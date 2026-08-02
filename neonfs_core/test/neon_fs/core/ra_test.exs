@@ -192,7 +192,7 @@ defmodule NeonFS.Core.RaTest do
   # its global ETS/dets state between cases, so a reset can land while
   # Ra's dets-backed directory is closed. The server the reset wants
   # gone went with the application — that must read as "already clean",
-  # not as a crash that takes the caller's test with it (#1611).
+  # not as a crash that takes the caller's test with it.
   describe "reset! with the :ra application stopped" do
     setup do
       :ok = Application.stop(:ra)

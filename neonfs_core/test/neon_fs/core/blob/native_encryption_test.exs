@@ -210,7 +210,7 @@ defmodule NeonFS.Core.Blob.NativeEncryptionTest do
 
       # The old variant is left on disk — the re-encrypt NIF no longer deletes
       # it, so a concurrent read never hits a dangling path before the metadata
-      # nonce swaps (#1266). It stays readable with the old key until the caller
+      # nonce swaps. It stays readable with the old key until the caller
       # deletes it explicitly.
       assert {:ok, ^data} =
                Native.store_read_chunk_with_options(

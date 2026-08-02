@@ -154,7 +154,7 @@ defmodule NeonFS.Core.Volume.DriveSelectorTest do
     end
   end
 
-  describe "select_replicas/3 — exclude_nodes (#1323)" do
+  describe "select_replicas/3 — exclude_nodes" do
     test "drops drives on draining nodes before selecting" do
       drives =
         for node <- [:n1@h, :n2@h, :n3@h], do: drive(node, "drv")

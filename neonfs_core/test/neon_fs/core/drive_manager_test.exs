@@ -64,7 +64,7 @@ defmodule NeonFS.Core.DriveManagerTest do
     # Start DriveManager
     start_supervised!(DriveManager)
 
-    # No VolumeRegistry here, so the #1618 replica guard would read an
+    # No VolumeRegistry here, so the replica guard would read an
     # absent ETS table. An empty volume list is the honest model for this
     # setup: drives exist, volumes don't, so nothing is at risk. The guard
     # runs inside the GenServer, so the stub needs allowing through to it.
@@ -90,7 +90,7 @@ defmodule NeonFS.Core.DriveManagerTest do
     end
   end
 
-  describe "register_local_drives_in_bootstrap/0 retry (#1102)" do
+  describe "register_local_drives_in_bootstrap/0 retry" do
     setup do
       Application.put_env(:neonfs_core, :bootstrap_register_backoff_ms, 0)
       on_exit(fn -> Application.delete_env(:neonfs_core, :bootstrap_register_backoff_ms) end)
@@ -127,9 +127,9 @@ defmodule NeonFS.Core.DriveManagerTest do
 
   # Cluster-critical data lives on `_system`, whose factor used to track
   # core-node count alone — so drives bought capacity and no redundancy
-  # for the CA key (#1617). These assert the drive-count scaling, its cap,
+  # for the CA key. These assert the drive-count scaling, its cap,
   # and that it stays best-effort.
-  describe "system volume replication scaling (#1617)" do
+  describe "system volume replication scaling" do
     setup do
       {:ok, requested} = Agent.start_link(fn -> [] end)
 
@@ -333,7 +333,7 @@ defmodule NeonFS.Core.DriveManagerTest do
       assert message =~ "Path exists but is not a directory"
     end
 
-    test "writes \`.neonfs-drive.json\` identity file (#778)", %{tmp_dir: tmp_dir} do
+    test "writes \`.neonfs-drive.json\` identity file", %{tmp_dir: tmp_dir} do
       new_path = Path.join(tmp_dir, "new_with_identity")
       File.mkdir_p!(new_path)
 
@@ -350,7 +350,7 @@ defmodule NeonFS.Core.DriveManagerTest do
       assert identity.on_disk_format_version == 1
     end
 
-    test "refuses to add a drive whose identity names a foreign cluster (#778)",
+    test "refuses to add a drive whose identity names a foreign cluster",
          %{tmp_dir: tmp_dir} do
       foreign_path = Path.join(tmp_dir, "foreign_drive")
       File.mkdir_p!(foreign_path)
@@ -457,7 +457,7 @@ defmodule NeonFS.Core.DriveManagerTest do
     end
   end
 
-  describe "remove_drive/2 replica guard (#1618)" do
+  describe "remove_drive/2 replica guard" do
     setup %{tmp_dir: tmp_dir} do
       new_path = Path.join(tmp_dir, "sole_copy")
       File.mkdir_p!(new_path)
@@ -529,7 +529,7 @@ defmodule NeonFS.Core.DriveManagerTest do
     end
   end
 
-  describe "auto-uncordon (#1420)" do
+  describe "auto-uncordon" do
     test "auto_uncordon?/2: a :maintenance node with no unverified drive resumes" do
       assert DriveManager.auto_uncordon?(:maintenance, false)
       refute DriveManager.auto_uncordon?(:maintenance, true)
@@ -577,7 +577,7 @@ defmodule NeonFS.Core.DriveManagerTest do
     end
   end
 
-  describe "recover_drive/3 (#1426)" do
+  describe "recover_drive/3" do
     test "a :dirty drive is marked :unverified and a drive-scoped scrub is queued" do
       test = self()
       mark_fn = fn node, drive_id -> send(test, {:marked, node, drive_id}) && :ok end

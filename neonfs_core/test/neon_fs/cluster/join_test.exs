@@ -48,7 +48,7 @@ defmodule NeonFS.Cluster.JoinTest do
       {:ok, cluster_info} = Join.accept_join(token1, :fuse_peer@localhost, :fuse, fuse_csr)
 
       # Advertised peers include the accepting (bootstrap) node and exclude the
-      # joining node, so the joiner records every other node and never itself (#1060).
+      # joining node, so the joiner records every other node and never itself.
       peer_names = Enum.map(cluster_info.known_peers, & &1.name)
       assert Atom.to_string(Node.self()) in peer_names
       refute "fuse_peer@localhost" in peer_names
@@ -101,7 +101,7 @@ defmodule NeonFS.Cluster.JoinTest do
     end
   end
 
-  describe "accept_join/4 replication-adjustment resilience (#1154)" do
+  describe "accept_join/4 replication-adjustment resilience" do
     test "core join survives a GenServer.call timeout from the adjustment" do
       {:ok, token} = Invite.create_invite(3600)
       key = TLS.generate_node_key()
@@ -124,7 +124,7 @@ defmodule NeonFS.Cluster.JoinTest do
   end
 
   describe "add_known_peer/1" do
-    test "adds a peer, is idempotent, and never records this node (#1060/#1061)" do
+    test "adds a peer, is idempotent, and never records this node" do
       peer = %{id: "p1", name: :"peer@10.0.0.9", last_seen: DateTime.utc_now(), dist_port: 9100}
 
       assert :ok = Join.add_known_peer(peer)

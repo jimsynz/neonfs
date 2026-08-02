@@ -1,6 +1,6 @@
 defmodule NeonFS.Core.Job.Runners.ReplicaRepairTest do
   @moduledoc """
-  Unit tests for `NeonFS.Core.Job.Runners.ReplicaRepair` (#707).
+  Unit tests for `NeonFS.Core.Job.Runners.ReplicaRepair`.
   Stubs `NeonFS.Core.ReplicaRepair.repair_volume/2` via the
   `:replica_repair_mod` Application env so the runner is exercised
   in isolation.

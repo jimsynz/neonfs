@@ -78,7 +78,7 @@ defmodule NeonFS.TestCase do
   @doc """
   Bootstraps a fully-provisioned single-node cluster on top of `tmp_dir`.
 
-  Pre-#1008 the lighter `start_core_subsystems/0` brought up the storage
+  The lighter `start_core_subsystems/0` brings up the storage
   modules with their ETS-stub metadata readers/writers, so writes
   round-tripped through fakes and no `volume_root` ever landed in Ra.
   This helper instead starts each index module with empty
@@ -93,7 +93,7 @@ defmodule NeonFS.TestCase do
 
   Use this from tests that exercise snapshots, GC, DR restore, or
   anything else that needs metadata to flow through the real per-volume
-  tree — `#985`, `#995`, `#1005` and the snapshot-export E2E all stall
+  tree — the GC, CSI, DR-restore and snapshot-export E2E tests all stall
   on this helper not existing.
 
   ## Options
@@ -393,7 +393,7 @@ defmodule NeonFS.TestCase do
         shared_metadata_index_opts()
       end
 
-    # The real conflict lease needs Ra and fails closed without it (#1631);
+    # The real conflict lease needs Ra and fails closed without it;
     # index unit tests inject an always-granting stub unless they are
     # specifically exercising lease behaviour.
     opts = Keyword.put_new(opts, :intent_log, NeonFS.TestSupport.StubIntentLog)
@@ -410,7 +410,7 @@ defmodule NeonFS.TestCase do
   # ChunkIndex, FileIndex and StripeIndex all persist into the *same*
   # per-volume index trees in production (chunk / file / dirent / stripe
   # keys are prefix-namespaced within one RootSegment). The write-path
-  # transaction (#1304) folds chunk-meta commits into the FileIndex
+  # transaction folds chunk-meta commits into the FileIndex
   # batch, so the indexes must share one backing store in tests too —
   # otherwise a chunk-meta committed through FileIndex's committer would
   # be invisible to `ChunkIndex.get/2`. One store per test process,
@@ -595,7 +595,7 @@ defmodule NeonFS.TestCase do
   # The mock store's ETS table is owned by the test process. During ExUnit
   # teardown that process dies — deleting the table — before the supervised
   # index GenServer that writes through these closures is stopped, so a late
-  # {:put, …} / {:delete, …} can land here after the table is gone (#1067).
+  # {:put, …} / {:delete, …} can land here after the table is gone.
   defp mock_store_insert(store, record) do
     :ets.insert(store, record)
   rescue
@@ -720,7 +720,7 @@ defmodule NeonFS.TestCase do
   # thing that is already slow. Same shape as
   # `NeonFS.TestSupport.ClusterCase.wait_until/2`, which cannot be reused here
   # — `neonfs_test_support` depends on `neonfs_core`, so the dependency cannot
-  # run the other way (#1664).
+  # run the other way.
   defp do_register_service!(info, deadline_at, interval) do
     case ServiceRegistry.register(info) do
       :ok ->
@@ -740,7 +740,7 @@ defmodule NeonFS.TestCase do
   @doc """
   Starts ServiceRegistry.
 
-  ServiceRegistry is Ra-backed since #349, so callers must start Ra
+  ServiceRegistry is Ra-backed, so callers must start Ra
   (via `start_ra/0` + `RaServer.init_cluster/0`) before invoking this
   helper.
   """
@@ -944,7 +944,7 @@ defmodule NeonFS.TestCase do
   initialised cluster, and the `NamespaceCoordinator` GenServer.
 
   Required by any test that deletes a file through `NeonFS.Core` —
-  since #1605 an unlink refuses to run when it can't establish the
+  an unlink refuses to run when it can't establish the
   file's pin state, and an absent coordinator is exactly that.
   """
   def start_namespace_coordination do

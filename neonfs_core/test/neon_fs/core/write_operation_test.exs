@@ -271,7 +271,7 @@ defmodule NeonFS.Core.WriteOperationTest do
       # resolves differently between batch (size-aware: fixed/256KB for
       # 100KB) and streamed (always fastcdc with content-defined cuts),
       # so `:auto` on both sides produces non-identical chunk sets for
-      # random payloads. See #329.
+      # random payloads.
       strategy = {:fixed, 32_768}
       data = :crypto.strong_rand_bytes(100_000)
 
@@ -324,7 +324,7 @@ defmodule NeonFS.Core.WriteOperationTest do
     end
   end
 
-  # `create_only: true` (sub-issue #592 of #303) is the atomic
+  # `create_only: true` is the atomic
   # create-if-not-exist option used by `O_EXCL`,
   # WebDAV `If-None-Match: *`, S3 `If-None-Match: *`, etc. The
   # cross-node coordination story is exercised in the peer-cluster
@@ -385,12 +385,12 @@ defmodule NeonFS.Core.WriteOperationTest do
       assert latest.size == 9
     end
 
-    test "offset writes to an existing file update volume stats (#1036)", %{volume: volume} do
+    test "offset writes to an existing file update volume stats", %{volume: volume} do
       {:ok, _} = WriteOperation.write_file_streamed(volume.id, "/grow.bin", ["seed"])
       {:ok, before} = VolumeRegistry.get(volume.id)
 
       # Append past the end — exercises the do_write_at path, which previously
-      # left volume stats at their pre-write values (#1036).
+      # left volume stats at their pre-write values.
       {:ok, _} = WriteOperation.write_file_at(volume.id, "/grow.bin", 4, "appended-data")
       {:ok, after_write} = VolumeRegistry.get(volume.id)
 
@@ -400,13 +400,13 @@ defmodule NeonFS.Core.WriteOperationTest do
     end
   end
 
-  # #1501: a `write_ack: :quorum` / `:all` volume promises `min_copies`
+  # A `write_ack: :quorum` / `:all` volume promises `min_copies`
   # durable replicas on ack. With only the single default drive registered
   # in this test env, a `factor: 2` volume can never place a second replica,
   # so those writes must fail rather than report success while holding one
   # copy. `:local` deliberately acks after the local copy (background best
   # effort), so it still succeeds.
-  describe "write-ack durability contract (#1501)" do
+  describe "write-ack durability contract" do
     test "quorum write fails when min_copies cannot be met" do
       vol_name = "quorum-#{:rand.uniform(999_999)}"
 
@@ -937,7 +937,7 @@ defmodule NeonFS.Core.WriteOperationTest do
 
       # Read raw bytes from disk (without decryption) and confirm they
       # differ from input. Reach into the on-disk file directly because the
-      # codec-aware read path (#270) would attempt decryption.
+      # codec-aware read path would attempt decryption.
       blob_dir = Application.get_env(:neonfs_core, :blob_store_base_dir)
 
       for chunk_hash <- file_meta.chunks do
@@ -1022,7 +1022,7 @@ defmodule NeonFS.Core.WriteOperationTest do
 
       append_data = " More data."
 
-      # Before the fix for issue #110, this crashed with {:else_clause, nil}
+      # Before the fix, this crashed with {:else_clause, nil}
       # because ChunkFetcher.fetch_chunk/2 returns a 3-tuple {:ok, data, source}
       # but callers pattern-matched on 2-tuple {:ok, _}
       assert {:ok, updated_meta} =
@@ -1233,7 +1233,7 @@ defmodule NeonFS.Core.WriteOperationTest do
 
     test "write_file_streamed rejects even with a narrow lock range (conservative full-file check)",
          %{volume: volume} do
-      # Regression for #374: a mandatory lock at bytes 50-100 previously did not
+      # Regression: a mandatory lock at bytes 50-100 previously did not
       # block streamed writes because write_file_streamed/4 passed {0, 0} to
       # check_lock, which never overlaps any finite range.
       lock_file_id = WriteOperation.lock_file_id(volume.id, "/stream-narrow.txt")

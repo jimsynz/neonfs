@@ -90,10 +90,10 @@ defmodule NeonFS.Core.ServiceRegistryTest do
     :sys.get_state(ServiceRegistry)
 
     assert {:ok, _} = ServiceRegistry.get(Node.self(), :core),
-           "the local core service must survive a spurious self-nodedown (#1049)"
+           "the local core service must survive a spurious self-nodedown"
   end
 
-  test "list/0 stamps :draining on services whose node is draining (#1324)" do
+  test "list/0 stamps :draining on services whose node is draining" do
     register_service!(ServiceInfo.new(Node.self(), :core))
     :ok = NodeRegistry.set_status(Node.self(), :draining)
 
@@ -344,7 +344,7 @@ defmodule NeonFS.Core.ServiceRegistryTest do
   # The endpoint chain used to stop after 60 tries, leaving the node
   # registered but with no `:data_endpoint` for the rest of its uptime — no
   # client reports it unreachable, and no peer can open a data-plane pool to
-  # it (#1674).
+  # it.
   describe "the data-plane endpoint retry" do
     test "keeps polling well past the old 60-attempt bound" do
       registry = Process.whereis(ServiceRegistry)
@@ -422,7 +422,7 @@ defmodule NeonFS.Core.ServiceRegistryTest do
                    2_000
   end
 
-  test "list/0 stamps :maintenance on services whose node is cordoned (#1376)" do
+  test "list/0 stamps :maintenance on services whose node is cordoned" do
     register_service!(ServiceInfo.new(Node.self(), :core))
     :ok = NodeRegistry.set_status(Node.self(), :maintenance)
 

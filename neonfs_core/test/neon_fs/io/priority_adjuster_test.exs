@@ -136,8 +136,8 @@ defmodule NeonFS.IO.PriorityAdjusterTest do
 
   # Deadlines in this file only bound scheduling latency — the adjuster's
   # 50 ms check_interval keeps the happy path fast, but a loaded CI runner
-  # can take seconds to start the GenServer and complete its first cycle
-  # (#1147). Generous timeouts cost nothing when the suite is healthy.
+  # can take seconds to start the GenServer and complete its first
+  # cycle. Generous timeouts cost nothing when the suite is healthy.
   defp collect_dispatched(count, timeout \\ 5_000) do
     Enum.map(1..count, fn _ ->
       assert_receive {:dispatched, op}, timeout

@@ -171,7 +171,7 @@ defmodule NeonFS.Core.TierMigrationTest do
     # killed the migration outright, after the target copy was written and
     # verified and before `cleanup_source/1`, so the `with`'s rollback never
     # ran and the caller saw only a dead task. `DriveSpaceTest`'s
-    # tier-eviction case has been doing this while reporting green (#1693).
+    # tier-eviction case has been doing this while reporting green.
     test "an exiting ChunkIndex update fails the migration instead of killing it",
          %{chunk_hash: hash} do
       Mimic.stub(ChunkIndex, :update_locations, fn _hash, _locations ->

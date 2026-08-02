@@ -55,8 +55,7 @@ defmodule NeonFS.Core.BlobStoreTest do
       assert info.compression == "zstd:3"
 
       # Read without decompression returns compressed data. The compression
-      # type must be passed so the reader resolves to the codec-suffixed file
-      # (issue #270).
+      # type must be passed so the reader resolves to the codec-suffixed file.
       assert {:ok, compressed} =
                BlobStore.read_chunk(hash, "default",
                  tier: "hot",
@@ -189,7 +188,7 @@ defmodule NeonFS.Core.BlobStoreTest do
 
       # After delete, drive must report empty — empty prefix dirs left
       # behind by `delete_chunk` would otherwise mask the empty state
-      # and trip `check_drive_has_data` (#753).
+      # and trip `check_drive_has_data`.
       assert {:ok, false} = BlobStore.drive_has_data?("default", server: test_server())
 
       # Belt-and-braces: nothing should remain under blobs/hot besides
@@ -641,7 +640,7 @@ defmodule NeonFS.Core.BlobStoreTest do
     end
   end
 
-  describe "drive clean/dirty lifecycle (#1426)" do
+  describe "drive clean/dirty lifecycle" do
     test "fresh drive is :fresh; a graceful shutdown reopens :clean", %{tmp_dir: tmp_dir} do
       dir = Path.join(tmp_dir, "lifecycle_clean")
       File.mkdir_p!(dir)

@@ -1,6 +1,6 @@
 defmodule NeonFS.Core.ReplicaAuditTest do
   @moduledoc """
-  Unit tests for `NeonFS.Core.ReplicaAudit` (#1618) — the pre-flight
+  Unit tests for `NeonFS.Core.ReplicaAudit` — the pre-flight
   replica guard behind `drive evacuate` / `drive remove`, and the
   under-replication report that shares its traversal.
 

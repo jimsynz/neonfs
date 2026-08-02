@@ -1,12 +1,12 @@
 defmodule NeonFS.ProvisionedClusterDemoTest do
   @moduledoc """
-  Demonstration test for the `#1008` provisioned-cluster helpers in
+  Demonstration test for the provisioned-cluster helpers in
   `NeonFS.TestCase`. Exercises the chain
   `start_provisioned_cluster/2` → `create_provisioned_volume/2` →
   `WriteOperation.write_file_streamed/3` → `Snapshot.create/2` →
   `MetadataReader.range/5` (at the snapshot root) → `Core.read_file_stream/2`,
-  i.e. every step the GC E2E (`#985`), CSI kind-cluster (`#995`), and DR
-  restore (`#1005`) integration tests need.
+  i.e. every step the GC, CSI kind-cluster and DR-restore integration
+  tests need.
 
   Stays in `neonfs_core/test/` rather than `neonfs_integration/`
   because no peer cluster is involved — the value is to give future
@@ -39,7 +39,7 @@ defmodule NeonFS.ProvisionedClusterDemoTest do
         durability: %{type: :replicate, factor: 1, min_copies: 1}
       )
 
-    payload = "hello from #1008 provisioned helpers"
+    payload = "hello from the provisioned helpers"
 
     {:ok, _meta} =
       WriteOperation.write_file_streamed(volume.id, "/greeting.txt", [payload])

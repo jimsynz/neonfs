@@ -212,7 +212,7 @@ defmodule NeonFS.CLI.HandlerTest do
     end
   end
 
-  describe "node drain / undrain (#1325)" do
+  describe "node drain / undrain" do
     setup %{tmp_dir: tmp_dir} do
       configure_test_dirs(tmp_dir)
       stop_ra()
@@ -255,7 +255,7 @@ defmodule NeonFS.CLI.HandlerTest do
     end
   end
 
-  describe "handle_replica_status/0 (#1618)" do
+  describe "handle_replica_status/0" do
     setup %{tmp_dir: tmp_dir} do
       configure_test_dirs(tmp_dir)
       stop_ra()
@@ -306,7 +306,7 @@ defmodule NeonFS.CLI.HandlerTest do
     end
   end
 
-  describe "node cordon / uncordon (#1376)" do
+  describe "node cordon / uncordon" do
     setup %{tmp_dir: tmp_dir} do
       configure_test_dirs(tmp_dir)
       stop_ra()
@@ -347,7 +347,7 @@ defmodule NeonFS.CLI.HandlerTest do
       assert NodeRegistry.status(Node.self()) == :active
     end
 
-    test "cordon-stop-check refuses stopping the only member (quorum) (#1417)" do
+    test "cordon-stop-check refuses stopping the only member (quorum)" do
       node_str = Atom.to_string(Node.self())
 
       assert {:ok, result} = Handler.handle_cordon_stop_check(node_str)
@@ -357,7 +357,7 @@ defmodule NeonFS.CLI.HandlerTest do
     end
   end
 
-  describe "cluster freeze / thaw (#1439)" do
+  describe "cluster freeze / thaw" do
     setup %{tmp_dir: tmp_dir} do
       configure_test_dirs(tmp_dir)
       stop_ra()
@@ -426,7 +426,7 @@ defmodule NeonFS.CLI.HandlerTest do
 
     test "freeze succeeds (snapshot unavailable) when the DR scheduler isn't running" do
       # Default snapshot path with no DRSnapshotScheduler process — a freeze
-      # must not crash on the best-effort snapshot step (#1440 regression).
+      # must not crash on the best-effort snapshot step.
       assert {:ok, result} = ClusterRecovery.handle_cluster_freeze(settle_ms: 0)
       assert result.status == "frozen"
       assert result.snapshot == "unavailable"
@@ -730,7 +730,7 @@ defmodule NeonFS.CLI.HandlerTest do
     test "parses replicate:3 durability string" do
       vol_name = "rep-vol-#{:rand.uniform(999_999)}"
       # Single-node test cluster — `allow_under_replicated` bypasses
-      # the safety gate added for #1015.
+      # the under-replication safety gate.
       config = %{"durability" => "replicate:3", "allow_under_replicated" => true}
       assert {:ok, volume} = Handler.create_volume(vol_name, config)
       assert volume.durability == %{type: :replicate, factor: 3, min_copies: 2}
@@ -847,7 +847,7 @@ defmodule NeonFS.CLI.HandlerTest do
       assert msg =~ "allow-under-replicated"
     end
 
-    test "allows replicate:2 on a single node with two drives (#1032)" do
+    test "allows replicate:2 on a single node with two drives" do
       register_extra_drive("hot1")
 
       vol_name = "two-drive-#{:rand.uniform(999_999)}"
@@ -857,7 +857,7 @@ defmodule NeonFS.CLI.HandlerTest do
       assert volume.durability == %{type: :replicate, factor: 2, min_copies: 1}
     end
 
-    test "gate counts drives, not core nodes (#1032)" do
+    test "gate counts drives, not core nodes" do
       register_extra_drive("hot1")
       register_extra_drive("hot2")
 
@@ -991,7 +991,7 @@ defmodule NeonFS.CLI.HandlerTest do
     end
   end
 
-  describe "mount/3 FUSE node routing (#1358)" do
+  describe "mount/3 FUSE node routing" do
     setup %{tmp_dir: tmp_dir} do
       configure_test_dirs(tmp_dir)
       ensure_cluster_state()
@@ -1044,7 +1044,7 @@ defmodule NeonFS.CLI.HandlerTest do
       assert {:mount, :neonfs_fuse@remote} in calls
     end
 
-    test "routes to a FUSE node on the mounting client's host, ignoring local preference (#1359)" do
+    test "routes to a FUSE node on the mounting client's host, ignoring local preference" do
       # Local FUSE would normally win, but the operator's host owns the
       # mount point — the client-supplied host must beat local preference.
       start_supervised!(%{
@@ -1059,7 +1059,7 @@ defmodule NeonFS.CLI.HandlerTest do
       refute Enum.any?(calls, fn {_op, node} -> node == Node.self() end)
     end
 
-    test "falls back to default discovery when the client host matches no FUSE node (#1359)" do
+    test "falls back to default discovery when the client host matches no FUSE node" do
       start_supervised!(%{
         id: :local_mount_manager,
         start: {Agent, :start_link, [fn -> nil end, [name: NeonFS.FUSE.MountManager]]}
@@ -1072,7 +1072,7 @@ defmodule NeonFS.CLI.HandlerTest do
       refute Enum.any?(calls, fn {_op, node} -> node == :neonfs_fuse@remote end)
     end
 
-    test "forwards allow_other / allow_root flags to the FUSE node (#1574)" do
+    test "forwards allow_other / allow_root flags to the FUSE node" do
       start_supervised!(%{
         id: :local_mount_manager,
         start: {Agent, :start_link, [fn -> nil end, [name: NeonFS.FUSE.MountManager]]}
@@ -1086,7 +1086,7 @@ defmodule NeonFS.CLI.HandlerTest do
       refute Keyword.has_key?(opts, :allow_root)
     end
 
-    test "omits mount flags when not requested (#1574)" do
+    test "omits mount flags when not requested" do
       start_supervised!(%{
         id: :local_mount_manager,
         start: {Agent, :start_link, [fn -> nil end, [name: NeonFS.FUSE.MountManager]]}
@@ -1135,7 +1135,7 @@ defmodule NeonFS.CLI.HandlerTest do
     end
   end
 
-  describe "NFS exports as cluster state (#1175)" do
+  describe "NFS exports as cluster state" do
     setup %{tmp_dir: tmp_dir} do
       configure_test_dirs(tmp_dir)
       ensure_cluster_state()
@@ -1159,7 +1159,7 @@ defmodule NeonFS.CLI.HandlerTest do
       assert volume.nfs_export
     end
 
-    test "nfs_export defaults root-squash on; no_root_squash disables it (#1216)",
+    test "nfs_export defaults root-squash on; no_root_squash disables it",
          %{vol_name: vol_name} do
       assert {:ok, info} = Handler.nfs_export(vol_name)
       assert info.root_squash == true
@@ -1489,7 +1489,7 @@ defmodule NeonFS.CLI.HandlerTest do
       :ok
     end
 
-    test "renders an unreachable registered node as offline instead of crashing (#1138)" do
+    test "renders an unreachable registered node as offline instead of crashing" do
       unreachable = :neonfs_core_unreachable@localhost
       register_service!(ServiceInfo.new(unreachable, :core))
       register_service!(ServiceInfo.new(Node.self(), :core))
@@ -1848,7 +1848,7 @@ defmodule NeonFS.CLI.HandlerTest do
              end)
     end
 
-    test "default mode + --no-wait runs orchestrator end-to-end (#926)" do
+    test "default mode + --no-wait runs orchestrator end-to-end" do
       # Stub the RPC layer — the orchestrator dispatches `install_node_cert`,
       # `regenerate_ca_bundle`, and `reload_listener` to every node in the
       # BEAM cluster. In a unit test the cluster is a single node (self),
@@ -1893,7 +1893,7 @@ defmodule NeonFS.CLI.HandlerTest do
       refute :cluster_ca_rotate_failed in events
     end
 
-    test "default mode (no --no-wait) stops at pending-finalize for the grace window (#927)" do
+    test "default mode (no --no-wait) stops at pending-finalize for the grace window" do
       stub_mod = NeonFS.CLI.HandlerTest.RPCStub
       Application.put_env(:neonfs_core, :ca_rotate_rpc_mod, stub_mod)
 
@@ -1928,7 +1928,7 @@ defmodule NeonFS.CLI.HandlerTest do
       refute :cluster_ca_rotate_finalized in events
     end
 
-    test "--node <name> retries the rolling reissue against a single node (#927)" do
+    test "--node <name> retries the rolling reissue against a single node" do
       stub_mod = NeonFS.CLI.HandlerTest.RPCStub
       Application.put_env(:neonfs_core, :ca_rotate_rpc_mod, stub_mod)
 
@@ -1958,14 +1958,14 @@ defmodule NeonFS.CLI.HandlerTest do
       assert :reload_listener in called_funs
     end
 
-    test "--node <name> with no rotation staged returns a clear error (#927)" do
+    test "--node <name> with no rotation staged returns a clear error" do
       assert {:error, %NeonFS.Error.Invalid{message: msg}} =
                Handler.handle_ca_rotate(%{"node" => "node1@host"})
 
       assert msg =~ "no CA rotation in progress"
     end
 
-    test "default mode emits :cluster_ca_rotate_failed when an RPC fails (#926)" do
+    test "default mode emits :cluster_ca_rotate_failed when an RPC fails" do
       stub_mod = NeonFS.CLI.HandlerTest.FailingRPCStub
       Application.put_env(:neonfs_core, :ca_rotate_rpc_mod, stub_mod)
 

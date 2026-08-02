@@ -102,7 +102,7 @@ defmodule NeonFS.Core.Volume.ChunkReplicatorTest do
       # would block on the first writer and the second :writer_started
       # message would never arrive. The receive windows only bound
       # scheduling latency, so they are generous to survive loaded CI
-      # runners (#1144); the writer's self-exit hatch must stay longer than
+      # runners; the writer's self-exit hatch must stay longer than
       # the assert windows so a sequential implementation fails the assert,
       # not the hatch.
       writer = fn _data, drive_id, _tier, _opts ->

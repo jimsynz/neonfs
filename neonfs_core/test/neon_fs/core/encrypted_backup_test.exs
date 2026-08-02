@@ -1,6 +1,6 @@
 defmodule NeonFS.Core.EncryptedBackupTest do
   @moduledoc """
-  At-rest encrypted backups (#1004): an encrypted export wraps a
+  At-rest encrypted backups: an encrypted export wraps a
   per-archive content key under the passphrase, frames each file body
   with AES-256-GCM, and keeps the manifest plaintext. Import with the
   passphrase reproduces content byte-for-byte; a wrong/missing

@@ -180,7 +180,7 @@ defmodule NeonFS.Core.DRSnapshotTest do
     end
   end
 
-  describe "export/2 and import_snapshot/1 (#1367)" do
+  describe "export/2 and import_snapshot/1" do
     setup %{tmp_dir: tmp_dir} do
       configure_test_dirs(tmp_dir)
       stop_ra()

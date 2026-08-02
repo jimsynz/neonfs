@@ -1,9 +1,9 @@
 defmodule NeonFS.Core.Blob.NativeThroughputBenchTest do
   @moduledoc """
-  Opt-in blob-NIF throughput + dirty-scheduler saturation benchmark (#1481).
+  Opt-in blob-NIF throughput + dirty-scheduler saturation benchmark.
 
-  #1197 mandates measuring the blob NIFs before committing to the full
-  tokio async rework (#1480). This harness drives `store_write_chunk` /
+  Measures the blob NIFs before committing to the full tokio async
+  rework. This harness drives `store_write_chunk` /
   `store_read_chunk` directly against `NeonFS.Core.Blob.Native` — no
   cluster, no metadata layer — at varying caller concurrency against a
   single drive and across multiple drives, and reports:
@@ -18,17 +18,17 @@ defmodule NeonFS.Core.Blob.NativeThroughputBenchTest do
 
       mix test test/neon_fs/core/blob/native_throughput_bench_test.exs --include benchmark
 
-  ## Quantifying #1479 (Mutex removal)
+  ## Quantifying the mutex removal
 
-  #1479 dropped the per-drive `Mutex<BlobStore>` that serialised every NIF
-  call against a drive. Its win shows up as the **single-drive scaling
-  factor** the harness prints: throughput at `2×N_dirty` callers divided
-  by throughput at one caller. Pre-#1479 the lock pinned this near `1.0`
-  (concurrent callers queued on one mutex); post-#1479 concurrent reads
-  and writes of different chunks run in parallel on the dirty schedulers,
-  so it rises with available IO parallelism. To capture the literal
-  before/after, run this same file on the commit preceding #1479 and
-  compare the single-drive rows.
+  Dropping the per-drive `Mutex<BlobStore>` that serialised every NIF call
+  against a drive shows up as the **single-drive scaling factor** the
+  harness prints: throughput at `2×N_dirty` callers divided by throughput
+  at one caller. The lock used to pin this near `1.0` (concurrent callers
+  queued on one mutex); without it, concurrent reads and writes of
+  different chunks run in parallel on the dirty schedulers, so it rises
+  with available IO parallelism. To capture the literal before/after, run
+  this same file on the commit preceding the removal and compare the
+  single-drive rows.
   """
 
   use ExUnit.Case, async: false
@@ -193,7 +193,7 @@ defmodule NeonFS.Core.Blob.NativeThroughputBenchTest do
 
   defp report(cells, dirty_io) do
     IO.puts("")
-    IO.puts("==== blob NIF throughput + dirty-scheduler saturation (#1481) ====")
+    IO.puts("==== blob NIF throughput + dirty-scheduler saturation ====")
 
     IO.puts(
       "  chunk_size=#{div(@chunk_size, 1024)}KiB ops/cell=#{@ops_per_cell} tier=#{@tier} " <>
@@ -220,7 +220,7 @@ defmodule NeonFS.Core.Blob.NativeThroughputBenchTest do
       "dirtyIO #{Float.round(s.dirty_io_util * 100, 1)}%"
   end
 
-  # The single-drive scaling factor is the #1479 headline: how much
+  # The single-drive scaling factor is the headline: how much
   # single-drive throughput rises from one caller to max concurrency now
   # that the per-drive Mutex is gone.
   defp report_single_drive_scaling(cells) do
@@ -231,9 +231,7 @@ defmodule NeonFS.Core.Blob.NativeThroughputBenchTest do
          true <- base.concurrency != top.concurrency do
       IO.puts("")
 
-      IO.puts(
-        "  single-drive scaling (#1479 win): concurrency #{base.concurrency} → #{top.concurrency}"
-      )
+      IO.puts("  single-drive scaling: concurrency #{base.concurrency} → #{top.concurrency}")
 
       IO.puts(
         "    write ×#{scaling(base.write, top.write)}  read ×#{scaling(base.read, top.read)} " <>

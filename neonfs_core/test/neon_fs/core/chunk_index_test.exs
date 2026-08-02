@@ -92,7 +92,7 @@ defmodule NeonFS.Core.ChunkIndexTest do
       assert [{^hash, _}] = :ets.lookup(:chunk_index, hash)
     end
 
-    test "tolerates the backing store being deleted before a late write (#1067)", %{store: store} do
+    test "tolerates the backing store being deleted before a late write", %{store: store} do
       hash = :crypto.strong_rand_bytes(32)
       chunk_meta = ChunkMeta.new("vol-test", hash, 1024, 512, :zstd)
 

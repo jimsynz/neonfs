@@ -70,7 +70,7 @@ defmodule NeonFS.Core.PersistenceTest do
     end
   end
 
-  # #988: between `:ets.whereis/1` (which says the table exists) and
+  # Between `:ets.whereis/1` (which says the table exists) and
   # `:ets.to_dets/2` (which actually reads it), the owning GenServer
   # can shut down and tear the table down. The race manifested as
   # `ArgumentError` from BEAM crashing Persistence on every 100 ms

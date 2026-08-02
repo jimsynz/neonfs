@@ -61,7 +61,7 @@ defmodule NeonFS.Core.ReplicationTest do
                Replication.select_replication_targets(5, :hot, [{Node.self(), "default"}])
     end
 
-    test "excludes :unverified drives from placement (#1375)" do
+    test "excludes :unverified drives from placement" do
       # The module stops Ra; bring it up for this test so the DriveTrust
       # facade can resolve the unverified set.
       start_ra()

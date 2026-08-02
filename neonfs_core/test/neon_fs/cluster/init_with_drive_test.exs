@@ -9,7 +9,7 @@ defmodule NeonFS.Cluster.InitWithDriveTest do
   setup %{tmp_dir: tmp_dir} do
     configure_test_dirs(tmp_dir)
     # Bootstrap from a truly empty drives config — the daemon doesn't
-    # ship with a default drive any more (#975).
+    # ship with a default drive any more.
     Application.put_env(:neonfs_core, :drives, [])
 
     stop_ra()
@@ -39,7 +39,7 @@ defmodule NeonFS.Cluster.InitWithDriveTest do
 
     test "surfaces an actionable error if the supplied drive path is missing" do
       # `:drive_preflight_failed` — `Init.init_cluster/2` now validates
-      # the drive's path before mutating any state (#1012), so a
+      # the drive's path before mutating any state, so a
       # missing path fails at the preflight gate rather than the
       # later `DriveManager.add_drive/1` registration.
       assert {:error, {:drive_preflight_failed, _reason}} =

@@ -1,6 +1,6 @@
 defmodule NeonFS.Core.IncrementalBackupTest do
   @moduledoc """
-  File-level incremental backup (#1003): an incremental export carries
+  File-level incremental backup: an incremental export carries
   bodies only for new/changed files (plus a `deleted` list); chain
   restore replays the full + incrementals to reproduce the final state
   byte-for-byte.
@@ -8,7 +8,7 @@ defmodule NeonFS.Core.IncrementalBackupTest do
   Exercised via live-root `VolumeExport.export` (which streams real
   bytes through the in-process BlobStore) rather than the snapshot path,
   so it doesn't need the full Ra provisioning the snapshot tests defer
-  to #985. The incremental diff + chain-replay logic is identical either
+  separately. The incremental diff + chain-replay logic is identical either
   way — only the file enumeration differs.
   """
 

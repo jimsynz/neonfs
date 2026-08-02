@@ -1,6 +1,6 @@
 defmodule NeonFS.Core.SyncOperationTest do
   @moduledoc """
-  Unit tests for `NeonFS.Core.SyncOperation` (#1500). `VolumeRegistry`,
+  Unit tests for `NeonFS.Core.SyncOperation`. `VolumeRegistry`,
   `FileIndex`, and `Replication` are stubbed via Mimic so the barrier's
   control flow — per-chunk `ensure_min_copies`, erasure no-op, telemetry —
   is exercised without a running cluster.

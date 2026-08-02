@@ -280,7 +280,7 @@ defmodule NeonFS.Core.Blob.NativeTest do
       assert {:ok, _} = Native.store_write_chunk(store, hash, data, "hot")
 
       # Manually corrupt the chunk file (on-disk name includes codec suffix
-      # since issue #270; find the matching file under the prefix dir).
+      # since the codec suffix landed; find the matching file under the prefix dir).
       hash_hex = Base.encode16(hash, case: :lower)
       prefix1 = String.slice(hash_hex, 0, 2)
       prefix2 = String.slice(hash_hex, 2, 2)
@@ -303,7 +303,7 @@ defmodule NeonFS.Core.Blob.NativeTest do
       assert {:ok, _} = Native.store_write_chunk(store, hash, data, "hot")
 
       # Manually corrupt the chunk file (on-disk name includes codec suffix
-      # since issue #270; find the matching file under the prefix dir).
+      # since the codec suffix landed; find the matching file under the prefix dir).
       hash_hex = Base.encode16(hash, case: :lower)
       prefix1 = String.slice(hash_hex, 0, 2)
       prefix2 = String.slice(hash_hex, 2, 2)
@@ -535,7 +535,7 @@ defmodule NeonFS.Core.Blob.NativeTest do
                )
 
       # Corrupt the file (but keep it as valid zstd). The on-disk filename
-      # includes the codec suffix (issue #270); we find the matching file
+      # includes the codec suffix; we find the matching file
       # under the chunk's hash prefix directory.
       hash_hex = Base.encode16(hash, case: :lower)
       prefix1 = String.slice(hash_hex, 0, 2)
@@ -1050,7 +1050,7 @@ defmodule NeonFS.Core.Blob.NativeTest do
     end
   end
 
-  describe "drive clean/dirty marker (#1425/#1426)" do
+  describe "drive clean/dirty marker" do
     test "fresh drive is :fresh; graceful close makes the reopen :clean", %{tmp_dir: tmp_dir} do
       store_dir = Path.join(tmp_dir, "marker_clean")
       {:ok, store} = Native.store_open(store_dir, 2)

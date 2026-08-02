@@ -1,6 +1,6 @@
 defmodule NeonFS.Core.RaServerSanitiseTest do
   @moduledoc """
-  Unit tests for `RaServer.sanitise_initial_state/2` (#688). The
+  Unit tests for `RaServer.sanitise_initial_state/2`. The
   full force-reset path is exercised by the peer-cluster
   `force_reset_test.exs` integration test; this slice covers the
   pure-function purge in isolation so the regression is cheap to
