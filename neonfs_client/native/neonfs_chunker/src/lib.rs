@@ -2,13 +2,13 @@
 //!
 //! Exposes the chunker surface that `NeonFS.Client.ChunkWriter` uses to
 //! split a byte stream into content-addressed chunks before shipping each
-//! chunk to a data-plane replica (see #408, #449). The chunker and hash
+//! chunk to a data-plane replica. The chunker and hash
 //! modules are byte-for-byte copies of
 //! `neonfs_core/native/neonfs_blob/src/{chunking,hash}.rs` — dedup across
 //! packages relies on identical `(hash, offset, size)` output for the
 //! same input, and the parity property test in `neonfs_client/test/`
 //! keeps the two copies honest. Deduplicating the source into a shared
-//! crate is explicitly deferred per #449.
+//! crate is explicitly deferred.
 
 pub mod chunking;
 pub mod hash;

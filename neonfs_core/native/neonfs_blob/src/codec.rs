@@ -7,7 +7,7 @@
 //! bytes depend on compression and encryption settings. Without a discriminator
 //! in the path, two volumes writing the same plaintext with different codec
 //! settings produce different byte streams that overwrite each other at the
-//! same path — a silent data-corruption bug (issue #270).
+//! same path — a silent data-corruption bug.
 //!
 //! Appending a codec suffix makes different codec variants coexist as separate
 //! files. Identical codec tuples share a file (still enables dedup for

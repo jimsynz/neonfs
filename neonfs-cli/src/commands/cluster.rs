@@ -304,8 +304,7 @@ pub enum ClusterCommand {
         yes_i_accept_data_loss: bool,
     },
 
-    /// Rebuild the bootstrap-layer Ra state from on-disk volume data
-    ///.
+    /// Rebuild the bootstrap-layer Ra state from on-disk volume data.
     ///
     /// Use this when Ra logs are unrecoverable but the underlying
     /// volume data (drive identity files + root segment chunks) is
@@ -663,8 +662,8 @@ impl ClusterCommand {
         // On a standalone interface host the `core_node_name` runtime file
         // points at a remote core this CLI cannot authenticate to before the
         // join (no cluster CA yet). The local daemon — whatever its service
-        // type — performs the outward HTTP redemption itself, so drive that
-        // (#1162). Core and omnibus hosts resolve exactly as before.
+        // type — performs the outward HTTP redemption itself, so drive that.
+        // Core and omnibus hosts resolve exactly as before.
         let target = resolve_join_target();
 
         // Phase 1 — redeem the invite. The daemon validates the token and writes
@@ -673,7 +672,7 @@ impl ClusterCommand {
         // connects to the via node. So this call returns a `joining` ack; any
         // synchronous failure (bad token, unreachable via node) surfaces here.
         // `NeonFS.Client.CLIHandler` exists on every node type and delegates to
-        // core's handler on core nodes (#1161).
+        // core's handler on core nodes.
         let ack = smol::block_on(async {
             let mut conn = DaemonConnection::connect_node(&target.node).await?;
             let token_binary = Binary::from(token.as_bytes().to_vec());
@@ -696,7 +695,7 @@ impl ClusterCommand {
         }
 
         // Phase 2 — the node bounced distribution, so reconnect and wait for the
-        // join to complete (#1033). Core nodes report a running cluster via
+        // join to complete. Core nodes report a running cluster via
         // `cluster_status`; interface nodes don't serve it, so their join is
         // confirmed by the persisted cluster state instead.
         if target.is_interface {
@@ -1298,7 +1297,7 @@ impl ClusterCommand {
         }
 
         // Should not happen in this slice, but be defensive — the Elixir
-        // handler shape may change when #473 lands the actual mutation.
+        // handler shape may change once the actual mutation lands.
         match format {
             OutputFormat::Json => {
                 let payload = serde_json::json!({

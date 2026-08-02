@@ -1,4 +1,4 @@
-//! Establishes baseline read / write latency for `IndexTree` (#781).
+//! Establishes baseline read / write latency for `IndexTree`.
 //!
 //! Run with:
 //!

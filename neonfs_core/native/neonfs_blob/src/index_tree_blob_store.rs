@@ -1,5 +1,5 @@
 //! `ChunkStore` adapter that backs `IndexTree` with the production
-//! `BlobStore` (#813).
+//! `BlobStore`.
 //!
 //! Index tree nodes are stored as plain (uncompressed, unencrypted)
 //! chunks at the configured tier. Hot is the default for volume
@@ -22,7 +22,7 @@ use crate::store::BlobStore;
 /// one local store. The adapter records each new chunk so the caller
 /// can replicate them to the volume's other metadata drives — index
 /// trees would otherwise be cross-node readable only after anti-entropy
-/// caught up, never synchronously (#903).
+/// caught up, never synchronously.
 pub struct BlobStoreChunkStore<'a> {
     store: &'a BlobStore,
     tier: Tier,

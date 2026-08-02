@@ -31,15 +31,15 @@ mod marker_atoms {
 /// `BlobStore`'s methods all take `&self` and its only mutable state is the
 /// filesystem itself, so the resource shares it unsynchronised across every
 /// NIF call — concurrent calls to the same drive run in parallel rather than
-/// serialising on a lock (#1479). The store is held behind an `Arc` so async
+/// serialising on a lock. The store is held behind an `Arc` so async
 /// NIFs can hand a cheap clone to a tokio blocking task that outlives the
-/// resource reference the caller passed in (#1484).
+/// resource reference the caller passed in.
 pub struct BlobStoreResource {
     store: Arc<BlobStore>,
 }
 
-/// Process-wide tokio runtime backing the async blob NIFs (#1484, part of
-/// #1197). Blob store operations are synchronous disk I/O, so async NIFs
+/// Process-wide tokio runtime backing the async blob NIFs. Blob store
+/// operations are synchronous disk I/O, so async NIFs
 /// submit them to this runtime's blocking pool via `spawn_blocking` and return
 /// immediately; the completion is delivered to the caller as a message. A
 /// single shared runtime avoids multiplying blocking-thread pools per drive.
@@ -56,7 +56,7 @@ fn blob_runtime() -> &'static tokio::runtime::Runtime {
 }
 
 /// A drive's clean/dirty classification, carried through the async reply so
-/// the `:clean | :dirty | :fresh` atom is built in the reply env (#1486).
+/// the `:clean | :dirty | :fresh` atom is built in the reply env.
 enum DriveMarker {
     Clean,
     Dirty,
@@ -64,7 +64,7 @@ enum DriveMarker {
 }
 
 /// The `:ok` payload of an async blob NIF completion, built in the reply env.
-/// One variant per reply shape across the async blob NIFs (#1484/#1485/#1486).
+/// One variant per reply shape across the async blob NIFs.
 enum BlobReply {
     /// `{:ok, {}}` — an operation with no return value (e.g. plain write).
     Unit,
@@ -263,7 +263,7 @@ fn store_open(
     }
 }
 
-/// Brings a drive up and reports how it presented itself (#1425/#1426).
+/// Brings a drive up and reports how it presented itself.
 ///
 /// Reads the prior per-drive marker, classifies the drive (`:clean` = was
 /// cleanly closed by this same `node_id`; `:dirty` = a marker was present
@@ -293,7 +293,7 @@ fn store_open_marker_submit<'a>(
     })
 }
 
-/// Rewrites a drive's marker `clean` (#1425). Call on graceful shutdown
+/// Rewrites a drive's marker `clean`. Call on graceful shutdown
 /// so the next `store_open_marker` reports the drive clean.
 ///
 /// # Returns
@@ -324,7 +324,7 @@ fn store_mark_clean_submit<'a>(
 ///
 /// # Returns
 /// `:ok`; the outcome arrives as a
-/// `{request_ref, {:ok, {}} | {:error, reason}}` message (#1485).
+/// `{request_ref, {:ok, {}} | {:error, reason}}` message.
 ///
 /// `data` is a single chunk (bounded by the volume's chunk size), copied into
 /// an owned buffer for the blocking task — the working set never scales with
@@ -421,7 +421,7 @@ fn store_write_chunk_compressed_submit<'a>(
 ///
 /// # Returns
 /// `:ok`; the chunk data arrives as a
-/// `{request_ref, {:ok, binary} | {:error, reason}}` message (#1484).
+/// `{request_ref, {:ok, binary} | {:error, reason}}` message.
 #[rustler::nif]
 fn store_read_chunk_submit<'a>(
     env: Env<'a>,
@@ -549,7 +549,7 @@ fn store_read_chunk_with_options_submit<'a>(
 ///
 /// # Returns
 /// `:ok`; the bytes freed arrive as a
-/// `{request_ref, {:ok, bytes_freed} | {:error, reason}}` message (#1485).
+/// `{request_ref, {:ok, bytes_freed} | {:error, reason}}` message.
 #[allow(clippy::too_many_arguments)]
 #[rustler::nif]
 fn store_delete_chunk_submit<'a>(
@@ -703,7 +703,7 @@ fn store_chunk_any_codec_size_submit<'a>(
 ///
 /// # Returns
 /// `:ok`; the outcome arrives as a
-/// `{request_ref, {:ok, {}} | {:error, reason}}` message (#1486).
+/// `{request_ref, {:ok, {}} | {:error, reason}}` message.
 #[rustler::nif]
 fn store_migrate_chunk_submit<'a>(
     env: Env<'a>,
@@ -746,7 +746,7 @@ fn store_migrate_chunk_submit<'a>(
 ///
 /// # Returns
 /// `:ok`; the stored size of the re-encrypted chunk arrives as a
-/// `{request_ref, {:ok, size} | {:error, reason}}` message (#1486).
+/// `{request_ref, {:ok, size} | {:error, reason}}` message.
 #[allow(clippy::too_many_arguments)]
 #[rustler::nif]
 fn store_reencrypt_chunk_submit<'a>(
@@ -780,7 +780,7 @@ fn store_reencrypt_chunk_submit<'a>(
 }
 
 /// Slice-based hash parse, callable from an async blob task where the caller's
-/// `Binary` has already been copied into an owned buffer (#1484).
+/// `Binary` has already been copied into an owned buffer.
 fn hash_from_bytes(bytes: &[u8]) -> Result<Hash, String> {
     if bytes.len() != 32 {
         return Err(format!(
@@ -848,7 +848,7 @@ fn encryption_from_bytes(key: &[u8], nonce: &[u8]) -> Result<Option<EncryptionPa
 
 /// Slice-based required-encryption parse (non-empty key and nonce), callable
 /// from an async blob task where the key/nonce have been copied into owned
-/// buffers (#1486).
+/// buffers.
 fn required_encryption_from_bytes(key: &[u8], nonce: &[u8]) -> Result<EncryptionParams, String> {
     EncryptionParams::new(key, nonce).map_err(|e| e.to_string())
 }
@@ -1091,7 +1091,7 @@ fn erasure_decode<'a>(
 /// * `data` - Binary metadata to write.
 ///
 /// Returns `:ok`; the outcome arrives as a
-/// `{request_ref, {:ok, {}} | {:error, reason}}` message (#1486).
+/// `{request_ref, {:ok, {}} | {:error, reason}}` message.
 #[rustler::nif]
 fn metadata_write_submit<'a>(
     env: Env<'a>,
@@ -1199,7 +1199,7 @@ fn metadata_list_segment_submit<'a>(
 ///
 /// # Returns
 /// `:ok`; the capacity arrives as a `{request_ref, {:ok, {total_bytes,
-/// available_bytes, used_bytes}} | {:error, reason}}` message (#1486).
+/// available_bytes, used_bytes}} | {:error, reason}}` message.
 #[rustler::nif]
 fn filesystem_info_submit<'a>(env: Env<'a>, request_ref: Term<'a>, path: String) -> Atom {
     spawn_reply(env, request_ref, move || {
@@ -1239,7 +1239,7 @@ fn filesystem_info_submit<'a>(env: Env<'a>, request_ref: Term<'a>, path: String)
 ///
 /// # Returns
 /// `:ok`; the outcome arrives as a
-/// `{request_ref, {:ok, {}} | {:error, reason}}` message (#1486).
+/// `{request_ref, {:ok, {}} | {:error, reason}}` message.
 #[rustler::nif]
 fn fsync_dir_submit<'a>(env: Env<'a>, request_ref: Term<'a>, path: String) -> Atom {
     spawn_reply(env, request_ref, move || {
@@ -1251,8 +1251,8 @@ fn fsync_dir_submit<'a>(env: Env<'a>, request_ref: Term<'a>, path: String) -> At
     })
 }
 
-/// Look up a key in an index tree (#781) backed by the volume's
-/// BlobStore (#813). `root_hash` is a 32-byte chunk hash, or an
+/// Look up a key in an index tree backed by the volume's
+/// BlobStore. `root_hash` is a 32-byte chunk hash, or an
 /// empty binary for a tree that has never been written. `tier` is
 /// the storage tier the tree's nodes live in (typically "hot").
 ///
@@ -1281,7 +1281,7 @@ fn index_tree_get_submit<'a>(
     })
 }
 
-/// Range query in an index tree (#781). `start_key` / `end_key`
+/// Range query in an index tree. `start_key` / `end_key`
 /// are inclusive-start, exclusive-end; an empty binary on either
 /// side means "open-ended" in that direction. Tombstones are
 /// filtered out.
@@ -1313,15 +1313,15 @@ fn index_tree_range_submit<'a>(
     })
 }
 
-/// Insert or replace `key`'s value in an index tree (#781) backed
-/// by the volume's BlobStore (#813). Empty `root_hash` creates a
+/// Insert or replace `key`'s value in an index tree backed
+/// by the volume's BlobStore. Empty `root_hash` creates a
 /// new tree. The IndexTree is copy-on-write — every put produces a
 /// new root chunk plus the rewritten leaf→root path.
 ///
 /// Returns `:ok`; the result arrives as a `{request_ref, {:ok, {new_root_hash,
 /// [{chunk_hash, chunk_bytes}, ...]}} | {:error, reason}}` message — the new
 /// root plus the copy-on-write node chunks this op wrote, so the caller can
-/// replicate them to the volume's other metadata drives (#903).
+/// replicate them to the volume's other metadata drives.
 #[rustler::nif]
 fn index_tree_put_submit<'a>(
     env: Env<'a>,
@@ -1432,7 +1432,7 @@ fn index_tree_purge_tombstones_submit<'a>(
 }
 
 /// Converts the adapter's drained write set into owned `(hash, bytes)` pairs
-/// for delivery to Elixir from the async task (#1486).
+/// for delivery to Elixir from the async task.
 fn written_to_owned(written: Vec<(crate::hash::Hash, Vec<u8>)>) -> Vec<(Vec<u8>, Vec<u8>)> {
     written
         .into_iter()
@@ -1459,7 +1459,7 @@ fn vec_to_binary<'a>(env: Env<'a>, bytes: &[u8]) -> Binary<'a> {
 /// List every node chunk hash reachable from `root_hash` — both
 /// internal-page chunks and leaf-page chunks. Empty `root_hash`
 /// returns `{:ok, []}`. Used by the per-volume anti-entropy runner
-/// (#955) so index-tree pages are enumerated alongside data chunks.
+/// so index-tree pages are enumerated alongside data chunks.
 #[rustler::nif]
 fn index_tree_list_referenced_chunks_submit<'a>(
     env: Env<'a>,

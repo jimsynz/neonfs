@@ -5,7 +5,7 @@
  * over a Unix domain socket (via the wire client in wire.c) and translates
  * the reply back into what Samba expects. smbd handles all SMB protocol
  * complexity; this module only forwards filesystem ops. Same shape as
- * vfs_ceph (#116 / #384).
+ * vfs_ceph.
  *
  * Handle model (like vfs_ceph_new): the Elixir side mints opaque uint64
  * handles for open files/dirs; we stash them in the files_struct via Samba's
@@ -481,7 +481,7 @@ static int neonfs_fntimes(struct vfs_handle_struct *handle,
  * Samba 4.x has no synchronous fsync VFS op; fsync is expressed through the
  * async tevent send/recv pair. The neonfs_cifs `fsync` barrier is itself a
  * blocking RPC (it waits for the file's chunks to reach `min_copies` durable
- * replicas — #1500/#1502), so we run it inline and post an already-completed
+ * replicas), so we run it inline and post an already-completed
  * request rather than deferring to a worker.
  */
 struct neonfs_fsync_state {
