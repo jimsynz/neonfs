@@ -1,20 +1,20 @@
 defmodule NeonFS.Core.PendingWriteLogTest do
-  use ExUnit.Case, async: false
+  use ExUnit.Case, async: true
 
   alias NeonFS.Core.PendingWriteLog
 
   @moduletag :tmp_dir
 
+  # `open/1` takes `:meta_dir`, falling back to `Persistence.meta_dir()`
+  # only when it is absent, so passing it is enough. The re-open test used
+  # to recover the directory by reading the app env this setup had written
+  # — a VM-global channel for a value the context can carry directly.
   setup %{tmp_dir: tmp_dir} do
-    Application.put_env(:neonfs_core, :meta_dir, tmp_dir)
     :ok = PendingWriteLog.open(meta_dir: tmp_dir)
 
-    on_exit(fn ->
-      PendingWriteLog.close()
-      Application.delete_env(:neonfs_core, :meta_dir)
-    end)
+    on_exit(fn -> PendingWriteLog.close() end)
 
-    :ok
+    %{meta_dir: tmp_dir}
   end
 
   describe "open_write/3 + record_chunk/2 + get/1" do
@@ -76,13 +76,13 @@ defmodule NeonFS.Core.PendingWriteLogTest do
   end
 
   describe "persistence across re-open" do
-    test "records survive close/open cycles (crash simulation)" do
+    test "records survive close/open cycles (crash simulation)", %{meta_dir: meta_dir} do
       :ok = PendingWriteLog.open_write("persist", "vol-a", "/p")
       :ok = PendingWriteLog.record_chunk("persist", "hash-p")
 
       PendingWriteLog.close()
 
-      assert :ok = PendingWriteLog.open(meta_dir: Application.fetch_env!(:neonfs_core, :meta_dir))
+      assert :ok = PendingWriteLog.open(meta_dir: meta_dir)
       assert {:ok, record} = PendingWriteLog.get("persist")
       assert record.chunk_hashes == ["hash-p"]
     end

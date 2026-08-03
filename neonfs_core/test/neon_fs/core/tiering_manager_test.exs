@@ -6,11 +6,9 @@ defmodule NeonFS.Core.TieringManagerTest do
   @moduletag :tmp_dir
 
   setup %{tmp_dir: tmp_dir} do
-    Application.put_env(:neonfs_core, :mock_drive_dir, tmp_dir)
-
     MockChunkIndex.init()
     MockAccessTracker.init()
-    MockDriveRegistry.init()
+    MockDriveRegistry.init(tmp_dir)
     MockBackgroundWorker.init()
 
     pid = start_test_manager()
@@ -20,7 +18,6 @@ defmodule NeonFS.Core.TieringManagerTest do
       MockAccessTracker.cleanup()
       MockDriveRegistry.cleanup()
       MockBackgroundWorker.cleanup()
-      Application.delete_env(:neonfs_core, :mock_drive_dir)
     end)
 
     %{manager: pid}
@@ -47,11 +44,11 @@ defmodule NeonFS.Core.TieringManagerTest do
   end
 
   describe "with mock modules" do
-    setup do
+    setup %{tmp_dir: tmp_dir} do
       # Initialize mock ETS tables
       MockChunkIndex.init()
       MockAccessTracker.init()
-      MockDriveRegistry.init()
+      MockDriveRegistry.init(tmp_dir)
       MockBackgroundWorker.init()
 
       on_exit(fn ->
@@ -222,10 +219,10 @@ defmodule NeonFS.Core.TieringManagerTest do
   end
 
   describe "telemetry" do
-    setup do
+    setup %{tmp_dir: tmp_dir} do
       MockChunkIndex.init()
       MockAccessTracker.init()
-      MockDriveRegistry.init()
+      MockDriveRegistry.init(tmp_dir)
       MockBackgroundWorker.init()
 
       on_exit(fn ->
@@ -418,9 +415,14 @@ end
 defmodule MockDriveRegistry do
   @table :mock_drive_registry_data
 
-  def init do
+  # The base dir lives in the mock's own table rather than in application
+  # env. It was only ever a channel from `setup` to `list_drives/0` here,
+  # and routing it through VM-global state let this file collide with any
+  # other reading the same key.
+  def init(base_dir) do
     safe_delete_table()
     :ets.new(@table, [:named_table, :set, :public])
+    :ets.insert(@table, {:base_dir, base_dir})
   end
 
   def cleanup do
@@ -439,7 +441,7 @@ defmodule MockDriveRegistry do
   end
 
   def list_drives do
-    base_dir = Application.get_env(:neonfs_core, :mock_drive_dir, "/tmp/mock")
+    [{:base_dir, base_dir}] = :ets.lookup(@table, :base_dir)
 
     :ets.tab2list(@table)
     |> Enum.filter(fn

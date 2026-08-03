@@ -393,43 +393,38 @@ defmodule NeonFS.Core.ScrubSchedulerTest do
     end
   end
 
-  describe "configuration from app env" do
-    test "uses check_interval_ms from app env when opts are not provided" do
-      Application.put_env(:neonfs_core, :scrub_check_interval_ms, 1_800_000)
+  # `init/1` reads `:check_interval_ms` from its opts; the application env
+  # is read by `NeonFS.Core.Supervisor` when it builds the child spec, not
+  # here. These used to write the env, read it straight back, and pass the
+  # result as an opt — which asserted nothing about the supervisor and, in
+  # an `async: true` file, let `delete_env` clear a key a concurrently
+  # running test had just set.
+  describe "interval configuration" do
+    test "uses the check interval it is given" do
+      name = start_scheduler(check_interval_ms: 1_800_000)
 
-      on_exit(fn ->
-        Application.delete_env(:neonfs_core, :scrub_check_interval_ms)
-      end)
-
-      opts = [
-        check_interval_ms: Application.get_env(:neonfs_core, :scrub_check_interval_ms, 3_600_000),
-        job_tracker_mod: MockJobTracker,
-        volume_registry_mod: MockVolumeRegistry
-      ]
-
-      name = :"scrub_sched_appenv_#{System.unique_integer([:positive])}"
-
-      start_supervised!({ScrubScheduler, Keyword.put(opts, :name, name)})
-
-      status = GenServer.call(name, :status)
-      assert status.check_interval_ms == 1_800_000
+      assert GenServer.call(name, :status).check_interval_ms == 1_800_000
     end
 
-    test "falls back to defaults when app env is not set" do
-      Application.delete_env(:neonfs_core, :scrub_check_interval_ms)
+    test "falls back to its own default when given none" do
+      name = start_scheduler([])
 
-      opts = [
-        check_interval_ms: Application.get_env(:neonfs_core, :scrub_check_interval_ms, 3_600_000),
+      assert GenServer.call(name, :status).check_interval_ms == 3_600_000
+    end
+  end
+
+  defp start_scheduler(opts) do
+    name = :"scrub_sched_#{System.unique_integer([:positive])}"
+
+    opts =
+      opts
+      |> Keyword.merge(
+        name: name,
         job_tracker_mod: MockJobTracker,
         volume_registry_mod: MockVolumeRegistry
-      ]
+      )
 
-      name = :"scrub_sched_defaults_#{System.unique_integer([:positive])}"
-
-      start_supervised!({ScrubScheduler, Keyword.put(opts, :name, name)})
-
-      status = GenServer.call(name, :status)
-      assert status.check_interval_ms == 3_600_000
-    end
+    start_supervised!({ScrubScheduler, opts})
+    name
   end
 end

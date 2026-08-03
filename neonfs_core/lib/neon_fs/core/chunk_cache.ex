@@ -151,14 +151,19 @@ defmodule NeonFS.Core.ChunkCache do
   ## Server Callbacks
 
   @impl true
-  def init(_opts) do
+  def init(opts) do
     :ets.new(@data_table, [:named_table, :set, :public, read_concurrency: true])
     :ets.new(@lru_table, [:named_table, :ordered_set, :public])
     :ets.new(:chunk_cache_stats, [:named_table, :set, :public])
     :ets.insert(:chunk_cache_stats, [{:hits, 0}, {:misses, 0}, {:evictions, 0}])
 
+    # App env stays the deployment-configured source; the opt exists so a
+    # caller that already knows the limit — a test exercising eviction —
+    # does not have to reach through VM-global state to say so.
     max_memory =
-      Application.get_env(:neonfs_core, :chunk_cache_max_memory, @default_max_memory)
+      Keyword.get_lazy(opts, :max_memory, fn ->
+        Application.get_env(:neonfs_core, :chunk_cache_max_memory, @default_max_memory)
+      end)
 
     Logger.info("ChunkCache started", max_memory_bytes: max_memory)
     {:ok, %{max_memory: max_memory}}

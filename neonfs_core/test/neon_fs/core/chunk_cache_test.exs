@@ -8,10 +8,6 @@ defmodule NeonFS.Core.ChunkCacheTest do
     clear_cache()
     clear_volume_cache_table()
 
-    on_exit(fn ->
-      Application.delete_env(:neonfs_core, :chunk_cache_max_memory)
-    end)
-
     :ok
   end
 
@@ -71,8 +67,7 @@ defmodule NeonFS.Core.ChunkCacheTest do
   defp restart_cache_with_limit(limit) do
     stop_supervised(ChunkCache)
     clear_cache_tables()
-    Application.put_env(:neonfs_core, :chunk_cache_max_memory, limit)
-    start_supervised!(ChunkCache)
+    start_supervised!({ChunkCache, max_memory: limit})
   end
 
   describe "get/2" do
@@ -299,9 +294,8 @@ defmodule NeonFS.Core.ChunkCacheTest do
       # Stop and restart with a small configured limit
       stop_supervised(ChunkCache)
       clear_cache_tables()
-      Application.put_env(:neonfs_core, :chunk_cache_max_memory, 80)
 
-      start_supervised!(ChunkCache)
+      start_supervised!({ChunkCache, max_memory: 80})
 
       ChunkCache.put("vol1", <<1>>, String.duplicate("a", 50))
       ChunkCache.flush()
@@ -311,8 +305,6 @@ defmodule NeonFS.Core.ChunkCacheTest do
       # Oldest entry should be evicted due to 80-byte limit
       assert :miss = ChunkCache.get("vol1", <<1>>)
       assert {:ok, _} = ChunkCache.get("vol1", <<2>>)
-    after
-      Application.delete_env(:neonfs_core, :chunk_cache_max_memory)
     end
   end
 
