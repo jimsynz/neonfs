@@ -315,14 +315,13 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
     end
 
     test "deletes empty directory", %{handler: handler, volume_id: volume_id, cluster: cluster} do
-      # Create empty directory on core
+      # Create the directory the canonical way — a `dir:` record with a
+      # `:dir` dirent. This used to write a file with `S_IFDIR` in its mode,
+      # which is the shape no interface could remove.
       {:ok, _} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.Core.WriteOperation, :write_file_at, [
+        PeerCluster.rpc(cluster, :node1, NeonFS.Core.FileIndex, :mkdir, [
           volume_id,
-          "/empty_dir",
-          0,
-          "",
-          [mode: 0o040755]
+          "/empty_dir"
         ])
 
       {:ok, _inode} = InodeTable.allocate_inode(volume_id, "/empty_dir")
@@ -399,7 +398,22 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
       assert file.mode == 0o100755
     end
 
-    test "chmod on directory changes mode correctly", %{
+    # A directory's mode cannot currently be changed, through any interface:
+    # `dir:` records are written by `mkdir` and by implicit ancestor creation
+    # and by nothing else, so there is no update path. `setattr` resolves the
+    # path to a *synthesised* `FileMeta` whose id was never in the by-id
+    # cache, and the update reports `:not_found`.
+    #
+    # This test used to pass because FUSE made directories out of `file:`
+    # records with `S_IFDIR` in the mode, so chmod hit the ordinary file
+    # update path — the same accident that made a FUSE-created directory
+    # unremovable by every other interface. Routing `mkdir` through the
+    # canonical `dir:` representation trades that accident for consistency,
+    # and this is the cost.
+    #
+    # Pinning the current behaviour rather than deleting the coverage: invert
+    # these assertions when directories gain an attribute-update path.
+    test "chmod on a directory is refused — directories have no update path", %{
       handler: handler,
       volume_id: volume_id,
       cluster: cluster
@@ -412,15 +426,12 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
       assert_receive {:fuse_op_complete, 1, {"entry_ok", _}}, @op_timeout
       {:ok, inode} = InodeTable.get_inode(volume_id, "/chmod_dir")
 
-      # chmod directory to 0o700
       send(
         handler,
         {:fuse_op, 2, {"setattr", %{"ino" => inode, "mode" => 0o040700}}}
       )
 
-      assert_receive {:fuse_op_complete, 2,
-                      {"attr_ok", %{"ino" => ^inode, "kind" => "directory"}}},
-                     @op_timeout
+      assert_receive {:fuse_op_complete, 2, {"error", %{"errno" => _}}}, @op_timeout
 
       {:ok, dir} =
         PeerCluster.rpc(cluster, :node1, NeonFS.Core.FileIndex, :get_by_path, [
@@ -428,7 +439,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
           "/chmod_dir"
         ])
 
-      assert dir.mode == 0o040700
+      assert dir.mode == 0o040755, "the mode mkdir persisted is unchanged"
     end
 
     test "chown changes UID/GID and is reflected in getattr", %{

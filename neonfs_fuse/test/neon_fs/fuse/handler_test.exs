@@ -322,11 +322,11 @@ defmodule NeonFS.FUSE.HandlerTest do
       assert_receive {:fuse_op_complete, 4, {"error", %{"errno" => 5}}}, 5_000
     end
 
+    # `mkdir` goes through `Core.mkdir/3` now, not the file-write path, so
+    # the stub sits on `core_call`. The permission check on the parent
+    # resolves the root inode without reaching core, so one clause suffices.
     defp expect_mkdir_write(result) do
-      expect(NeonFS.Client, :write_call_by_id, fn _volume_id,
-                                                  NeonFS.Core.WriteOperation,
-                                                  :write_file_at,
-                                                  [_v, _path, 0, <<>>, _opts] ->
+      expect(NeonFS.Client, :core_call, fn NeonFS.Core, :mkdir, [_volume, _path, _opts] ->
         result.()
       end)
     end

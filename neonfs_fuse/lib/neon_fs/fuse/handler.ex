@@ -42,6 +42,10 @@ defmodule NeonFS.FUSE.Handler do
   @default_mode @s_ifreg ||| 0o644
   @dir_mode @s_ifdir ||| 0o755
 
+  # `Core.mkdir/3` takes permission bits alone, so the default it needs is
+  # `@dir_mode` without the type bits.
+  @default_dir_perms 0o755
+
   ## Client API
 
   @doc """
@@ -1027,16 +1031,27 @@ defmodule NeonFS.FUSE.Handler do
   # path so the unlink-while-open story works. Lives in
   # `handle_stateful/2` alongside `open` / `release`.
 
-  # Handle mkdir operation: create a new directory
+  # Handle mkdir operation: create a new directory.
+  #
+  # Through `Core.mkdir/3`, like every other interface. This used to write a
+  # `file:` FileMeta with `S_IFDIR` in its mode via the ordinary file-create
+  # path, which made a FUSE-created directory a *file* to everyone else: its
+  # dirent said `type: :file`, so `plan_rmdir/2` refused it and no other
+  # interface could remove it. `Core.mkdir/3` publishes a `dir:` record with
+  # a `:dir` dirent, and takes the namespace claim that serialises concurrent
+  # mkdirs across peers — which the file-create path never did.
+  #
+  # `Core.mkdir/3` wants the plain permission bits, not the mode with
+  # `S_IFDIR` folded in; it knows it is making a directory.
   defp handle_operation({"mkdir", params}, state) do
     parent = params["parent"]
     name = params["name"]
-    dir_mode = create_mode(params["mode"], @s_ifdir, @dir_mode)
+    perms = params["mode"] || @default_dir_perms
 
     with {:ok, {volume_id, parent_path}} <- resolve_inode(parent, state),
          :ok <- check_file_permission(volume_id, parent_path, :write, state),
          child_path <- build_child_path(parent_path, name),
-         {:ok, _file} <- create_empty_file(volume_id, child_path, mode: dir_mode),
+         {:ok, _dir} <- make_directory(state.volume_name, child_path, perms),
          {:ok, inode} <- InodeTable.allocate_inode(volume_id, child_path) do
       {"entry_ok", %{"ino" => inode, "size" => 0, "kind" => "directory", "fh" => 0}}
     else
@@ -1087,10 +1102,7 @@ defmodule NeonFS.FUSE.Handler do
          :ok <- check_file_permission(volume_id, parent_path, :write, state),
          child_path <- build_child_path(parent_path, name),
          {:ok, inode} <- InodeTable.get_inode(volume_id, child_path),
-         {:ok, files} <- list_directory(volume_id, child_path),
-         true <- Enum.empty?(files) || {:error, :directory_not_empty},
-         {:ok, file} <- file_index_get_by_path(volume_id, child_path),
-         :ok <- file_index_delete(volume_id, file.id),
+         :ok <- delete_file(state.volume_name, child_path),
          :ok <- InodeTable.release_inode(inode) do
       {"ok", %{}}
     else
@@ -1803,6 +1815,10 @@ defmodule NeonFS.FUSE.Handler do
     core_call(NeonFS.Core, :delete_file, [volume_name, path])
   end
 
+  defp make_directory(volume_name, path, perms) do
+    core_call(NeonFS.Core, :mkdir, [volume_name, path, [mode: perms]])
+  end
+
   defp file_index_list_volume(volume_id) do
     case core_call(NeonFS.Core.FileIndex, :list_volume, [volume_id]) do
       files when is_list(files) -> files
@@ -1816,10 +1832,6 @@ defmodule NeonFS.FUSE.Handler do
       files when is_list(files) -> files
       {:error, _} -> %{}
     end
-  end
-
-  defp file_index_delete(volume_id, file_id) do
-    write_call(volume_id, NeonFS.Core.FileIndex, :delete, [file_id])
   end
 
   defp file_index_update(volume_id, file_id, updates) do

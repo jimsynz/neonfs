@@ -361,5 +361,57 @@ defmodule NeonFS.FUSE.IntegrationTest.UnlinkWhileOpenTest do
       send(handler, {:fuse_op, 6, {"release", %{"fh" => fh}}})
       assert_receive {:fuse_op_complete, 6, {"ok", %{}}}, op_timeout()
     end
+
+    # A directory created through the mount used to be a `file:` record with
+    # `S_IFDIR` in its mode and a `type: :file` dirent, so `plan_rmdir/2`
+    # refused it and no other interface could remove it — while a directory
+    # created anywhere else was a `dir:` record that FUSE's own rmdir could
+    # not remove either. Both directions now work because there is one
+    # representation.
+    test "a directory created through the mount is removable from elsewhere", ctx do
+      %{
+        handler: handler,
+        parent_inode: parent_inode,
+        volume_id: volume_id,
+        volume_name: volume_name
+      } =
+        ctx
+
+      send(
+        handler,
+        {:fuse_op, 1,
+         {"mkdir", %{"parent" => parent_inode, "name" => "made-by-fuse", "mode" => 0o755}}}
+      )
+
+      assert_receive {:fuse_op_complete, 1, {"entry_ok", %{"kind" => "directory"}}}, op_timeout()
+
+      # The dirent must say `:dir`, which is what every other interface reads.
+      assert {:ok, children} = Router.call(FileIndex, :list_dir, [volume_id, "/"])
+      assert children["made-by-fuse"].type == :dir
+
+      # And core can remove it — this returned {:error, :not_a_directory}
+      # when the mount made directories out of files.
+      assert :ok = Router.call(NeonFS.Core, :delete_file, [volume_name, "/made-by-fuse"])
+
+      assert {:error, %{class: :not_found}} =
+               Router.call(NeonFS.Core, :get_file_meta, [volume_name, "/made-by-fuse"])
+    end
+
+    test "a directory created elsewhere is removable through the mount", ctx do
+      %{handler: handler, parent_inode: parent_inode, volume_id: volume_id} = ctx
+
+      assert {:ok, _} = Router.call(FileIndex, :mkdir, [volume_id, "/made-by-core"])
+      {:ok, _inode} = InodeTable.allocate_inode(volume_id, "/made-by-core")
+
+      send(
+        handler,
+        {:fuse_op, 2, {"rmdir", %{"parent" => parent_inode, "name" => "made-by-core"}}}
+      )
+
+      assert_receive {:fuse_op_complete, 2, {"ok", %{}}}, op_timeout()
+
+      assert {:ok, children} = Router.call(FileIndex, :list_dir, [volume_id, "/"])
+      refute Map.has_key?(children, "made-by-core")
+    end
   end
 end
