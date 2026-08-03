@@ -757,6 +757,59 @@ defmodule NeonFS.Core.FileIndexTest do
       assert {:error, %NeonFS.Error.InvalidPath{}} = FileIndex.mkdir("vol1", "documents")
     end
 
+    # mkdir mints a fresh directory id and published its dirent
+    # unconditionally, so a name held by a file became a directory and the
+    # file's FileMeta — with its chunks — was left reachable only by id.
+    test "refuses a name already held by a file, leaving the file intact" do
+      {:ok, victim} = FileIndex.create(FileMeta.new("vol1", "/victim.txt"))
+
+      assert {:error, %AlreadyExists{}} = FileIndex.mkdir("vol1", "/victim.txt")
+
+      assert {:ok, children} = FileIndex.list_dir("vol1", "/")
+      assert children["victim.txt"].type == :file
+      assert children["victim.txt"].id == victim.id
+
+      assert {:ok, resolved} = FileIndex.get_by_path("vol1", "/victim.txt")
+      assert resolved.id == victim.id
+    end
+
+    # `mkdir(2)` is EEXIST for an existing directory, which is what
+    # `NFSv3Backend.do_mkdir/5` and WebDAV's `create_collection/2` were
+    # already written to expect. Minting a second id for a directory that
+    # exists also strands anything holding the first.
+    test "refuses a name already held by a directory, keeping its id" do
+      {:ok, _} = FileIndex.mkdir("vol1", "/existing")
+      {:ok, before} = FileIndex.list_dir("vol1", "/")
+
+      assert {:error, %AlreadyExists{}} = FileIndex.mkdir("vol1", "/existing")
+
+      assert {:ok, unchanged} = FileIndex.list_dir("vol1", "/")
+      assert unchanged["existing"].id == before["existing"].id
+      assert unchanged["existing"].type == :dir
+    end
+
+    test "refuses when it cannot tell whether the name is taken", %{store: store} do
+      reader_opts =
+        store
+        |> build_mock_metadata_reader_opts()
+        |> Keyword.put(:index_tree_get, fn _store, _root, _tier, _key ->
+          {:error, :index_tree_unreadable}
+        end)
+
+      stop_if_running(FileIndex)
+      cleanup_ets_table(:file_index_by_id)
+
+      start_supervised!(
+        {FileIndex,
+         metadata_reader_opts: reader_opts,
+         metadata_writer_opts: build_mock_metadata_writer_opts(store),
+         intent_log: NeonFS.TestSupport.StubIntentLog},
+        restart: :temporary
+      )
+
+      assert {:error, _} = FileIndex.mkdir("vol1", "/unknowable")
+    end
+
     test "created directory appears in parent listing" do
       {:ok, _} = FileIndex.mkdir("vol1", "/documents")
 

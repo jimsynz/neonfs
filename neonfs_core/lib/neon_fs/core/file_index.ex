@@ -443,8 +443,14 @@ defmodule NeonFS.Core.FileIndex do
   @doc """
   Creates a directory.
 
-  Creates a DirectoryEntry for the new directory and adds a child entry
-  to the parent DirectoryEntry.
+  The `dir:` record, the parent's child dirent and any missing ancestor
+  directories publish as one batch.
+
+  Refuses with `AlreadyExists` when the name is already taken, by a file
+  or by a directory — `mkdir(2)` semantics, and the answer NFSv3 MKDIR
+  and WebDAV MKCOL both need. This is not idempotent: implicit creation of
+  missing intermediate directories belongs to the file-create path, not
+  here.
   """
   @spec mkdir(volume_id(), path(), keyword()) :: {:ok, DirectoryEntry.t()} | {:error, term()}
   def mkdir(volume_id, path, opts \\ []) do
@@ -864,30 +870,6 @@ defmodule NeonFS.Core.FileIndex do
     end
   end
 
-  # A create publishes its `dirent:` key unconditionally, so an id the
-  # name has never pointed at would replace the entry and leave the
-  # previous `FileMeta` reachable only by id — with its chunks, until GC
-  # decides an unreferenced file is collectable. The conflict lease rules
-  # out a *concurrent* create of the same name and nothing more: the same
-  # call a moment later holds no lease at all, which is why the lease
-  # cannot be the existence check.
-  #
-  # Republishing the same id is not a replacement, and refusing it would
-  # break crash recovery: an operation whose write committed but whose
-  # reply died with its process is re-issued verbatim, and has to
-  # converge on the state it already produced.
-  #
-  # Read failures refuse. Creating a name without knowing whether it is
-  # taken is the defect, not a degraded mode of avoiding it.
-  defp refute_replacing_child(%FileMeta{id: file_id} = file, parent_path, name) do
-    case read_dirent(file.volume_id, parent_path, name) do
-      {:error, :not_found} -> :ok
-      {:ok, %{id: ^file_id}} -> :ok
-      {:ok, _other_child} -> {:error, AlreadyExists.from_reason(:already_exists, name)}
-      {:error, reason} -> {:error, reason}
-    end
-  end
-
   defp plan_update(file_id, updates, overlay) do
     case fetch_file(file_id, overlay) do
       {:ok, old_file} ->
@@ -1193,6 +1175,7 @@ defmodule NeonFS.Core.FileIndex do
     # dir path starts with `/`. `FileMeta.normalize_path/1` only trims
     # trailing slashes; it does not prepend a leading one.
     with :ok <- FileMeta.validate_path(normalized),
+         :ok <- refute_occupied_name(volume_id, parent_path, name),
          {:ok, ancestor_muts} <- ancestor_mutations(volume_id, parent_path) do
       new_dir = DirectoryEntry.new(volume_id, normalized, opts)
       dir_id = UUIDv7.generate()
@@ -1213,6 +1196,53 @@ defmodule NeonFS.Core.FileIndex do
       {:error, reason} -> {:now, {:error, reason}}
     end
   end
+
+  ## Private — Name occupancy
+  #
+  # Both `create` and `mkdir` publish their `dirent:` key unconditionally,
+  # so whichever of them runs second repoints the name: a create leaves the
+  # previous `FileMeta` and its chunks reachable only by id, and a mkdir
+  # converts the name to a directory or mints a second id for a directory
+  # that already exists. The caller is told it succeeded either way.
+  #
+  # The conflict lease does not cover this. It rules out a *concurrent*
+  # create of the same name and nothing more — the same call a moment later
+  # holds no lease at all, which is why the lease cannot be the existence
+  # check.
+  #
+  # `AlreadyExists` for every occupant, file or directory, which is what
+  # the callers were already written for: `NFSv3Backend.do_mkdir/5` maps it
+  # to `NFS3ERR_EXIST` and WebDAV's `create_collection/2` to `405 Method
+  # Not Allowed`, per `mkdir(2)` and RFC 4918 §9.3.1. Both of those clauses
+  # were unreachable until this check existed. There is no idempotent
+  # caller to accommodate: implicit creation of missing intermediate
+  # directories is `ancestor_mutations/2`, which does its own per-level
+  # check and is not this path.
+  #
+  # Read failures refuse. Publishing a name without knowing whether it is
+  # taken is the defect, not a degraded mode of avoiding it.
+
+  defp refute_occupied_name(volume_id, parent_path, name) do
+    volume_id |> read_dirent(parent_path, name) |> refuse_occupied(name)
+  end
+
+  # A create has one exemption: republishing the same id is not a
+  # replacement, and refusing it would break crash recovery — an operation
+  # whose write committed but whose reply died with its process is
+  # re-issued verbatim and has to converge on the state it already
+  # produced.
+  defp refute_replacing_child(%FileMeta{id: file_id} = file, parent_path, name) do
+    case read_dirent(file.volume_id, parent_path, name) do
+      {:ok, %{id: ^file_id}} -> :ok
+      occupancy -> refuse_occupied(occupancy, name)
+    end
+  end
+
+  defp refuse_occupied({:error, :not_found}, _name), do: :ok
+  defp refuse_occupied({:error, reason}, _name), do: {:error, reason}
+
+  defp refuse_occupied({:ok, _child}, name),
+    do: {:error, AlreadyExists.from_reason(:already_exists, name)}
 
   ## Private — Rmdir
 
