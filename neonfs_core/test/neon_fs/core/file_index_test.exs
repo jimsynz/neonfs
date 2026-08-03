@@ -788,6 +788,54 @@ defmodule NeonFS.Core.FileIndexTest do
       assert unchanged["existing"].type == :dir
     end
 
+    # `dir:` records are path-keyed and never enter the by-id file cache, so
+    # `update/2` cannot reach them — it reported `:not_found` and the mode
+    # stayed put. Directories were effectively immutable.
+    test "set_dir_attrs/3 changes a directory's mode, uid and gid" do
+      {:ok, _} = FileIndex.mkdir("vol1", "/attrs", mode: 0o755)
+
+      assert {:ok, _} = FileIndex.set_dir_attrs("vol1", "/attrs", mode: 0o700, uid: 7, gid: 9)
+
+      assert {:ok, dir} = FileIndex.get_by_path("vol1", "/attrs")
+      assert dir.mode == 0o040700
+      assert dir.uid == 7
+      assert dir.gid == 9
+    end
+
+    # The mode arrives from a FUSE client with `S_IFDIR` folded in; the
+    # record holds permission bits alone and the read path ORs the type back.
+    test "set_dir_attrs/3 masks the file-type bits out of a mode" do
+      {:ok, _} = FileIndex.mkdir("vol1", "/masked")
+
+      assert {:ok, entry} = FileIndex.set_dir_attrs("vol1", "/masked", mode: 0o040711)
+      assert entry.mode == 0o711
+
+      assert {:ok, dir} = FileIndex.get_by_path("vol1", "/masked")
+      assert dir.mode == 0o040711
+    end
+
+    test "set_dir_attrs/3 leaves unnamed attributes alone" do
+      {:ok, _} = FileIndex.mkdir("vol1", "/partial", mode: 0o755)
+      {:ok, _} = FileIndex.set_dir_attrs("vol1", "/partial", uid: 3)
+
+      assert {:ok, dir} = FileIndex.get_by_path("vol1", "/partial")
+      assert dir.mode == 0o040755
+      assert dir.uid == 3
+    end
+
+    # The volume root is materialised on first write, so a fresh volume has
+    # no record for `/` — chmod on it has to create one rather than refuse.
+    test "set_dir_attrs/3 materialises the volume root when absent" do
+      assert {:ok, _} = FileIndex.set_dir_attrs("vol-fresh", "/", mode: 0o750)
+
+      assert {:ok, root} = FileIndex.get_by_path("vol-fresh", "/")
+      assert root.mode == 0o040750
+    end
+
+    test "set_dir_attrs/3 refuses a path that is not a directory" do
+      assert {:error, :not_found} = FileIndex.set_dir_attrs("vol1", "/nope", mode: 0o700)
+    end
+
     test "refuses when it cannot tell whether the name is taken", %{store: store} do
       reader_opts =
         store

@@ -398,22 +398,11 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
       assert file.mode == 0o100755
     end
 
-    # A directory's mode cannot currently be changed, through any interface:
-    # `dir:` records are written by `mkdir` and by implicit ancestor creation
-    # and by nothing else, so there is no update path. `setattr` resolves the
-    # path to a *synthesised* `FileMeta` whose id was never in the by-id
-    # cache, and the update reports `:not_found`.
-    #
-    # This test used to pass because FUSE made directories out of `file:`
-    # records with `S_IFDIR` in the mode, so chmod hit the ordinary file
-    # update path — the same accident that made a FUSE-created directory
-    # unremovable by every other interface. Routing `mkdir` through the
-    # canonical `dir:` representation trades that accident for consistency,
-    # and this is the cost.
-    #
-    # Pinning the current behaviour rather than deleting the coverage: invert
-    # these assertions when directories gain an attribute-update path.
-    test "chmod on a directory is refused — directories have no update path", %{
+    # Directories keep their attributes in a path-keyed `dir:` record, which
+    # the by-id file update cannot reach, so `setattr` on one routes through
+    # the core facade instead. Mode, uid and gid persist there; times do not,
+    # because the record has no timestamp fields.
+    test "chmod on a directory changes mode correctly", %{
       handler: handler,
       volume_id: volume_id,
       cluster: cluster
@@ -431,7 +420,9 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
         {:fuse_op, 2, {"setattr", %{"ino" => inode, "mode" => 0o040700}}}
       )
 
-      assert_receive {:fuse_op_complete, 2, {"error", %{"errno" => _}}}, @op_timeout
+      assert_receive {:fuse_op_complete, 2,
+                      {"attr_ok", %{"ino" => ^inode, "kind" => "directory"}}},
+                     @op_timeout
 
       {:ok, dir} =
         PeerCluster.rpc(cluster, :node1, NeonFS.Core.FileIndex, :get_by_path, [
@@ -439,7 +430,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
           "/chmod_dir"
         ])
 
-      assert dir.mode == 0o040755, "the mode mkdir persisted is unchanged"
+      assert dir.mode == 0o040700
     end
 
     test "chown changes UID/GID and is reflected in getattr", %{

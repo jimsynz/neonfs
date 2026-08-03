@@ -1199,14 +1199,11 @@ defmodule NeonFS.FUSE.Handler do
   defp handle_operation({"setattr", params}, state) do
     ino = params["ino"]
 
-    with {:ok, volume_id, file} <- setattr_target(ino, params["fh"], state),
+    with {:ok, _volume_id, path, file} <- setattr_target(ino, params["fh"], state),
          :ok <- check_setattr_permission(file, params, state) do
-      result = apply_setattr(volume_id, file, params)
-
-      case result do
-        {:ok, updated_file} ->
-          {"attr_ok",
-           %{"ino" => ino, "size" => updated_file.size, "kind" => file_kind(updated_file.mode)}}
+      case apply_setattr(state, path, file, params) do
+        {:ok, attrs} ->
+          {"attr_ok", %{"ino" => ino, "size" => attrs.size, "kind" => attrs.kind}}
 
         {:error, reason} ->
           Logger.warning("Setattr failed", reason: inspect(reason))
@@ -1640,7 +1637,33 @@ defmodule NeonFS.FUSE.Handler do
   defp check_same_volume(_old_vol, _new_vol), do: {:error, :cross_volume}
 
   # Apply setattr, routing to truncate when size is being reduced
-  defp apply_setattr(volume_id, file, params) do
+  # A directory's attributes live in a path-keyed `dir:` record, which
+  # `FileIndex.update/2` cannot reach — its `file_id` resolves through the
+  # by-id file cache a `dir:` record was never in. Directories therefore go
+  # through the core facade, which dispatches on record type. Only mode /
+  # uid / gid persist there; `DirectoryEntry` has no timestamp fields.
+  #
+  # Returns the attributes the reply needs rather than the updated record,
+  # because the two paths return different shapes and `DirectoryEntry` lives
+  # in `neonfs_core`, which this package does not depend on.
+  defp apply_setattr(state, path, file, params) do
+    if directory?(file.mode) and is_binary(path) do
+      with {:ok, _entry} <-
+             core_call(NeonFS.Core, :update_file_meta, [
+               state.volume_name,
+               path,
+               build_setattr_updates(params)
+             ]) do
+        {:ok, %{size: 0, kind: "directory"}}
+      end
+    else
+      with {:ok, updated} <- apply_file_setattr(state.volume, file, params) do
+        {:ok, %{size: updated.size, kind: file_kind(updated.mode)}}
+      end
+    end
+  end
+
+  defp apply_file_setattr(volume_id, file, params) do
     new_size = params["size"]
 
     if new_size != nil and new_size < file.size do
@@ -1674,18 +1697,23 @@ defmodule NeonFS.FUSE.Handler do
     end
   end
 
+  # Returns the path alongside the target when there is one. A directory's
+  # attributes live in a path-keyed `dir:` record, so the path is what the
+  # update needs; a handle-resolved target is always a file (a directory
+  # `open` returns `fh: 0` and takes no handle), so `nil` there is not a
+  # gap.
   defp setattr_target(ino, fh, state) do
     case Map.get(state.fh_table, fh) do
       %{file_id: file_id} ->
         with {:ok, file} <-
                core_call(NeonFS.Core, :get_file_meta_by_id, [state.volume_name, file_id]) do
-          {:ok, state.volume, file}
+          {:ok, state.volume, nil, file}
         end
 
       nil ->
         with {:ok, {volume_id, path}} <- resolve_inode(ino, state),
              {:ok, file} <- file_index_get_by_path(volume_id, path) do
-          {:ok, volume_id, file}
+          {:ok, volume_id, path, file}
         end
     end
   end

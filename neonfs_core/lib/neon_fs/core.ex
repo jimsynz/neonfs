@@ -745,6 +745,24 @@ defmodule NeonFS.Core do
          :ok <-
            authorise_posix(uid, gids, :write, volume.id, {:file, volume.id, normalize_path(path)}),
          {:ok, file} <- lookup_file(volume.id, normalize_path(path)) do
+      apply_meta_updates(volume.id, normalize_path(path), file, updates)
+    end
+  end
+
+  # A directory is a `dir:` record, not a `FileMeta`, so `FileIndex.update/2`
+  # cannot reach it — its `file_id` resolves through the by-id file cache a
+  # `dir:` record was never in, and the update reports `:not_found`. `dir:`
+  # records are path-keyed, and the path is in hand here, so this is the one
+  # place the branch can live. Interfaces keep calling `update_file_meta/4`
+  # and never need to know which record type they are touching.
+  #
+  # Note the by-id counterpart cannot do this: nothing maps a directory id
+  # back to its path, so `update_file_meta_by_id/4` still refuses
+  # directories.
+  defp apply_meta_updates(volume_id, path, %FileMeta{} = file, updates) do
+    if directory?(file) do
+      FileIndex.set_dir_attrs(volume_id, path, updates)
+    else
       FileIndex.update(file.id, updates)
     end
   end

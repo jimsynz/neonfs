@@ -31,7 +31,7 @@ defmodule NeonFS.Core.FileIndex do
 
   use GenServer
   require Logger
-  import Bitwise, only: [|||: 2]
+  import Bitwise, only: [&&&: 2, |||: 2]
 
   alias NeonFS.Core.{
     ChunkIndex,
@@ -458,6 +458,30 @@ defmodule NeonFS.Core.FileIndex do
   end
 
   @doc """
+  Applies POSIX attribute updates to a directory's `dir:` record.
+
+  Directories are not `FileMeta`, so `update/2` cannot reach them: its
+  `file_id` resolves through the by-id file cache, which a `dir:` record
+  was never in. `dir:` records are keyed by path, so this takes one.
+
+  Accepts `:mode`, `:uid` and `:gid`. `:mode` may arrive with `S_IFDIR`
+  folded in — the stored record holds permission bits alone, and the read
+  path ORs the type back on — so the type bits are masked off here.
+
+  The volume root is materialised lazily, so `"/"` is created at its
+  default mode rather than refused when no record exists yet.
+  """
+  @spec set_dir_attrs(volume_id(), path(), keyword()) ::
+          {:ok, DirectoryEntry.t()} | {:error, term()}
+  def set_dir_attrs(volume_id, path, updates) do
+    GenServer.call(
+      __MODULE__,
+      {:set_dir_attrs, volume_id, path, updates},
+      mutation_call_timeout()
+    )
+  end
+
+  @doc """
   Renames a file or directory within the same parent directory.
 
   Single DirectoryEntry quorum write — no IntentLog needed since it's
@@ -740,6 +764,11 @@ defmodule NeonFS.Core.FileIndex do
   @impl true
   def handle_call({:mkdir, volume_id, path, opts}, from, state) do
     stage_or_reply(plan_mkdir(volume_id, path, opts), from, state)
+  end
+
+  @impl true
+  def handle_call({:set_dir_attrs, volume_id, path, updates}, from, state) do
+    stage_or_reply(plan_set_dir_attrs(volume_id, path, updates), from, state)
   end
 
   @impl true
@@ -1196,6 +1225,56 @@ defmodule NeonFS.Core.FileIndex do
       {:error, reason} -> {:now, {:error, reason}}
     end
   end
+
+  defp plan_set_dir_attrs(volume_id, path, updates) do
+    normalized = FileMeta.normalize_path(path)
+
+    case dir_entry_for_update(volume_id, normalized) do
+      {:ok, entry} ->
+        updated = apply_dir_attrs(entry, updates)
+
+        on_commit = fn ->
+          safe_broadcast(volume_id, %DirCreated{volume_id: volume_id, path: normalized})
+        end
+
+        {:stage, volume_id, [dir_record_mutation(updated)], on_commit, default_on_abort(),
+         {:ok, updated}}
+
+      {:error, reason} ->
+        {:now, {:error, reason}}
+    end
+  end
+
+  # The volume root has no parent dirent and its `dir:` record is
+  # materialised on first write, so `chmod /` on a fresh volume finds
+  # nothing. Start from the same world-writable default
+  # `root_dir_mutations/1` would have written rather than refusing.
+  defp dir_entry_for_update(volume_id, "/") do
+    case read_dir_entry(volume_id, "/") do
+      {:ok, entry} -> {:ok, entry}
+      {:error, :not_found} -> {:ok, DirectoryEntry.new(volume_id, "/", mode: 0o777)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp dir_entry_for_update(volume_id, path), do: read_dir_entry(volume_id, path)
+
+  # `DirectoryEntry` carries mode, uid and gid and nothing else, so those
+  # are the attributes a directory can hold. It has no timestamp fields —
+  # `synthesise_dir_file_meta/3` fabricates times on read — so `:atime` /
+  # `:mtime` in `updates` have nowhere to go and are dropped rather than
+  # silently appearing to persist.
+  defp apply_dir_attrs(%DirectoryEntry{} = entry, updates) do
+    %DirectoryEntry{
+      entry
+      | mode: dir_mode(Keyword.get(updates, :mode), entry.mode),
+        uid: Keyword.get(updates, :uid, entry.uid),
+        gid: Keyword.get(updates, :gid, entry.gid)
+    }
+  end
+
+  defp dir_mode(nil, current), do: current
+  defp dir_mode(mode, _current), do: mode &&& 0o7777
 
   ## Private — Name occupancy
   #
