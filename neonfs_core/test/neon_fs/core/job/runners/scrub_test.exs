@@ -15,6 +15,7 @@ defmodule NeonFS.Core.Job.Runners.ScrubTest do
 
   alias NeonFS.Core.Blob.Native
   alias NeonFS.Core.Job.Runners.Scrub
+  alias NeonFS.TestSupport.KeyManagerStub, as: MockKeyManager
 
   @moduletag :tmp_dir
 
@@ -375,17 +376,5 @@ defmodule NeonFS.Core.Job.Runners.ScrubTest do
     local_loc = Enum.find(chunk.locations, &(&1.node == node()))
     tier = Atom.to_string(local_loc.tier)
     Native.store_write_chunk(store, chunk.hash, "corrupted garbage data", tier)
-  end
-end
-
-defmodule MockKeyManager do
-  @moduledoc false
-
-  def get_volume_key(_volume_id, _key_version) do
-    {:error, :unknown_key_version}
-  end
-
-  def get_current_key(_volume_id) do
-    {:error, :unknown_key_version}
   end
 end
