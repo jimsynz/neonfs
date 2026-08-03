@@ -37,8 +37,8 @@
     {
       "matchManagers": ["mix"],
       "matchPackageNames": ["req"],
-      "allowedVersions": "~> 0.6",
-      "description": "Pin to 0.6.x — ex_aws 2.6's Req adapter declares `req ~> 0.5.10 or ~> 0.6 or ~> 1.0`, so 0.7 is unsupported. req is optional there, so Mix does not enforce the requirement: resolution succeeds and every ex_aws request then 403s with SignatureDoesNotMatch. Lift this when ex_aws supports req 0.7."
+      "allowedVersions": "<0.7.0",
+      "description": "Pin to 0.6.x — req 0.7 breaks ex_aws's SigV4 signing, so every ex_aws request 403s with SignatureDoesNotMatch. Note that ex_aws's own `req ~> 0.5.10 or ~> 0.6 or ~> 1.0` does *not* exclude 0.7: `~> 0.6` means `>= 0.6.0 and < 1.0.0`, not `< 0.7.0`, so nothing in the dependency graph holds this back. Lift when ex_aws supports req 0.7."
     }
   ]
 }
