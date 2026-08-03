@@ -119,9 +119,17 @@ defmodule NeonFS.Core.FileIndex do
   @doc """
   Creates a new file metadata entry.
 
-  Uses IntentLog for cross-segment atomicity (FileMeta + child dirent).
-  The parent directory must exist — use `mkdir/3` to create directories first,
-  or this function auto-creates the root directory for the volume.
+  The `FileMeta`, the parent's child dirent and any missing ancestor
+  directories publish as one batch, so no reader sees a subset of them.
+
+  Refuses with `AlreadyExists` when the path already resolves to
+  something else — the dirent write would otherwise repoint the name and
+  leave the previous file reachable only by id. Re-creating the **same**
+  file id is idempotent, which is what lets an operation whose reply was
+  lost be re-issued verbatim.
+
+  A conflict lease serialises this against a concurrent create of the
+  same name; it is not what rules out the sequential case.
   """
   @spec create(FileMeta.t()) :: {:ok, FileMeta.t()} | {:error, term()}
   def create(%FileMeta{} = file) do
@@ -828,7 +836,8 @@ defmodule NeonFS.Core.FileIndex do
         params: %{volume_id: file.volume_id, path: file.path, file_id: file.id}
       )
 
-    with {:ok, intent_id} <- intent_log().try_acquire(intent),
+    with :ok <- refute_replacing_child(file, parent_path, name),
+         {:ok, intent_id} <- intent_log().try_acquire(intent),
          {:ok, ancestor_muts} <- ancestor_mutations(file.volume_id, parent_path) do
       mutations =
         ancestor_muts ++
@@ -852,6 +861,30 @@ defmodule NeonFS.Core.FileIndex do
     else
       {:error, %Conflict{}} -> {:now, {:error, AlreadyExists.from_reason(:already_exists)}}
       {:error, reason} -> {:now, {:error, reason}}
+    end
+  end
+
+  # A create publishes its `dirent:` key unconditionally, so an id the
+  # name has never pointed at would replace the entry and leave the
+  # previous `FileMeta` reachable only by id — with its chunks, until GC
+  # decides an unreferenced file is collectable. The conflict lease rules
+  # out a *concurrent* create of the same name and nothing more: the same
+  # call a moment later holds no lease at all, which is why the lease
+  # cannot be the existence check.
+  #
+  # Republishing the same id is not a replacement, and refusing it would
+  # break crash recovery: an operation whose write committed but whose
+  # reply died with its process is re-issued verbatim, and has to
+  # converge on the state it already produced.
+  #
+  # Read failures refuse. Creating a name without knowing whether it is
+  # taken is the defect, not a degraded mode of avoiding it.
+  defp refute_replacing_child(%FileMeta{id: file_id} = file, parent_path, name) do
+    case read_dirent(file.volume_id, parent_path, name) do
+      {:error, :not_found} -> :ok
+      {:ok, %{id: ^file_id}} -> :ok
+      {:ok, _other_child} -> {:error, AlreadyExists.from_reason(:already_exists, name)}
+      {:error, reason} -> {:error, reason}
     end
   end
 
