@@ -210,5 +210,84 @@ defmodule NeonFS.FUSE.IntegrationTest.UnlinkWhileOpenTest do
                  timeout: op_timeout()
                )
     end
+
+    # The case above unlinks via `Core.delete_file` directly, standing in
+    # for another peer. That left the mount's *own* `unlink` untested, and
+    # it was the one path that got it wrong: it deleted by file id through
+    # `FileIndex.delete/1`, skipping the facade that checks `:pinned`
+    # claims, so a file unlinked through the mount lost its chunks out from
+    # under an open fd.
+    test "unlink issued through the mount detaches rather than hard-deleting", ctx do
+      %{
+        handler: handler,
+        parent_inode: parent_inode,
+        volume_id: volume_id,
+        volume_name: volume_name
+      } = ctx
+
+      file_name = "unlinked-by-fuse.bin"
+      file_path = "/" <> file_name
+      payload = "bytes an open fd must still see"
+
+      send(
+        handler,
+        {:fuse_op, 1,
+         {"create",
+          %{"parent" => parent_inode, "name" => file_name, "mode" => 0o644, "flags" => 0}}}
+      )
+
+      assert_receive {:fuse_op_complete, 1, {"entry_ok", %{"ino" => file_inode, "fh" => fh}}},
+                     op_timeout()
+
+      send(
+        handler,
+        {:fuse_op, 2,
+         {"write", %{"ino" => file_inode, "offset" => 0, "data" => payload, "fh" => fh}}}
+      )
+
+      assert_receive {:fuse_op_complete, 2, {"write_ok", %{}}}, op_timeout()
+
+      assert {:ok, %{id: file_id}} =
+               Router.call(NeonFS.Core, :get_file_meta, [volume_name, file_path])
+
+      # The unlink under test: the FUSE opcode, with the handle still open.
+      send(
+        handler,
+        {:fuse_op, 3, {"unlink", %{"parent" => parent_inode, "name" => file_name}}}
+      )
+
+      assert_receive {:fuse_op_complete, 3, {"ok", %{}}}, op_timeout()
+
+      # Detached, not deleted — the assertion that failed before the fix.
+      assert {:ok, %{detached: true, id: ^file_id}} =
+               Router.call(FileIndex, :get, [volume_id, file_id])
+
+      # The name is gone, so a path lookup must miss.
+      assert {:error, %{class: :not_found}} =
+               Router.call(NeonFS.Core, :get_file_meta, [volume_name, file_path])
+
+      # And the open handle still reads its bytes.
+      send(
+        handler,
+        {:fuse_op, 4, {"read", %{"ino" => file_inode, "offset" => 0, "size" => 1024, "fh" => fh}}}
+      )
+
+      assert_receive {:fuse_op_complete, 4, {"read_ok", %{"data" => ^payload}}}, op_timeout()
+
+      # Last close drops the pin and the detached metadata is collected.
+      send(handler, {:fuse_op, 5, {"release", %{"fh" => fh}}})
+      assert_receive {:fuse_op_complete, 5, {"ok", %{}}}, op_timeout()
+
+      assert :ok =
+               wait_until(
+                 fn ->
+                   match?(
+                     {:error, :not_found},
+                     Router.call(FileIndex, :get, [volume_id, file_id])
+                   )
+                 end,
+                 timeout: op_timeout()
+               )
+    end
   end
 end
