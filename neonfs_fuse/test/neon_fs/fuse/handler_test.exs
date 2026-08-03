@@ -5,7 +5,7 @@ defmodule NeonFS.FUSE.HandlerTest do
   import Bitwise, only: [|||: 2]
 
   alias NeonFS.Client.ChunkReader
-  alias NeonFS.Error.AlreadyExists
+  alias NeonFS.Error.{AlreadyExists, Conflict}
   alias NeonFS.FUSE.{Handler, InodeTable}
 
   setup :verify_on_exit!
@@ -275,6 +275,72 @@ defmodule NeonFS.FUSE.HandlerTest do
   # `read` / `write` can route via `Core.read_file_by_id` /
   # `write_file_at_by_id` against the cached `file_id` even after
   # another peer detaches the path.
+  # `mkdir` publishes through the same `write_file_at` call as `create`,
+  # so it can be handed the same errors — but its `else` block carried
+  # only the two `:forbidden` clauses and collapsed the rest to `EIO`. A
+  # shell doing `mkdir existing` on a NeonFS mount saw "Input/output
+  # error" where `mkdir(2)` specifies `EEXIST`.
+  describe "mkdir opcode — error mapping" do
+    setup do
+      start_supervised!(InodeTable)
+      {:ok, parent_inode} = InodeTable.allocate_inode("vol", "/")
+      handler = start_supervised!({Handler, volume: "vol", test_notify: self()})
+      Mimic.allow(NeonFS.Client, self(), handler)
+
+      {:ok, handler: handler, parent_inode: parent_inode}
+    end
+
+    test "a taken name maps to EEXIST", ctx do
+      expect_mkdir_write(fn -> {:error, AlreadyExists.from_reason(:already_exists, "docs")} end)
+
+      mkdir(ctx, 1, "docs")
+
+      assert_receive {:fuse_op_complete, 1, {"error", %{"errno" => 17}}}, 5_000
+    end
+
+    test "a conflicting claim maps to EAGAIN rather than a fault", ctx do
+      expect_mkdir_write(fn -> {:error, Conflict.from_reason(:conflict, %{})} end)
+
+      mkdir(ctx, 2, "contended")
+
+      assert_receive {:fuse_op_complete, 2, {"error", %{"errno" => 11}}}, 5_000
+    end
+
+    test "a missing parent maps to ENOENT", ctx do
+      mkdir(ctx, 3, "orphan", parent: 999_999)
+
+      assert_receive {:fuse_op_complete, 3, {"error", %{"errno" => 2}}}, 5_000
+    end
+
+    # Everything the client cannot act on still collapses to EIO — the
+    # point is that the mapped conditions no longer join it.
+    test "an unrecognised failure still maps to EIO", ctx do
+      expect_mkdir_write(fn -> {:error, :something_unmapped} end)
+
+      mkdir(ctx, 4, "broken")
+
+      assert_receive {:fuse_op_complete, 4, {"error", %{"errno" => 5}}}, 5_000
+    end
+
+    defp expect_mkdir_write(result) do
+      expect(NeonFS.Client, :write_call_by_id, fn _volume_id,
+                                                  NeonFS.Core.WriteOperation,
+                                                  :write_file_at,
+                                                  [_v, _path, 0, <<>>, _opts] ->
+        result.()
+      end)
+    end
+
+    defp mkdir(ctx, request_id, name, opts \\ []) do
+      parent = Keyword.get(opts, :parent, ctx.parent_inode)
+
+      send(
+        ctx.handler,
+        {:fuse_op, request_id, {"mkdir", %{"parent" => parent, "name" => name, "mode" => 0o755}}}
+      )
+    end
+  end
+
   describe "open / release pin lifecycle" do
     setup do
       start_supervised!(InodeTable)

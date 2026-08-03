@@ -381,12 +381,7 @@ defmodule NeonFS.FUSE.Handler do
          {:ok, inode} <- InodeTable.allocate_inode(volume_id, child_path) do
       create_pinned(file_meta, child_path, inode, state)
     else
-      {:error, :forbidden} -> {{"error", %{"errno" => errno(:eacces)}}, state}
-      {:error, %{class: :forbidden}} -> {{"error", %{"errno" => errno(:eacces)}}, state}
-      {:error, %NeonFS.Error.AlreadyExists{}} -> {{"error", %{"errno" => errno(:eexist)}}, state}
-      {:error, %NeonFS.Error.Conflict{}} -> {{"error", %{"errno" => errno(:eagain)}}, state}
-      {:error, :cluster_frozen} -> {{"error", %{"errno" => errno(:eagain)}}, state}
-      {:error, reason} -> log_create_failure_and_eio(reason, state)
+      {:error, reason} -> {{"error", %{"errno" => create_errno(:create, reason)}}, state}
     end
   end
 
@@ -788,9 +783,31 @@ defmodule NeonFS.FUSE.Handler do
     {{"entry_ok", %{"ino" => inode, "size" => size, "kind" => "file", "fh" => fh}}, new_state}
   end
 
-  defp log_create_failure_and_eio(reason, state) do
-    Logger.warning("Create failed", reason: inspect(reason))
-    {{"error", %{"errno" => errno(:eio)}}, state}
+  # `create` and `mkdir` both publish through `create_empty_file/3`, so
+  # they can be handed the same errors and have to answer with the same
+  # errno. They did not: `mkdir` carried only the two `:forbidden`
+  # clauses and collapsed everything else, so `mkdir` onto a name that
+  # is taken reported an I/O error where `mkdir(2)` specifies `EEXIST`,
+  # and a stale parent inode reported one where every neighbouring
+  # handler returns `ENOENT`.
+  #
+  # Clause order matches what `create` already did, so nothing it
+  # already mapped changes; the additions only cover cases that used to
+  # fall through to `EIO`.
+  defp create_errno(_opcode, :forbidden), do: errno(:eacces)
+  defp create_errno(_opcode, %{class: :forbidden}), do: errno(:eacces)
+  defp create_errno(_opcode, %NeonFS.Error.AlreadyExists{}), do: errno(:eexist)
+  defp create_errno(_opcode, %NeonFS.Error.Conflict{}), do: errno(:eagain)
+  defp create_errno(_opcode, :cluster_frozen), do: errno(:eagain)
+  defp create_errno(_opcode, :not_found), do: errno(:enoent)
+  defp create_errno(_opcode, %{class: :not_found}), do: errno(:enoent)
+
+  # Anything left is a fault rather than a POSIX condition the client can
+  # act on, so it stays `EIO` — but it must not stay silent, or the mount
+  # reports "Input/output error" with nothing on the node explaining it.
+  defp create_errno(opcode, reason) do
+    Logger.warning("Create failed", opcode: opcode, reason: inspect(reason))
+    errno(:eio)
   end
 
   # Pins the open handle by file identity — core resolves the
@@ -1026,15 +1043,7 @@ defmodule NeonFS.FUSE.Handler do
          {:ok, inode} <- InodeTable.allocate_inode(volume_id, child_path) do
       {"entry_ok", %{"ino" => inode, "size" => 0, "kind" => "directory", "fh" => 0}}
     else
-      {:error, :forbidden} ->
-        {"error", %{"errno" => errno(:eacces)}}
-
-      {:error, %{class: :forbidden}} ->
-        {"error", %{"errno" => errno(:eacces)}}
-
-      {:error, reason} ->
-        Logger.warning("Mkdir failed", reason: inspect(reason))
-        {"error", %{"errno" => errno(:eio)}}
+      {:error, reason} -> {"error", %{"errno" => create_errno(:mkdir, reason)}}
     end
   end
 
