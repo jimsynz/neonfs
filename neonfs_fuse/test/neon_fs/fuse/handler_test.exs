@@ -468,11 +468,17 @@ defmodule NeonFS.FUSE.HandlerTest do
         start_supervised!({Handler, volume: "vol", volume_name: "vol-name", test_notify: self()})
 
       Mimic.allow(NeonFS.Client, self(), handler)
+      # Reads on an open handle go through `ChunkReader`, which runs in the
+      # handler process, so the mock has to be reachable from there too.
+      Mimic.allow(ChunkReader, self(), handler)
 
       {:ok, handler: handler, file_inode: file_inode}
     end
 
-    test "read uses Core.read_file_by_id when fh is registered",
+    # An open handle reads over the TLS data plane, not through a core
+    # RPC: `ChunkReader` builds the chunk list locally and fetches each
+    # chunk directly, so the read does not pay for a core round trip.
+    test "read uses ChunkReader.read_file_by_id when fh is registered",
          %{handler: handler, file_inode: file_inode} do
       test_pid = self()
 
@@ -482,10 +488,11 @@ defmodule NeonFS.FUSE.HandlerTest do
 
         NeonFS.Core, :pin_file, [_, _, _] ->
           {:ok, %{file_id: "data-file-id", claim_id: "ns-claim-read", file: %{}}}
+      end)
 
-        NeonFS.Core, :read_file_by_id, ["vol-name", "data-file-id", _opts] ->
-          send(test_pid, :read_by_id_called)
-          {:ok, "payload"}
+      expect(ChunkReader, :read_file_by_id, fn "vol-name", "data-file-id", _opts ->
+        send(test_pid, :read_by_id_called)
+        {:ok, "payload"}
       end)
 
       send(handler, {:fuse_op, 20, {"open", %{"ino" => file_inode}}})

@@ -927,12 +927,10 @@ defmodule NeonFS.FUSE.Handler do
     size = params["size"]
     fh = params["fh"]
 
-    with {:ok, {volume_id, path}} <- resolve_inode(ino, state),
-         :ok <- check_file_permission(volume_id, path, :read, state),
-         {:ok, data} <- read_via_fh_or_path(volume_id, path, fh, offset, size, state) do
-      maybe_update_atime(volume_id, path, state.atime_mode)
-      {"read_ok", %{"data" => data}}
-    else
+    case read_dispatch(ino, fh, offset, size, state) do
+      {:ok, data} ->
+        {"read_ok", %{"data" => data}}
+
       {:error, :forbidden} ->
         {"error", %{"errno" => errno(:eacces)}}
 
@@ -961,11 +959,10 @@ defmodule NeonFS.FUSE.Handler do
     data = params["data"]
     fh = params["fh"]
 
-    with {:ok, {volume_id, path}} <- resolve_inode(ino, state),
-         :ok <- check_file_permission(volume_id, path, :write, state),
-         {:ok, _file} <- write_via_fh_or_path(volume_id, path, fh, offset, data, state) do
-      {"write_ok", %{"size" => byte_size(data)}}
-    else
+    case write_dispatch(ino, fh, offset, data, state) do
+      {:ok, _file} ->
+        {"write_ok", %{"size" => byte_size(data)}}
+
       {:error, :forbidden} ->
         {"error", %{"errno" => errno(:eacces)}}
 
@@ -1056,8 +1053,7 @@ defmodule NeonFS.FUSE.Handler do
          :ok <- check_file_permission(volume_id, parent_path, :write, state),
          child_path <- build_child_path(parent_path, name),
          {:ok, inode} <- InodeTable.get_inode(volume_id, child_path),
-         {:ok, file} <- file_index_get_by_path(volume_id, child_path),
-         :ok <- file_index_delete(volume_id, file.id),
+         :ok <- delete_file(state.volume_name, child_path),
          :ok <- InodeTable.release_inode(inode) do
       {"ok", %{}}
     else
@@ -1760,6 +1756,17 @@ defmodule NeonFS.FUSE.Handler do
     core_call(NeonFS.Core.FileIndex, :get_by_path, [volume_id, path])
   end
 
+  # `unlink` has to go through the `Core.delete_file/3` facade rather than
+  # `FileIndex.delete/1`. The facade is what queries the file's `:pinned`
+  # claims and marks it detached instead of hard-deleting while a handle
+  # is open — the whole unlink-while-open story. Deleting by id skipped
+  # that, so a file unlinked *through the mount* lost its chunks out from
+  # under an open fd, while the same unlink from any other interface
+  # detached correctly.
+  defp delete_file(volume_name, path) do
+    core_call(NeonFS.Core, :delete_file, [volume_name, path])
+  end
+
   defp file_index_list_volume(volume_id) do
     case core_call(NeonFS.Core.FileIndex, :list_volume, [volume_id]) do
       files when is_list(files) -> files
@@ -1831,27 +1838,45 @@ defmodule NeonFS.FUSE.Handler do
     ChunkReader.read_file(volume_id, path, opts)
   end
 
-  # Read / write dispatch helpers for the unlink-while-open story: if
-  # the FUSE-side `fh` is one we allocated at `open` /
-  # `create` and tracked in `state.fh_table`, route through
-  # `Core.read_file_by_id` / `write_file_at_by_id` — which work
-  # against detached files. Otherwise fall back to the path-based
-  # form so legacy callers (no explicit open) keep working.
-  defp read_via_fh_or_path(_volume_id, path, fh, offset, size, state) do
+  # A handle allocated at `open` / `create` carries the file id, and that
+  # is all an fd-bearing operation needs. Resolving the inode — or the
+  # path behind it — first is not merely wasted work on the hot path:
+  # after an unlink the name is gone and the inode is released, so
+  # resolution fails and a read through a perfectly good fd returns
+  # ENOENT. POSIX requires that fd to keep working, which is what the pin
+  # taken at `open` exists to guarantee.
+  #
+  # Permissions are checked at `open`, as POSIX specifies, so a handle
+  # that exists has already been authorised; a per-read check would
+  # re-resolve a path to answer a question already answered.
+  #
+  # Reads go out over the TLS data plane rather than an RPC through core:
+  # `ChunkReader` builds the chunk list locally and fetches each chunk
+  # directly, so an open handle does not pay for a core round trip per
+  # read.
+  #
+  # An `fh` we do not know is a caller reading without an open — and
+  # still resolves by path.
+  defp read_dispatch(ino, fh, offset, size, state) do
     case Map.get(state.fh_table, fh) do
       %{file_id: file_id} ->
-        core_call(NeonFS.Core, :read_file_by_id, [
-          state.volume_name,
-          file_id,
-          [offset: offset, length: size]
-        ])
+        ChunkReader.read_file_by_id(state.volume_name, file_id, offset: offset, length: size)
 
       nil ->
-        read_file(state.volume_name, path, offset: offset, length: size)
+        read_by_path(ino, offset, size, state)
     end
   end
 
-  defp write_via_fh_or_path(volume_id, path, fh, offset, data, state) do
+  defp read_by_path(ino, offset, size, state) do
+    with {:ok, {volume_id, path}} <- resolve_inode(ino, state),
+         :ok <- check_file_permission(volume_id, path, :read, state),
+         {:ok, data} <- read_file(state.volume_name, path, offset: offset, length: size) do
+      maybe_update_atime(volume_id, path, state.atime_mode)
+      {:ok, data}
+    end
+  end
+
+  defp write_dispatch(ino, fh, offset, data, state) do
     case Map.get(state.fh_table, fh) do
       %{file_id: file_id} ->
         core_call(NeonFS.Core, :write_file_at_by_id, [
@@ -1862,12 +1887,19 @@ defmodule NeonFS.FUSE.Handler do
         ])
 
       nil ->
-        write_call(volume_id, NeonFS.Core.WriteOperation, :write_file_at, [
-          volume_id,
-          path,
-          offset,
-          data
-        ])
+        write_by_path(ino, offset, data, state)
+    end
+  end
+
+  defp write_by_path(ino, offset, data, state) do
+    with {:ok, {volume_id, path}} <- resolve_inode(ino, state),
+         :ok <- check_file_permission(volume_id, path, :write, state) do
+      write_call(volume_id, NeonFS.Core.WriteOperation, :write_file_at, [
+        volume_id,
+        path,
+        offset,
+        data
+      ])
     end
   end
 
