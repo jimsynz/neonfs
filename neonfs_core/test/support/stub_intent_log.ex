@@ -23,6 +23,10 @@ defmodule NeonFS.TestSupport.StubIntentLog do
   @doc false
   @spec complete(binary()) :: :ok
   def complete(intent_id) when is_binary(intent_id), do: :ok
+
+  @doc false
+  @spec fail(binary(), term()) :: :ok
+  def fail(intent_id, _reason) when is_binary(intent_id), do: :ok
 end
 
 defmodule NeonFS.TestSupport.RefusingIntentLog do
@@ -42,5 +46,10 @@ defmodule NeonFS.TestSupport.RefusingIntentLog do
   @doc false
   @spec complete(binary()) :: {:error, Unavailable.t()}
   def complete(intent_id) when is_binary(intent_id),
+    do: {:error, Unavailable.from_reason(:ra_not_available)}
+
+  @doc false
+  @spec fail(binary(), term()) :: {:error, Unavailable.t()}
+  def fail(intent_id, _reason) when is_binary(intent_id),
     do: {:error, Unavailable.from_reason(:ra_not_available)}
 end

@@ -107,7 +107,8 @@ defmodule NeonFS.Core.MetadataStateMachine do
              expected_previous_hash :: binary(), updates :: map()}
           | {:register_volume_roots, volume_id :: binary(),
              entries :: %{optional(non_neg_integer()) => volume_root_entry()}}
-          | {:cas_update_volume_roots, volume_id :: binary(), roots :: checked_root_set()}
+          | {:cas_update_volume_roots, volume_id :: binary(), roots :: checked_root_set(),
+             release_intents :: [binary()]}
           | {:unregister_volume_root, volume_id :: binary()}
           | {:put_snapshot, entry :: snapshot_entry()}
           | {:delete_snapshot, volume_id :: binary(), snapshot_id :: binary()}
@@ -2183,6 +2184,16 @@ defmodule NeonFS.Core.MetadataStateMachine do
   # stale expectation is what makes the batch the atomic unit — the writer
   # rebuilds every participant's segment and retries.
   #
+  # `release_intents` carries the conflict leases the operation acquired
+  # before it built any of this. Releasing them here rather than afterwards
+  # is what keeps a lease from outliving its operation: a writer that dies
+  # between consensus and its own post-commit work has already had its
+  # leases released by the same log entry that made the write durable, so
+  # there is nothing left to abandon. The alternative — release as a
+  # post-commit effect — leaves a directory-wide lease held for the
+  # intent's full TTL whenever the publishing process does not survive
+  # its own success.
+  #
   # The command is purely additive and changes no state shape, so it needs
   # no machine-version bump. A bump would not help the only case that could
   # care — a member still running code without this clause — because Ra
@@ -2190,11 +2201,11 @@ defmodule NeonFS.Core.MetadataStateMachine do
   # gating emission on the effective version would mean keeping the
   # non-atomic per-shard path alive. This repository supports no
   # mixed-version clusters, so the version stays where it is.
-  def apply(_meta, {:cas_update_volume_roots, volume_id, roots}, state) do
+  def apply(_meta, {:cas_update_volume_roots, volume_id, roots, release_intents}, state) do
     state = ensure_bootstrap(state)
 
     case check_root_set(state, volume_id, roots) do
-      :ok -> publish_root_set(state, volume_id, roots)
+      :ok -> publish_root_set(state, volume_id, roots, release_intents)
       {:error, reason} -> reject_root_set(state, volume_id, reason)
     end
   end
@@ -2356,19 +2367,8 @@ defmodule NeonFS.Core.MetadataStateMachine do
   end
 
   def apply(_meta, {:complete_intent, intent_id}, state) do
-    case Map.get(state.intents, intent_id) do
-      nil ->
-        {state, {:error, :not_found}, []}
-
-      intent ->
-        completed = %{intent | state: :completed, completed_at: DateTime.utc_now()}
-
-        new_state =
-          state
-          |> put_in_intents(intent_id, completed)
-          |> remove_conflict_key(intent.conflict_key)
-          |> increment_version()
-
+    case complete_intent(state, intent_id) do
+      {:ok, new_state} ->
         :telemetry.execute(
           [:neonfs, :ra, :command, :complete_intent],
           %{version: new_state.version},
@@ -2376,6 +2376,9 @@ defmodule NeonFS.Core.MetadataStateMachine do
         )
 
         {new_state, :ok, []}
+
+      :not_found ->
+        {state, {:error, :not_found}, []}
     end
   end
 
@@ -2390,7 +2393,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
         new_state =
           state
           |> put_in_intents(intent_id, failed)
-          |> remove_conflict_key(intent.conflict_key)
+          |> remove_conflict_key(intent.conflict_key, intent_id)
           |> increment_version()
 
         :telemetry.execute(
@@ -2449,7 +2452,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
 
         acc
         |> put_in_intents(intent_id, expired_intent)
-        |> remove_conflict_key(intent.conflict_key)
+        |> remove_conflict_key(intent.conflict_key, intent_id)
       end)
 
     new_state = increment_version(new_state)
@@ -2533,6 +2536,35 @@ defmodule NeonFS.Core.MetadataStateMachine do
       | active_intents_by_conflict_key:
           Map.put(state.active_intents_by_conflict_key, conflict_key, intent_id)
     }
+  end
+
+  # Marks the intent completed and frees its conflict key, but only when
+  # the key still names *this* intent. A completion can arrive after the
+  # key has been re-acquired — the root-set publication carries its
+  # releases and is re-submitted on a stale expectation or an ambiguous
+  # reply — and deleting the key blindly would then release the new
+  # holder's lease, which is the one thing a lease must never do.
+  defp complete_intent(state, intent_id) do
+    case Map.get(state.intents, intent_id) do
+      nil ->
+        :not_found
+
+      intent ->
+        completed = %{intent | state: :completed, completed_at: DateTime.utc_now()}
+
+        {:ok,
+         state
+         |> put_in_intents(intent_id, completed)
+         |> remove_conflict_key(intent.conflict_key, intent_id)
+         |> increment_version()}
+    end
+  end
+
+  defp remove_conflict_key(state, conflict_key, intent_id) do
+    case Map.get(state.active_intents_by_conflict_key, conflict_key) do
+      ^intent_id -> remove_conflict_key(state, conflict_key)
+      _other -> state
+    end
   end
 
   defp remove_conflict_key(state, conflict_key) do
@@ -2735,25 +2767,44 @@ defmodule NeonFS.Core.MetadataStateMachine do
     end)
   end
 
-  defp publish_root_set(state, volume_id, roots) do
+  defp publish_root_set(state, volume_id, roots, intent_ids) do
     now = DateTime.utc_now()
     flip = &flip_shard(&2, &1, now)
 
     shards = Enum.reduce(roots, get_volume_shards(state, volume_id), flip)
 
-    new_state = %{
-      state
-      | volume_roots: Map.put(state.volume_roots, volume_id, shards),
-        version: state.version + 1
-    }
+    new_state =
+      %{
+        state
+        | volume_roots: Map.put(state.volume_roots, volume_id, shards),
+          version: state.version + 1
+      }
+      |> release_intents(intent_ids)
 
     :telemetry.execute(
       [:neonfs, :ra, :command, :cas_update_volume_roots],
-      %{version: new_state.version, shard_count: map_size(roots)},
+      %{
+        version: new_state.version,
+        shard_count: map_size(roots),
+        released_intents: length(intent_ids)
+      },
       %{volume_id: volume_id, shards: Map.keys(roots)}
     )
 
     {new_state, :ok, []}
+  end
+
+  # An id with no intent behind it is not an error to report: the caller
+  # cannot distinguish "already released" from "never existed", and both
+  # mean the lease is not held. Re-submission of a publication makes the
+  # first of those routine.
+  defp release_intents(state, intent_ids) do
+    Enum.reduce(intent_ids, state, fn intent_id, acc ->
+      case complete_intent(acc, intent_id) do
+        {:ok, next} -> next
+        :not_found -> acc
+      end
+    end)
   end
 
   # Merges rather than replaces, so a participant keeps the entry fields the

@@ -268,7 +268,8 @@ defmodule NeonFS.Core.Snapshot do
         {shard, {Map.fetch!(current_root_hashes, shard), %{root_chunk_hash: new_hash}}}
       end)
 
-    case RaSupervisor.command({:cas_update_volume_roots, volume_id, roots}) do
+    # No conflict lease to release: a restore holds none.
+    case RaSupervisor.command({:cas_update_volume_roots, volume_id, roots, []}) do
       {:ok, :ok, _leader} -> :ok
       {:ok, {:error, _} = err, _leader} -> err
       {:error, _} = err -> err

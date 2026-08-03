@@ -8,10 +8,15 @@ defmodule NeonFS.Integration.MetadataCommitBoundaryTest do
   inside `MetadataWriter` — before publication, the mid-CAS window that
   the single root-set command removes, the ambiguous reply, and a batch
   carrying several logical operations. Everything after the publication
-  belongs to `FileIndex`: releasing the intent lease, materialising the
-  local ETS cache, broadcasting the change event, replying to the caller.
-  A crash in that gap is the case where the durable outcome and the
-  node's own view of it diverge, and it needs a real node to reproduce.
+  belongs to `FileIndex`: materialising the local ETS cache, broadcasting
+  the change event, replying to the caller. A crash in that gap is the
+  case where the durable outcome and the node's own view of it diverge,
+  and it needs a real node to reproduce.
+
+  The operation's conflict lease is deliberately *not* in that list. It is
+  released by the publishing log entry itself, so these tests also pin
+  that a crashed operation leaves no lease behind — the reason it is not a
+  post-commit effect is precisely the crash they inject.
 
   Each test parks a batch in the volume's suspended commit worker, kills
   the node's `FileIndex`, then lets the publication land — so the root
@@ -37,7 +42,6 @@ defmodule NeonFS.Integration.MetadataCommitBoundaryTest do
 
   alias NeonFS.Core.{FileIndex, FileMeta, MetadataStateMachine, RaSupervisor, VolumeRegistry}
   alias NeonFS.Core.Volume.Shard
-  alias NeonFS.Error.{AlreadyExists, Conflict}
   alias NeonFS.Integration.CommitBoundary
   alias NeonFS.TestSupport.PeerCluster
 
@@ -91,12 +95,12 @@ defmodule NeonFS.Integration.MetadataCommitBoundaryTest do
     assert_dir_contains(cluster, volume.id, dir, [name])
 
     # Re-issuing the operation is the caller's only recourse — its own
-    # reply died with the process. The create's conflict key is the
-    # parent-plus-name it just published, so the retry is answered from
-    # the lease the crash abandoned, and answered correctly: the file is
-    # there.
-    assert {:error, %AlreadyExists{}} =
-             PeerCluster.rpc(cluster, :node1, FileIndex, :create, [file])
+    # reply died with the process. The retry re-publishes byte-identical
+    # metadata under the same file id, so it converges on the state that
+    # is already there rather than conflicting with itself over a lease
+    # its own crash left behind.
+    assert {:ok, _} = PeerCluster.rpc(cluster, :node1, FileIndex, :create, [file])
+    assert_file_present(cluster, volume.id, path, file_id)
 
     assert_recovered(cluster, :node1, volume.id)
   end
@@ -169,15 +173,13 @@ defmodule NeonFS.Integration.MetadataCommitBoundaryTest do
     assert_path_absent(cluster, volume.id, Path.join(dir, old_name))
     assert_dir_contains(cluster, volume.id, dir, [new_name])
 
-    # A rename leases the whole parent directory, and the crash abandoned
-    # that lease with no one left to release it. Until the intent's TTL
-    # expires — minutes, not milliseconds — every rename and move in this
-    # directory is refused, including the retry of the one that already
-    # succeeded. The published metadata is correct and readable
-    # throughout; what is unavailable is further mutation of the
-    # directory. Pinning current behaviour: invert this assertion when an
-    # abandoned lease is reclaimed rather than waited out.
-    assert {:error, %Conflict{}} =
+    # A rename leases the whole parent directory, so a lease the crash
+    # left held would refuse every later rename and move here for the
+    # intent's TTL — including the retry of the one that already
+    # succeeded. It does not, because the entry that published the rename
+    # released the lease in the same breath: there was never a window in
+    # which the write was durable and its lease was not.
+    assert :ok =
              PeerCluster.rpc(cluster, :node3, FileIndex, :rename, [
                volume.id,
                dir,
@@ -185,6 +187,7 @@ defmodule NeonFS.Integration.MetadataCommitBoundaryTest do
                "third.bin"
              ])
 
+    assert_file_present(cluster, volume.id, Path.join(dir, "third.bin"), file_id)
     assert_recovered(cluster, :node3, volume.id)
   end
 

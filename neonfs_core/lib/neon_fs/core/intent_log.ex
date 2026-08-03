@@ -46,6 +46,17 @@ defmodule NeonFS.Core.IntentLog do
           # Another writer holds the lock
           :retry_later
       end
+
+  ## Releasing
+
+  `complete/1` and `fail/2` are for work whose completion is not itself a
+  Ra command. When the work *is* one — a metadata batch published by
+  `NeonFS.Core.Volume.MetadataWriter` — pass the intent id in that
+  command's `:release_intents` instead: the entry that makes the write
+  durable then frees the lease, and a writer that dies immediately after
+  consensus leaves nothing held. Releasing such a lease afterwards means a
+  crash in between holds the conflict key for the whole TTL, on a write
+  that already succeeded.
   """
 
   alias NeonFS.Core.{Intent, MetadataStateMachine, RaServer, RaSupervisor}

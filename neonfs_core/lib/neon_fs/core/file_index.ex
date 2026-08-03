@@ -798,11 +798,17 @@ defmodule NeonFS.Core.FileIndex do
   # answered immediately, no metadata write — or `{:stage, volume_id,
   # mutations, on_commit, on_abort, reply}` to join the next batch.
   # `mutations` are pure `MetadataWriter` ops; `on_commit` runs the
-  # post-durable side effects (ETS, broadcasts, intent complete) once
-  # the batch commits, `on_abort` handles a failed batch and returns
-  # that caller's reply. `file_effect` (an optional 7th element) feeds
-  # the in-batch `pending_files` overlay so a later same-file read in
-  # the same batch sees this op's result.
+  # post-durable side effects (ETS, broadcasts) once the batch commits,
+  # `on_abort` handles a failed batch and returns that caller's reply.
+  #
+  # An optional 7th element carries per-plan extras as a keyword list:
+  #
+  # - `:file_effect` feeds the in-batch `pending_files` overlay so a
+  #   later same-file read in the same batch sees this op's result.
+  # - `:intent_id` is the conflict lease the planner acquired. It travels
+  #   with the batch to `MetadataWriter`, which releases it inside the
+  #   publishing log entry — not from `on_commit`, because a process that
+  #   dies after consensus would strand the lease for its whole TTL.
 
   defp plan_create(file) do
     case FileMeta.validate_path(file.path) do
@@ -832,7 +838,6 @@ defmodule NeonFS.Core.FileIndex do
           ]
 
       on_commit = fn ->
-        complete_intent(intent_id)
         :ets.insert(:file_index_by_id, {file.id, file})
 
         safe_broadcast(file.volume_id, %FileCreated{
@@ -843,7 +848,7 @@ defmodule NeonFS.Core.FileIndex do
       end
 
       {:stage, file.volume_id, mutations, on_commit, default_on_abort(), {:ok, file},
-       {:put, file}}
+       file_effect: {:put, file}, intent_id: intent_id}
     else
       {:error, %Conflict{}} -> {:now, {:error, AlreadyExists.from_reason(:already_exists)}}
       {:error, reason} -> {:now, {:error, reason}}
@@ -866,7 +871,7 @@ defmodule NeonFS.Core.FileIndex do
         end
 
         {:stage, updated_file.volume_id, [file_put_mutation(updated_file)], on_commit,
-         default_on_abort(), {:ok, updated_file}, {:put, updated_file}}
+         default_on_abort(), {:ok, updated_file}, file_effect: {:put, updated_file}}
 
       {:error, reason} ->
         {:now, {:error, reason}}
@@ -961,7 +966,7 @@ defmodule NeonFS.Core.FileIndex do
         on_commit = fn -> :ets.insert(:file_index_by_id, {file_id, touched_file}) end
 
         {:stage, touched_file.volume_id, [file_put_mutation(touched_file)], on_commit,
-         default_on_abort(), {:ok, touched_file}, {:put, touched_file}}
+         default_on_abort(), {:ok, touched_file}, file_effect: {:put, touched_file}}
 
       {:error, reason} ->
         {:now, {:error, reason}}
@@ -995,13 +1000,10 @@ defmodule NeonFS.Core.FileIndex do
           dirent_delete_mutation(file.volume_id, parent_path, name)
         ]
 
-        on_commit = fn ->
-          complete_intent(intent_id)
-          delete_file_from_ets(file_id, file)
-        end
+        on_commit = fn -> delete_file_from_ets(file_id, file) end
 
         {:stage, file.volume_id, mutations, on_commit, delete_on_abort(file_id, file), :ok,
-         {:delete, file_id}}
+         file_effect: {:delete, file_id}, intent_id: intent_id}
 
       {:error, reason} ->
         # When the intent can't be acquired (e.g. quorum down), still delete
@@ -1069,7 +1071,6 @@ defmodule NeonFS.Core.FileIndex do
         ]
 
         on_commit = fn ->
-          complete_intent(intent_id)
           :ets.insert(:file_index_by_id, {file.id, detached_file})
 
           safe_broadcast(file.volume_id, %FileDeleted{
@@ -1080,7 +1081,7 @@ defmodule NeonFS.Core.FileIndex do
         end
 
         {:stage, file.volume_id, mutations, on_commit, default_on_abort(), {:ok, detached_file},
-         {:put, detached_file}}
+         file_effect: {:put, detached_file}, intent_id: intent_id}
 
       {:error, reason} ->
         {:now, {:error, reason}}
@@ -1117,7 +1118,7 @@ defmodule NeonFS.Core.FileIndex do
         on_commit = fn -> :ets.insert(:file_index_by_id, {file.id, updated}) end
 
         {:stage, updated.volume_id, [file_put_mutation(updated)], on_commit, default_on_abort(),
-         :ok, {:put, updated}}
+         :ok, file_effect: {:put, updated}}
     end
   end
 
@@ -1135,7 +1136,7 @@ defmodule NeonFS.Core.FileIndex do
     on_commit = fn -> delete_file_from_ets(file.id, file) end
 
     {:stage, file.volume_id, [file_delete_mutation(file)], on_commit, default_on_abort(), reply,
-     {:delete, file.id}}
+     file_effect: {:delete, file.id}}
   end
 
   defp delete_file_from_ets(file_id, file) do
@@ -1238,13 +1239,12 @@ defmodule NeonFS.Core.FileIndex do
         ] ++ file_path_mutations(updated_file)
 
       on_commit = fn ->
-        complete_intent(intent_id)
         materialise_file_path(updated_file)
         broadcast_rename_event(volume_id, child, normalized, old_name, new_name)
       end
 
       {:stage, volume_id, mutations, on_commit, default_on_abort(), :ok,
-       file_path_effect(updated_file)}
+       file_effect: file_path_effect(updated_file), intent_id: intent_id}
     else
       {:error, reason} -> {:now, {:error, reason}}
     end
@@ -1313,7 +1313,6 @@ defmodule NeonFS.Core.FileIndex do
         ] ++ file_path_mutations(updated_file)
 
       on_commit = fn ->
-        complete_intent(intent_id)
         materialise_file_path(updated_file)
 
         broadcast_move_event(
@@ -1327,7 +1326,7 @@ defmodule NeonFS.Core.FileIndex do
       end
 
       {:stage, volume_id, mutations, on_commit, default_on_abort(), :ok,
-       file_path_effect(updated_file)}
+       file_effect: file_path_effect(updated_file), intent_id: intent_id}
     else
       {:error, reason} -> {:now, {:error, reason}}
     end
@@ -1467,10 +1466,10 @@ defmodule NeonFS.Core.FileIndex do
   defp with_chunk_commit({:now, _} = now, _write_id, _chunk_hashes), do: now
 
   # `plan_create/1` and `plan_update/3` — the only planners routed here —
-  # always stage a 7-tuple (they carry a `file_effect`), so that's the
-  # only `{:stage, …}` shape this needs to handle.
+  # always stage a 7-tuple (they carry extras), so that's the only
+  # `{:stage, …}` shape this needs to handle.
   defp with_chunk_commit(
-         {:stage, volume_id, mutations, on_commit, on_abort, reply, file_effect},
+         {:stage, volume_id, mutations, on_commit, on_abort, reply, extras},
          write_id,
          hashes
        ) do
@@ -1481,8 +1480,7 @@ defmodule NeonFS.Core.FileIndex do
       on_commit.()
     end
 
-    {:stage, volume_id, mutations ++ chunk_mutations, folded_on_commit, on_abort, reply,
-     file_effect}
+    {:stage, volume_id, mutations ++ chunk_mutations, folded_on_commit, on_abort, reply, extras}
   end
 
   # Folds caller-supplied extra mutations (the erasure path's
@@ -1491,7 +1489,7 @@ defmodule NeonFS.Core.FileIndex do
   defp with_extra_mutations({:now, _} = now, _opts), do: now
 
   defp with_extra_mutations(
-         {:stage, volume_id, mutations, on_commit, on_abort, reply, file_effect},
+         {:stage, volume_id, mutations, on_commit, on_abort, reply, extras},
          opts
        ) do
     extra_mutations = Keyword.get(opts, :extra_mutations, [])
@@ -1502,8 +1500,7 @@ defmodule NeonFS.Core.FileIndex do
       extra_on_commit.()
     end
 
-    {:stage, volume_id, mutations ++ extra_mutations, folded_on_commit, on_abort, reply,
-     file_effect}
+    {:stage, volume_id, mutations ++ extra_mutations, folded_on_commit, on_abort, reply, extras}
   end
 
   ## Private — Batch committer
@@ -1517,11 +1514,11 @@ defmodule NeonFS.Core.FileIndex do
   defp stage_or_reply({:now, reply}, _from, state), do: {:reply, reply, state}
 
   defp stage_or_reply({:stage, volume_id, mutations, on_commit, on_abort, reply}, from, state) do
-    stage_or_reply({:stage, volume_id, mutations, on_commit, on_abort, reply, nil}, from, state)
+    stage_or_reply({:stage, volume_id, mutations, on_commit, on_abort, reply, []}, from, state)
   end
 
   defp stage_or_reply(
-         {:stage, volume_id, mutations, on_commit, on_abort, reply, file_effect},
+         {:stage, volume_id, mutations, on_commit, on_abort, reply, extras},
          from,
          state
        ) do
@@ -1530,11 +1527,12 @@ defmodule NeonFS.Core.FileIndex do
       mutations: mutations,
       on_commit: on_commit,
       on_abort: on_abort,
-      reply: reply
+      reply: reply,
+      intent_id: Keyword.get(extras, :intent_id)
     }
 
     state
-    |> stage_txn(volume_id, txn, file_effect)
+    |> stage_txn(volume_id, txn, Keyword.get(extras, :file_effect))
     |> after_stage()
   end
 
@@ -1576,11 +1574,23 @@ defmodule NeonFS.Core.FileIndex do
   # batch is the atomic unit and there is one outcome to report. Callers that
   # shared this flush window therefore share its fate on infrastructure
   # failure, and retry independently.
+  #
+  # The conflict leases the batch's operations acquired travel with the
+  # publication so the log entry that makes the write durable is the one
+  # that releases them. Doing it afterwards, from `on_commit`, meant a
+  # process that died between consensus and its own bookkeeping left the
+  # lease held for the intent's whole TTL — a directory-wide lease, for
+  # rename and move, on a write that had already succeeded.
   defp commit_volume_batch(volume_id, txns) do
     mutations = Enum.flat_map(txns, & &1.mutations)
-    result = VolumeCommitter.commit(volume_id, mutations, metadata_writer_opts())
+    opts = Keyword.put(metadata_writer_opts(), :release_intents, held_intents(txns))
+    result = VolumeCommitter.commit(volume_id, mutations, opts)
 
     Enum.each(txns, &reply_after_commit(&1, result))
+  end
+
+  defp held_intents(txns) do
+    txns |> Enum.map(& &1.intent_id) |> Enum.reject(&is_nil/1)
   end
 
   # The batch is durable by the time this runs, so a post-commit effect that
@@ -1607,8 +1617,26 @@ defmodule NeonFS.Core.FileIndex do
     GenServer.reply(txn.from, txn.reply)
   end
 
+  # Nothing was published, so no log entry carried the lease release — and
+  # the operation the lease was guarding is over either way. Failing it
+  # here frees the conflict key for the caller's own retry instead of
+  # making it wait out a TTL for a write that never happened.
   defp reply_after_commit(txn, {:error, reason}) do
+    release_held_intent(txn, reason)
     GenServer.reply(txn.from, txn.on_abort.(reason))
+  end
+
+  defp release_held_intent(%{intent_id: nil}, _reason), do: :ok
+
+  defp release_held_intent(%{intent_id: intent_id}, reason) do
+    case intent_log().fail(intent_id, reason) do
+      :ok -> :ok
+      {:error, fail_reason} -> warn_lease_not_released(intent_id, fail_reason)
+    end
+  rescue
+    error -> warn_lease_not_released(intent_id, error)
+  catch
+    :exit, exit_reason -> warn_lease_not_released(intent_id, exit_reason)
   end
 
   defp arm_timer(%{timer: nil} = state) do
@@ -1756,25 +1784,11 @@ defmodule NeonFS.Core.FileIndex do
 
   ## Private — IntentLog helpers
 
-  # Releasing the lease is a *post-commit* effect: it runs from an
-  # `on_commit` closure inside the flush, after the mutation is already
-  # durable. Failing the operation retroactively is not an option, and
-  # crashing the committer would strand the rest of the batch — so this
-  # absorbs the failure. What it must not do is absorb it *silently*: an
-  # unreleased lease blocks the next writer on that conflict key until its
-  # TTL expires, and an operator seeing that stall deserves a log line
-  # naming the cause.
-  defp complete_intent(intent_id) do
-    case intent_log().complete(intent_id) do
-      :ok -> :ok
-      {:error, reason} -> warn_lease_not_released(intent_id, reason)
-    end
-  rescue
-    error -> warn_lease_not_released(intent_id, error)
-  catch
-    :exit, reason -> warn_lease_not_released(intent_id, reason)
-  end
-
+  # A lease the abort path could not release still blocks its conflict key
+  # until the TTL expires, so the failure must not be swallowed silently —
+  # an operator watching renames stall in one directory deserves a line
+  # naming the cause. It must not be raised either: the batch's other
+  # transactions are still waiting for their replies.
   defp warn_lease_not_released(intent_id, reason) do
     Logger.warning(
       "Intent lease not released; it will block its conflict key until the TTL expires",
