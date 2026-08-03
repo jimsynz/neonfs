@@ -7,10 +7,10 @@ defmodule NeonFS.Integration.MetadataCommitBoundaryRestartTest do
   `metadata_commit_boundary_test.exs` proves that killing `FileIndex`
   between consensus and its effects still leaves a complete operation.
   This proves the same thing survives the node going away afterwards —
-  the case where the local ETS materialisation, the pending intent lease
-  and the process that would have finished the job are all gone at once.
-  Recovery here has to come from the replicated root set, because there
-  is nothing else left to come from.
+  the case where the local ETS materialisation and the process that would
+  have finished the job are both gone at once. Recovery here has to come
+  from the replicated root set, because there is nothing else left to
+  come from.
 
   A whole-node restart mutates cluster state permanently, so this needs
   a `:per_test` cluster; the shared-cluster boundary tests live next
@@ -72,8 +72,9 @@ defmodule NeonFS.Integration.MetadataCommitBoundaryRestartTest do
     assert_path_absent(cluster, volume.id, Path.join(renamed_dir, "before.bin"))
 
     # The restarted node is not merely readable — it can still publish.
-    # TTL expiry of the two abandoned intent leases is minutes away, so
-    # anything that commits now committed because the node recovered.
+    # Both crashed operations leased a conflict key, and both leases went
+    # out with the entries that published them, so a commit now is the
+    # node having recovered rather than a lease having timed out.
     assert_commits(cluster, :node1, volume.id, "/restart/after-restart.bin")
   end
 

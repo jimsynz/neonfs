@@ -184,6 +184,16 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
   `mutations` is a list of `{:put, kind, key, value}` /
   `{:delete, kind, key}` / `{:merge, kind, key, fields}`. An empty list is
   a no-op.
+
+  ## Options
+
+  - `:release_intents` — `IntentLog` intent ids the publication should
+    release as part of the same log entry. A caller holding a conflict
+    lease for the operation being published passes it here rather than
+    releasing it afterwards: a process that dies between consensus and
+    its own post-commit work would otherwise leave the lease held until
+    its TTL expired, and the write it belongs to is already durable by
+    then. An empty list is the norm for callers that hold no lease.
   """
   @spec apply_batch(binary(), [mutation()], keyword()) ::
           {:ok, %{optional(non_neg_integer()) => binary()}} | write_error()
@@ -194,7 +204,12 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
       opts,
       fn -> local_apply_batch(volume_id, mutations, opts) end,
       fn node, remote_opts ->
-        remote_call(node, opts, :apply_batch, [volume_id, mutations, remote_opts])
+        # The remote hop deliberately drops local injection and tuning
+        # opts, but the lease ids are the batch's own data — publishing it
+        # elsewhere without them would leave exactly the leak this
+        # option exists to close.
+        forwarded = Keyword.put(remote_opts, :release_intents, release_intents(opts))
+        remote_call(node, opts, :apply_batch, [volume_id, mutations, forwarded])
       end
     )
   end
@@ -549,8 +564,13 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
   defp publish_root_set(volume_id, prepared, opts) do
     roots = Map.new(prepared, fn {shard, p} -> {shard, {p.expected, p.updates}} end)
 
-    submit_bootstrap_command({:cas_update_volume_roots, volume_id, roots}, opts)
+    submit_bootstrap_command(
+      {:cas_update_volume_roots, volume_id, roots, release_intents(opts)},
+      opts
+    )
   end
+
+  defp release_intents(opts), do: Keyword.get(opts, :release_intents, [])
 
   # Apply each mutation against the working per-kind tree root, threading
   # the new root forward so later mutations build on earlier ones, and

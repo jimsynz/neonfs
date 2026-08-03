@@ -46,7 +46,7 @@ defmodule NeonFS.Core.Volume.MetadataWriterRootSetTest do
 
     assert Enum.sort(Map.keys(roots)) == Enum.sort(shards)
 
-    assert [{:cas_update_volume_roots, "vol-1", published}] = captured(ctx)
+    assert [{:cas_update_volume_roots, "vol-1", published, _intents}] = captured(ctx)
     assert Enum.sort(Map.keys(published)) == Enum.sort(shards)
   end
 
@@ -58,7 +58,7 @@ defmodule NeonFS.Core.Volume.MetadataWriterRootSetTest do
                capturing_opts(ctx)
              )
 
-    assert [{:cas_update_volume_roots, _volume_id, published}] = captured(ctx)
+    assert [{:cas_update_volume_roots, _volume_id, published, _intents}] = captured(ctx)
 
     Enum.each(published, fn {_shard, {expected, updates}} ->
       # The shared mock resolves every shard to the same bootstrap entry.
@@ -82,8 +82,8 @@ defmodule NeonFS.Core.Volume.MetadataWriterRootSetTest do
     # Two attempts, and the retry re-published every participant rather than
     # only the shard whose expectation went stale.
     assert [first, second] = captured(ctx)
-    assert {:cas_update_volume_roots, "vol-1", first_roots} = first
-    assert {:cas_update_volume_roots, "vol-1", second_roots} = second
+    assert {:cas_update_volume_roots, "vol-1", first_roots, _first_intents} = first
+    assert {:cas_update_volume_roots, "vol-1", second_roots, _second_intents} = second
     assert map_size(first_roots) == shard_count
     assert map_size(second_roots) == shard_count
   end
@@ -101,7 +101,7 @@ defmodule NeonFS.Core.Volume.MetadataWriterRootSetTest do
     assert {:ok, roots} = MetadataWriter.apply_batch("vol-1", mutations, capturing_opts(ctx))
     assert map_size(roots) == 1
 
-    assert [{:cas_update_volume_roots, "vol-1", published}] = captured(ctx)
+    assert [{:cas_update_volume_roots, "vol-1", published, _intents}] = captured(ctx)
     assert map_size(published) == 1
   end
 
@@ -123,11 +123,11 @@ defmodule NeonFS.Core.Volume.MetadataWriterRootSetTest do
     # the observable form of "no participant moved". The
     # replicated-but-unreferenced segment chunks are GC debt, the documented
     # trade — not partial state.
-    assert [{:cas_update_volume_roots, "vol-1", _}] = captured(ctx)
+    assert [{:cas_update_volume_roots, "vol-1", _, _}] = captured(ctx)
 
     ctx = fresh_tables(ctx)
     assert {:ok, _} = MetadataWriter.apply_batch("vol-1", mutations, capturing_opts(ctx))
-    assert [{:cas_update_volume_roots, _, published}] = captured(ctx)
+    assert [{:cas_update_volume_roots, _, published, _intents}] = captured(ctx)
 
     Enum.each(published, fn {_shard, {expected, _updates}} -> assert expected == <<0::256>> end)
   end
@@ -144,7 +144,7 @@ defmodule NeonFS.Core.Volume.MetadataWriterRootSetTest do
 
       assert {:ok, _roots} = MetadataWriter.apply_batch("vol-1", mutations, capturing_opts(ctx))
 
-      assert [{:cas_update_volume_roots, "vol-1", published}] = captured(ctx),
+      assert [{:cas_update_volume_roots, "vol-1", published, _intents}] = captured(ctx),
              "#{participants} participants must still publish in exactly one command"
 
       assert map_size(published) == participants
@@ -165,9 +165,9 @@ defmodule NeonFS.Core.Volume.MetadataWriterRootSetTest do
     assert [first, second] = captured(ctx),
            "the lost reply is retried, so there are exactly two submissions"
 
-    assert {:cas_update_volume_roots, "vol-1", published} = first
+    assert {:cas_update_volume_roots, "vol-1", published, _intents} = first
 
-    assert {:cas_update_volume_roots, "vol-1", ^published} = second,
+    assert {:cas_update_volume_roots, "vol-1", ^published, _retry_intents} = second,
            "the retry publishes the same participant set"
   end
 

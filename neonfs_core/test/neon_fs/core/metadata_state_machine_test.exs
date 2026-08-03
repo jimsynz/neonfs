@@ -1646,7 +1646,7 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
       }
 
       {state, :ok, []} =
-        MetadataStateMachine.apply(%{}, {:cas_update_volume_roots, "vol-1", roots}, state)
+        MetadataStateMachine.apply(%{}, {:cas_update_volume_roots, "vol-1", roots, []}, state)
 
       assert state.volume_roots["vol-1"][0].root_chunk_hash == <<10>>
       assert state.volume_roots["vol-1"][1].root_chunk_hash == <<20>>
@@ -1660,7 +1660,7 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
       roots = %{0 => {<<1>>, %{root_chunk_hash: <<10>>, durability_cache: %{type: :replicate}}}}
 
       {state, :ok, []} =
-        MetadataStateMachine.apply(%{}, {:cas_update_volume_roots, "vol-1", roots}, state)
+        MetadataStateMachine.apply(%{}, {:cas_update_volume_roots, "vol-1", roots, []}, state)
 
       entry = state.volume_roots["vol-1"][0]
       assert entry.volume_id == "vol-1"
@@ -1674,7 +1674,7 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
       }
 
       {after_state, {:error, {:stale_pointer, info}}, []} =
-        MetadataStateMachine.apply(%{}, {:cas_update_volume_roots, "vol-1", roots}, state)
+        MetadataStateMachine.apply(%{}, {:cas_update_volume_roots, "vol-1", roots, []}, state)
 
       assert info[:shard] == 1
       assert info[:expected] == <<99>>
@@ -1693,7 +1693,7 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
       }
 
       {after_state, {:error, {:not_found, 7}}, []} =
-        MetadataStateMachine.apply(%{}, {:cas_update_volume_roots, "vol-1", roots}, state)
+        MetadataStateMachine.apply(%{}, {:cas_update_volume_roots, "vol-1", roots, []}, state)
 
       assert after_state.volume_roots["vol-1"][0].root_chunk_hash == <<1>>
       assert after_state.version == 0
@@ -1705,9 +1705,93 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
       {_state, {:error, {:not_found, 0}}, []} =
         MetadataStateMachine.apply(
           %{},
-          {:cas_update_volume_roots, "missing", roots},
+          {:cas_update_volume_roots, "missing", roots, []},
           base_state()
         )
+    end
+
+    # The lease has to be released by the entry that publishes the write.
+    # Released earlier and a concurrent writer can interleave; released
+    # later and a publisher that dies after consensus strands it for the
+    # intent's whole TTL, on a write that already succeeded.
+    test "releases the operation's conflict leases in the same entry", %{state: state} do
+      state = with_intent(state, "intent-1", {:dir, "vol-1", "/a"})
+      roots = %{0 => {<<1>>, %{root_chunk_hash: <<10>>}}}
+
+      {state, :ok, []} =
+        MetadataStateMachine.apply(
+          %{},
+          {:cas_update_volume_roots, "vol-1", roots, ["intent-1"]},
+          state
+        )
+
+      assert state.volume_roots["vol-1"][0].root_chunk_hash == <<10>>
+      assert state.intents["intent-1"].state == :completed
+      assert state.active_intents_by_conflict_key == %{}
+    end
+
+    test "a rejected set releases nothing", %{state: state} do
+      state = with_intent(state, "intent-1", {:dir, "vol-1", "/a"})
+      roots = %{0 => {<<99>>, %{root_chunk_hash: <<10>>}}}
+
+      {after_state, {:error, {:stale_pointer, _}}, []} =
+        MetadataStateMachine.apply(
+          %{},
+          {:cas_update_volume_roots, "vol-1", roots, ["intent-1"]},
+          state
+        )
+
+      assert after_state.intents["intent-1"].state == :pending
+      assert after_state.active_intents_by_conflict_key == %{{:dir, "vol-1", "/a"} => "intent-1"}
+    end
+
+    # A publication is re-submitted on a stale expectation and on an
+    # ambiguous reply, so the same release can arrive twice — the second
+    # time possibly after another writer has taken the key.
+    test "a repeated release does not free a key another intent now holds", %{state: state} do
+      state =
+        state
+        |> with_intent("intent-1", {:dir, "vol-1", "/a"})
+        |> with_intent("intent-2", {:dir, "vol-1", "/a"})
+
+      roots = %{0 => {<<1>>, %{root_chunk_hash: <<10>>}}}
+
+      {state, :ok, []} =
+        MetadataStateMachine.apply(
+          %{},
+          {:cas_update_volume_roots, "vol-1", roots, ["intent-1"]},
+          state
+        )
+
+      assert state.intents["intent-1"].state == :completed
+
+      assert state.active_intents_by_conflict_key == %{{:dir, "vol-1", "/a"} => "intent-2"},
+             "intent-2's lease must survive intent-1's release of the same key"
+    end
+
+    test "an unknown intent id is not an error", %{state: state} do
+      roots = %{0 => {<<1>>, %{root_chunk_hash: <<10>>}}}
+
+      {state, :ok, []} =
+        MetadataStateMachine.apply(
+          %{},
+          {:cas_update_volume_roots, "vol-1", roots, ["never-existed"]},
+          state
+        )
+
+      assert state.volume_roots["vol-1"][0].root_chunk_hash == <<10>>
+    end
+
+    defp with_intent(state, id, conflict_key) do
+      intent =
+        Intent.new(id: id, operation: :file_rename, conflict_key: conflict_key, params: %{})
+
+      %{
+        state
+        | intents: Map.put(state.intents, id, intent),
+          active_intents_by_conflict_key:
+            Map.put(state.active_intents_by_conflict_key, conflict_key, id)
+      }
     end
 
     defp root_entry(hash) do
