@@ -430,8 +430,16 @@ defmodule NeonFS.FUSE.Session do
     enqueue(:lookup, header.unique, op, state)
   end
 
-  defp handle_opcode(:getattr, header, %Request.GetAttr{}, state) do
-    op = {"getattr", %{"ino" => header.nodeid}}
+  # `FUSE_GETATTR_FH` — set when `fuse_getattr_in.fh` is populated.
+  @fuse_getattr_fh 0x01
+
+  # `fuse_getattr_in.fh` is only meaningful when `FUSE_GETATTR_FH` is set;
+  # otherwise the field is whatever was on the wire. Forwarding it lets
+  # the handler answer from the open handle's file id instead of
+  # re-resolving a path that may no longer exist.
+  defp handle_opcode(:getattr, header, %Request.GetAttr{} = req, state) do
+    fh = maybe_field(req.getattr_flags, @fuse_getattr_fh, req.fh)
+    op = {"getattr", %{"ino" => header.nodeid, "fh" => fh}}
     enqueue(:getattr, header.unique, op, state)
   end
 
@@ -986,10 +994,12 @@ defmodule NeonFS.FUSE.Session do
   @fattr_mtime 0x20
   @fattr_atime_now 0x80
   @fattr_mtime_now 0x100
+  @fattr_fh 0x40
 
   defp build_setattr_params(ino, %Request.SetAttr{} = req) do
     %{
       "ino" => ino,
+      "fh" => maybe_field(req.valid, @fattr_fh, req.fh),
       "mode" => maybe_field(req.valid, @fattr_mode, req.mode),
       "uid" => maybe_field(req.valid, @fattr_uid, req.uid),
       "gid" => maybe_field(req.valid, @fattr_gid, req.gid),
