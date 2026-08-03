@@ -481,31 +481,18 @@ defmodule NeonFS.Core.GCSchedulerTest do
     end
   end
 
-  describe "configuration from app env" do
-    test "uses values from app env when opts are not provided" do
-      Application.put_env(:neonfs_core, :gc_interval_ms, 7_200_000)
-      Application.put_env(:neonfs_core, :gc_pressure_threshold, 0.90)
-      Application.put_env(:neonfs_core, :gc_pressure_check_interval_ms, 120_000)
-
-      on_exit(fn ->
-        Application.delete_env(:neonfs_core, :gc_interval_ms)
-        Application.delete_env(:neonfs_core, :gc_pressure_threshold)
-        Application.delete_env(:neonfs_core, :gc_pressure_check_interval_ms)
-      end)
-
-      # Build opts the same way the supervisor does
-      opts = [
-        interval_ms: Application.get_env(:neonfs_core, :gc_interval_ms, 86_400_000),
-        pressure_threshold: Application.get_env(:neonfs_core, :gc_pressure_threshold, 0.85),
-        pressure_check_interval_ms:
-          Application.get_env(:neonfs_core, :gc_pressure_check_interval_ms, 300_000),
-        job_tracker_mod: MockJobTracker,
-        storage_metrics_mod: MockStorageMetrics
-      ]
-
-      name = :"gc_sched_appenv_#{System.unique_integer([:positive])}"
-
-      start_supervised!({GCScheduler, Keyword.put(opts, :name, name)})
+  # As in `scrub_scheduler_test.exs`: `init/1` takes these as opts and the
+  # application env is the supervisor's business, so writing the env here
+  # asserted nothing extra — and `delete_env` in an `async: true` file can
+  # clear a key another running test just set.
+  describe "interval and threshold configuration" do
+    test "uses the values it is given" do
+      name =
+        start_scheduler(
+          interval_ms: 7_200_000,
+          pressure_threshold: 0.90,
+          pressure_check_interval_ms: 120_000
+        )
 
       status = GenServer.call(name, :status)
       assert status.interval_ms == 7_200_000
@@ -513,29 +500,27 @@ defmodule NeonFS.Core.GCSchedulerTest do
       assert status.pressure_check_interval_ms == 120_000
     end
 
-    test "falls back to defaults when app env is not set" do
-      # Ensure no app env is set
-      Application.delete_env(:neonfs_core, :gc_interval_ms)
-      Application.delete_env(:neonfs_core, :gc_pressure_threshold)
-      Application.delete_env(:neonfs_core, :gc_pressure_check_interval_ms)
-
-      opts = [
-        interval_ms: Application.get_env(:neonfs_core, :gc_interval_ms, 86_400_000),
-        pressure_threshold: Application.get_env(:neonfs_core, :gc_pressure_threshold, 0.85),
-        pressure_check_interval_ms:
-          Application.get_env(:neonfs_core, :gc_pressure_check_interval_ms, 300_000),
-        job_tracker_mod: MockJobTracker,
-        storage_metrics_mod: MockStorageMetrics
-      ]
-
-      name = :"gc_sched_defaults_#{System.unique_integer([:positive])}"
-
-      start_supervised!({GCScheduler, Keyword.put(opts, :name, name)})
+    test "falls back to its own defaults when given none" do
+      name = start_scheduler([])
 
       status = GenServer.call(name, :status)
       assert status.interval_ms == 86_400_000
       assert status.pressure_threshold == 0.85
       assert status.pressure_check_interval_ms == 300_000
     end
+  end
+
+  defp start_scheduler(opts) do
+    name = :"gc_sched_#{System.unique_integer([:positive])}"
+
+    opts =
+      Keyword.merge(opts,
+        name: name,
+        job_tracker_mod: MockJobTracker,
+        storage_metrics_mod: MockStorageMetrics
+      )
+
+    start_supervised!({GCScheduler, opts})
+    name
   end
 end
