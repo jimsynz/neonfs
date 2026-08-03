@@ -64,6 +64,16 @@ defmodule NeonFS.CIFS.HandlerTest do
     {handle, state}
   end
 
+  defp open_dir(state, path) do
+    stub(NeonFS.Client, :core_call, fn
+      NeonFS.Core, :get_file_meta, ["vol-a", ^path] -> {:ok, file_meta(path, mode: 0o040755)}
+      NeonFS.Core, :list_dir, ["vol-a", ^path] -> {:ok, []}
+    end)
+
+    {{:ok, %{handle: handle}}, state} = Handler.handle({:fdopendir, %{"path" => path}}, state)
+    {handle, state}
+  end
+
   describe "lifecycle" do
     test "connect binds the volume to the connection state" do
       state = blank_state()
@@ -190,6 +200,54 @@ defmodule NeonFS.CIFS.HandlerTest do
         Handler.handle({:fchmod, %{"handle" => handle, "mode" => 0o600}}, state)
 
       assert {:ok, %{}} == reply
+    end
+
+    # `fchmod` used to resolve only through the file-handle registry, so a
+    # directory handle — minted separately by `fdopendir` — missed it and
+    # returned `:ebadf` before any core call. A directory's mode lives in a
+    # path-keyed record, so the handle has to carry its path.
+    test "fchmod on a directory handle updates by path" do
+      {handle, state} = open_dir(connected(), "/d")
+
+      expect(NeonFS.Client, :core_call, fn NeonFS.Core,
+                                           :update_file_meta,
+                                           ["vol-a", "/d", [mode: 0o750]] ->
+        {:ok, %{}}
+      end)
+
+      {reply, _} = Handler.handle({:fchmod, %{"handle" => handle, "mode" => 0o750}}, state)
+
+      assert {:ok, %{}} == reply
+    end
+
+    test "fntimes on a directory handle updates by path" do
+      {handle, state} = open_dir(connected(), "/d")
+
+      expect(NeonFS.Client, :core_call, fn NeonFS.Core, :update_file_meta, ["vol-a", "/d", ups] ->
+        assert Keyword.has_key?(ups, :accessed_at)
+        assert Keyword.has_key?(ups, :modified_at)
+        {:ok, %{}}
+      end)
+
+      {reply, _} =
+        Handler.handle(
+          {:fntimes, %{"handle" => handle, "atime" => 1_600_000_000, "mtime" => 1_600_000_001}},
+          state
+        )
+
+      assert {:ok, %{}} == reply
+    end
+
+    test "fstat on a directory handle resolves by path" do
+      {handle, state} = open_dir(connected(), "/d")
+
+      expect(NeonFS.Client, :core_call, fn NeonFS.Core, :get_file_meta, ["vol-a", "/d"] ->
+        {:ok, file_meta("/d", mode: 0o040755)}
+      end)
+
+      {reply, _} = Handler.handle({:fstat, %{"handle" => handle}}, state)
+
+      assert {:ok, %{stat: _}} = reply
     end
 
     test "fchown is :enosys until the IAM bridge lands" do
