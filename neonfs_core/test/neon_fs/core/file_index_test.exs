@@ -832,6 +832,47 @@ defmodule NeonFS.Core.FileIndexTest do
       assert root.mode == 0o040750
     end
 
+    # Times used to be fabricated as `DateTime.utc_now()` on every read, so a
+    # directory's times were always "now" and `utimensat(2)` on one was
+    # silently discarded.
+    test "set_dir_attrs/3 persists directory timestamps" do
+      {:ok, _} = FileIndex.mkdir("vol1", "/timed")
+
+      atime = ~U[2020-01-02 03:04:05Z]
+      mtime = ~U[2021-06-07 08:09:10Z]
+
+      assert {:ok, _} =
+               FileIndex.set_dir_attrs("vol1", "/timed", accessed_at: atime, modified_at: mtime)
+
+      assert {:ok, dir} = FileIndex.get_by_path("vol1", "/timed")
+      assert DateTime.compare(dir.accessed_at, atime) == :eq
+      assert DateTime.compare(dir.modified_at, mtime) == :eq
+    end
+
+    # `ctime` means "metadata changed", so any attribute write moves it even
+    # when the caller did not ask.
+    test "set_dir_attrs/3 advances changed_at on any attribute write" do
+      {:ok, _} = FileIndex.mkdir("vol1", "/ctimed")
+      {:ok, before} = FileIndex.get_by_path("vol1", "/ctimed")
+
+      {:ok, _} = FileIndex.set_dir_attrs("vol1", "/ctimed", mode: 0o700)
+
+      assert {:ok, dir} = FileIndex.get_by_path("vol1", "/ctimed")
+      assert DateTime.compare(dir.changed_at, before.changed_at) in [:gt, :eq]
+    end
+
+    # A record stored before the fields existed has no times; the read path
+    # used to fabricate `now` for every directory, so that is what it keeps
+    # doing rather than returning nil and breaking `getattr`.
+    test "a dir record without stored times still reads back times" do
+      {:ok, _} = FileIndex.mkdir("vol1", "/legacy")
+
+      assert {:ok, dir} = FileIndex.get_by_path("vol1", "/legacy")
+      assert %DateTime{} = dir.accessed_at
+      assert %DateTime{} = dir.modified_at
+      assert %DateTime{} = dir.changed_at
+    end
+
     test "set_dir_attrs/3 refuses a path that is not a directory" do
       assert {:error, :not_found} = FileIndex.set_dir_attrs("vol1", "/nope", mode: 0o700)
     end
