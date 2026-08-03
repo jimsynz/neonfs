@@ -113,6 +113,74 @@ defmodule NeonFS.Core.FileIndexTest do
       assert {:error, %InvalidPath{}} = FileIndex.create(file)
     end
 
+    # The conflict lease only serialises *concurrent* creates of a name.
+    # Sequentially there is no lease to lose to, and a create publishes its
+    # dirent unconditionally, so without an existence check the second one
+    # repointed the name and left the first file reachable only by id.
+    test "refuses a path that already resolves to a different file" do
+      {:ok, first} = FileIndex.create(FileMeta.new("vol1", "/occupied.txt"))
+      second = FileMeta.new("vol1", "/occupied.txt")
+
+      assert {:error, %AlreadyExists{}} = FileIndex.create(second)
+
+      assert {:ok, resolved} = FileIndex.get_by_path("vol1", "/occupied.txt")
+
+      assert resolved.id == first.id,
+             "the name must still point at the file that owns it"
+
+      assert {:ok, _} = FileIndex.get("vol1", first.id),
+             "the original FileMeta must not have been orphaned"
+
+      assert {:error, :not_found} = FileIndex.get("vol1", second.id)
+    end
+
+    test "refuses a path already taken by a directory" do
+      {:ok, _} = FileIndex.mkdir("vol1", "/taken")
+
+      assert {:error, %AlreadyExists{}} = FileIndex.create(FileMeta.new("vol1", "/taken"))
+
+      assert {:ok, %FileMeta{}} = FileIndex.get_by_path("vol1", "/taken")
+    end
+
+    # Failing open here would create the name without knowing whether it is
+    # taken, which is the defect itself rather than a degraded way of
+    # avoiding it.
+    test "refuses when it cannot tell whether the path is taken", %{store: store} do
+      reader_opts =
+        store
+        |> build_mock_metadata_reader_opts()
+        |> Keyword.put(:index_tree_get, fn _store, _root, _tier, _key ->
+          {:error, :index_tree_unreadable}
+        end)
+
+      stop_if_running(FileIndex)
+      cleanup_ets_table(:file_index_by_id)
+
+      start_supervised!(
+        {FileIndex,
+         metadata_reader_opts: reader_opts,
+         metadata_writer_opts: build_mock_metadata_writer_opts(store),
+         intent_log: NeonFS.TestSupport.StubIntentLog},
+        restart: :temporary
+      )
+
+      assert {:error, _} = FileIndex.create(FileMeta.new("vol1", "/unknowable.txt"))
+    end
+
+    # Crash recovery depends on this: an operation whose write committed but
+    # whose reply died with its process is re-issued verbatim, and must
+    # converge on the state it already produced rather than refuse it.
+    test "re-publishing the same file id converges instead of refusing" do
+      file = FileMeta.new("vol1", "/idempotent.txt")
+
+      assert {:ok, _} = FileIndex.create(file)
+      assert {:ok, again} = FileIndex.create(file)
+      assert again.id == file.id
+
+      assert {:ok, resolved} = FileIndex.get_by_path("vol1", "/idempotent.txt")
+      assert resolved.id == file.id
+    end
+
     # When MetadataWriter.put returns a quorum failure from
     # the segment replicator (the ENOSPC shape), the structured
     # `%QuorumUnavailable{}` must propagate to the caller without the
