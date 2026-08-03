@@ -132,8 +132,8 @@ defmodule NeonFS.CIFS.Handler do
     do: with_volume(state, &fetch_stat(&1, path, &2))
 
   defp do_handle(:fstat, %{"handle" => handle}, state) do
-    with_handle(handle, state, fn %{volume: volume, file_id: file_id} ->
-      with {:ok, file} <- core_call(NeonFS.Core, :get_file_meta_by_id, [volume, file_id]),
+    with_any_handle(handle, state, fn target ->
+      with {:ok, file} <- fetch_meta(target),
            {:ok, stat} <- stat_term(file) do
         {{:ok, %{stat: stat}}, state}
       else
@@ -144,8 +144,8 @@ defmodule NeonFS.CIFS.Handler do
 
   defp do_handle(:fchmod, %{"handle" => handle, "mode" => mode}, state)
        when is_integer(mode) do
-    with_handle(handle, state, fn %{volume: volume, file_id: file_id} ->
-      case core_call(NeonFS.Core, :update_file_meta_by_id, [volume, file_id, [mode: mode]]) do
+    with_any_handle(handle, state, fn target ->
+      case set_attrs(target, mode: mode) do
         {:ok, _meta} -> {{:ok, %{}}, state}
         {:error, reason} -> {{:error, errno_for(reason)}, state}
       end
@@ -162,13 +162,13 @@ defmodule NeonFS.CIFS.Handler do
 
   defp do_handle(:fntimes, %{"handle" => handle, "atime" => atime, "mtime" => mtime}, state)
        when is_integer(atime) and is_integer(mtime) do
-    with_handle(handle, state, fn %{volume: volume, file_id: file_id} ->
+    with_any_handle(handle, state, fn target ->
       updates = [
         accessed_at: DateTime.from_unix!(atime),
         modified_at: DateTime.from_unix!(mtime)
       ]
 
-      case core_call(NeonFS.Core, :update_file_meta_by_id, [volume, file_id, updates]) do
+      case set_attrs(target, updates) do
         {:ok, _meta} -> {{:ok, %{}}, state}
         {:error, reason} -> {{:error, errno_for(reason)}, state}
       end
@@ -249,7 +249,9 @@ defmodule NeonFS.CIFS.Handler do
       with {:ok, _file} <- core_call(NeonFS.Core, :get_file_meta, [volume, path]),
            {:ok, children} <- core_call(NeonFS.Core, :list_dir, [volume, path]) do
         {handle, state} = mint_handle(state)
-        state = %{state | dirs: Map.put(state.dirs, handle, dir_entries(children))}
+
+        entry = %{volume: volume, path: path, entries: dir_entries(children)}
+        state = %{state | dirs: Map.put(state.dirs, handle, entry)}
         {{:ok, %{handle: handle}}, state}
       else
         {:error, reason} -> {{:error, errno_for(reason)}, state}
@@ -258,13 +260,12 @@ defmodule NeonFS.CIFS.Handler do
   end
 
   defp do_handle(:readdir, %{"handle" => handle}, state) do
-    case Map.fetch(state.dirs, handle) do
+    case dir_cursor(state, handle) do
       {:ok, []} ->
         {{:ok, %{eof: true}}, state}
 
       {:ok, [entry | rest]} ->
-        {{:ok, %{entry: entry_term(entry), eof: false}},
-         %{state | dirs: Map.put(state.dirs, handle, rest)}}
+        {{:ok, %{entry: entry_term(entry), eof: false}}, advance_cursor(state, handle, rest)}
 
       :error ->
         {{:error, :ebadf}, state}
@@ -389,6 +390,62 @@ defmodule NeonFS.CIFS.Handler do
   defp mint_handle(state) do
     handle = state.next_handle
     {handle, %{state | next_handle: handle + 1}}
+  end
+
+  # A directory handle records what it points at as well as where readdir
+  # has got to. Attribute ops need the former: a directory's mode and times
+  # live in a path-keyed record, so `{volume, path}` is what can resolve
+  # them — the file-handle registry has neither, which is why `fchmod` on a
+  # directory used to fail `:ebadf` before reaching core at all.
+  #
+  # The cursor stays here rather than moving to the node-wide registry:
+  # readdir position is per-connection iteration state, not something other
+  # nodes have any use for.
+  defp dir_cursor(state, handle) do
+    case Map.fetch(state.dirs, handle) do
+      {:ok, %{entries: entries}} -> {:ok, entries}
+      :error -> :error
+    end
+  end
+
+  defp advance_cursor(state, handle, rest) do
+    %{state | dirs: Map.update!(state.dirs, handle, &%{&1 | entries: rest})}
+  end
+
+  # A file handle updates by id; a directory handle by path, because a
+  # directory's attributes live in a path-keyed record the by-id API cannot
+  # reach. `Core.update_file_meta/4` dispatches on record type, so the path
+  # form serves both.
+  defp set_attrs(%{volume: volume, file_id: file_id}, updates) do
+    core_call(NeonFS.Core, :update_file_meta_by_id, [volume, file_id, updates])
+  end
+
+  defp set_attrs(%{volume: volume, path: path}, updates) do
+    core_call(NeonFS.Core, :update_file_meta, [volume, path, updates])
+  end
+
+  defp fetch_meta(%{volume: volume, file_id: file_id}) do
+    core_call(NeonFS.Core, :get_file_meta_by_id, [volume, file_id])
+  end
+
+  defp fetch_meta(%{volume: volume, path: path}) do
+    core_call(NeonFS.Core, :get_file_meta, [volume, path])
+  end
+
+  # Resolves a handle to whatever can act on it: a file handle carries a
+  # `file_id`, a directory handle a `path`. Callers that can serve both
+  # dispatch on which key is present.
+  defp with_any_handle(handle, state, fun) do
+    case HandleRegistry.fetch(handle) do
+      {:ok, entry} ->
+        fun.(entry)
+
+      :error ->
+        case Map.fetch(state.dirs, handle) do
+          {:ok, %{volume: volume, path: path}} -> fun.(%{volume: volume, path: path})
+          :error -> {{:error, :ebadf}, state}
+        end
+    end
   end
 
   # `NeonFS.Core.list_dir/2` returns `[FileMeta]` (directory children
