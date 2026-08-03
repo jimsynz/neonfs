@@ -1259,17 +1259,18 @@ defmodule NeonFS.Core.FileIndex do
 
   defp dir_entry_for_update(volume_id, path), do: read_dir_entry(volume_id, path)
 
-  # `DirectoryEntry` carries mode, uid and gid and nothing else, so those
-  # are the attributes a directory can hold. It has no timestamp fields —
-  # `synthesise_dir_file_meta/3` fabricates times on read — so `:atime` /
-  # `:mtime` in `updates` have nowhere to go and are dropped rather than
-  # silently appearing to persist.
+  # Mode, ownership and the POSIX times all live on the record, so all of
+  # them can be set. `:changed_at` follows any attribute change, which is
+  # what `ctime` means — a metadata modification, not a content one.
   defp apply_dir_attrs(%DirectoryEntry{} = entry, updates) do
     %DirectoryEntry{
       entry
       | mode: dir_mode(Keyword.get(updates, :mode), entry.mode),
         uid: Keyword.get(updates, :uid, entry.uid),
-        gid: Keyword.get(updates, :gid, entry.gid)
+        gid: Keyword.get(updates, :gid, entry.gid),
+        accessed_at: Keyword.get(updates, :accessed_at, entry.accessed_at),
+        modified_at: Keyword.get(updates, :modified_at, entry.modified_at),
+        changed_at: Keyword.get(updates, :changed_at, DateTime.utc_now())
     }
   end
 
@@ -1843,17 +1844,22 @@ defmodule NeonFS.Core.FileIndex do
   ## Private — Directory metadata synthesis
 
   defp synthesise_dir_file_meta(volume_id, path, child_info) do
-    {mode, uid, gid, hlc_timestamp} =
+    now = DateTime.utc_now()
+
+    {mode, uid, gid, hlc_timestamp, atime, mtime, ctime} =
       case read_dir_entry(volume_id, path) do
         {:ok, dir_entry} ->
-          {0o040000 ||| dir_entry.mode, dir_entry.uid, dir_entry.gid, dir_entry.hlc_timestamp}
+          {0o040000 ||| dir_entry.mode, dir_entry.uid, dir_entry.gid, dir_entry.hlc_timestamp,
+           dir_entry.accessed_at, dir_entry.modified_at, dir_entry.changed_at}
 
+        # No `dir:` record — a dirent pointing at a directory whose record
+        # has not been written, or the root before first use. Fall back to
+        # the dirent's own hints and to now, which is what this returned for
+        # every directory before the record carried times.
         {:error, _} ->
           {0o040000 ||| Map.get(child_info, :mode, 0o755), Map.get(child_info, :uid, 0),
-           Map.get(child_info, :gid, 0), nil}
+           Map.get(child_info, :gid, 0), nil, now, now, now}
       end
-
-    now = DateTime.utc_now()
 
     %FileMeta{
       id: Map.get(child_info, :id),
@@ -1868,10 +1874,12 @@ defmodule NeonFS.Core.FileIndex do
       gid: gid,
       acl_entries: [],
       default_acl: nil,
+      # A directory has no creation time of its own in the record; `now` is
+      # the same value this always reported for it.
       created_at: now,
-      modified_at: now,
-      accessed_at: now,
-      changed_at: now,
+      modified_at: mtime,
+      accessed_at: atime,
+      changed_at: ctime,
       version: 1,
       previous_version_id: nil,
       hlc_timestamp: hlc_timestamp
