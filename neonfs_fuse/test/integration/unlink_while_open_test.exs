@@ -289,5 +289,77 @@ defmodule NeonFS.FUSE.IntegrationTest.UnlinkWhileOpenTest do
                  timeout: op_timeout()
                )
     end
+
+    # The pin is keyed by file identity, so a rename cannot strand it —
+    # but that only helps if the operations reached through the handle
+    # stop resolving the old name. `read` and `getattr` both did, so a
+    # rename issued anywhere in the cluster broke a perfectly good fd.
+    test "operations through an open handle survive a rename", ctx do
+      %{
+        handler: handler,
+        parent_inode: parent_inode,
+        volume_name: volume_name
+      } = ctx
+
+      old_name = "before-rename.bin"
+      new_name = "after-rename.bin"
+      payload = "bytes that outlive the name"
+
+      send(
+        handler,
+        {:fuse_op, 1,
+         {"create",
+          %{"parent" => parent_inode, "name" => old_name, "mode" => 0o644, "flags" => 0}}}
+      )
+
+      assert_receive {:fuse_op_complete, 1, {"entry_ok", %{"ino" => file_inode, "fh" => fh}}},
+                     op_timeout()
+
+      send(
+        handler,
+        {:fuse_op, 2,
+         {"write", %{"ino" => file_inode, "offset" => 0, "data" => payload, "fh" => fh}}}
+      )
+
+      assert_receive {:fuse_op_complete, 2, {"write_ok", %{}}}, op_timeout()
+
+      # Rename from elsewhere in the cluster, while the handle is open.
+      assert :ok =
+               Router.call(NeonFS.Core, :rename_file, [
+                 volume_name,
+                 "/" <> old_name,
+                 "/" <> new_name
+               ])
+
+      # The old name is gone, so anything that resolves by path must miss.
+      assert {:error, %{class: :not_found}} =
+               Router.call(NeonFS.Core, :get_file_meta, [volume_name, "/" <> old_name])
+
+      # Read through the original handle — by file id, over the data plane.
+      send(
+        handler,
+        {:fuse_op, 3, {"read", %{"ino" => file_inode, "offset" => 0, "size" => 1024, "fh" => fh}}}
+      )
+
+      assert_receive {:fuse_op_complete, 3, {"read_ok", %{"data" => ^payload}}}, op_timeout()
+
+      # `getattr` through the handle: the kernel sets FUSE_GETATTR_FH, so
+      # the handler answers from the file id rather than the stale inode.
+      send(handler, {:fuse_op, 4, {"getattr", %{"ino" => file_inode, "fh" => fh}}})
+
+      assert_receive {:fuse_op_complete, 4, {"attr_ok", %{"size" => size}}}, op_timeout()
+      assert size == byte_size(payload)
+
+      # And a truncate through the handle, which routes to the by-id facade.
+      send(
+        handler,
+        {:fuse_op, 5, {"setattr", %{"ino" => file_inode, "fh" => fh, "size" => 4}}}
+      )
+
+      assert_receive {:fuse_op_complete, 5, {"attr_ok", %{"size" => 4}}}, op_timeout()
+
+      send(handler, {:fuse_op, 6, {"release", %{"fh" => fh}}})
+      assert_receive {:fuse_op_complete, 6, {"ok", %{}}}, op_timeout()
+    end
   end
 end

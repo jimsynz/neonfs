@@ -889,18 +889,18 @@ defmodule NeonFS.FUSE.Handler do
   defp handle_operation({"getattr", params}, state) do
     ino = params["ino"]
 
-    with {:ok, {volume_id, path}} <- resolve_inode(ino, state),
-         {:ok, file} <- cached_getattr(state.cache_table, volume_id, path) do
-      {"attr_ok",
-       %{
-         "ino" => ino,
-         "size" => file.size,
-         "kind" => file_kind(file.mode),
-         "mtime" => datetime_to_unix(file.modified_at),
-         "ctime" => datetime_to_unix(file.changed_at),
-         "atime" => datetime_to_unix(file.accessed_at)
-       }}
-    else
+    case getattr_dispatch(ino, params["fh"], state) do
+      {:ok, file} ->
+        {"attr_ok",
+         %{
+           "ino" => ino,
+           "size" => file.size,
+           "kind" => file_kind(file.mode),
+           "mtime" => datetime_to_unix(file.modified_at),
+           "ctime" => datetime_to_unix(file.changed_at),
+           "atime" => datetime_to_unix(file.accessed_at)
+         }}
+
       {:error, :not_found} ->
         {"error", %{"errno" => errno(:enoent)}}
 
@@ -1187,8 +1187,7 @@ defmodule NeonFS.FUSE.Handler do
   defp handle_operation({"setattr", params}, state) do
     ino = params["ino"]
 
-    with {:ok, {volume_id, path}} <- resolve_inode(ino, state),
-         {:ok, file} <- file_index_get_by_path(volume_id, path),
+    with {:ok, volume_id, file} <- setattr_target(ino, params["fh"], state),
          :ok <- check_setattr_permission(file, params, state) do
       result = apply_setattr(volume_id, file, params)
 
@@ -1633,12 +1632,49 @@ defmodule NeonFS.FUSE.Handler do
     new_size = params["size"]
 
     if new_size != nil and new_size < file.size do
-      # Size reduction: delegate to FileIndex.truncate which trims chunks/stripes
+      # Size reduction: delegate to truncate, which trims chunks/stripes.
       other_updates = build_setattr_updates_without_size(params)
       file_index_truncate(volume_id, file.id, new_size, other_updates)
     else
       updates = build_setattr_updates(params)
       file_index_update(volume_id, file.id, updates)
+    end
+  end
+
+  # `getattr` / `setattr` carry the open handle when the kernel has one
+  # (`FUSE_GETATTR_FH`, `FATTR_FH`), and a handle is the only thing that
+  # still resolves after the name is gone. Stat-ing or truncating through
+  # an fd whose file has been unlinked is ordinary POSIX, so these route
+  # by file id through the #1606 facade rather than the path.
+  #
+  # The attribute cache is keyed by path, so it is only consulted on the
+  # path route — there is no path to key by on the other one, and the
+  # facade read is the authoritative answer anyway.
+  defp getattr_dispatch(ino, fh, state) do
+    case Map.get(state.fh_table, fh) do
+      %{file_id: file_id} ->
+        core_call(NeonFS.Core, :get_file_meta_by_id, [state.volume_name, file_id])
+
+      nil ->
+        with {:ok, {volume_id, path}} <- resolve_inode(ino, state) do
+          cached_getattr(state.cache_table, volume_id, path)
+        end
+    end
+  end
+
+  defp setattr_target(ino, fh, state) do
+    case Map.get(state.fh_table, fh) do
+      %{file_id: file_id} ->
+        with {:ok, file} <-
+               core_call(NeonFS.Core, :get_file_meta_by_id, [state.volume_name, file_id]) do
+          {:ok, state.volume, file}
+        end
+
+      nil ->
+        with {:ok, {volume_id, path}} <- resolve_inode(ino, state),
+             {:ok, file} <- file_index_get_by_path(volume_id, path) do
+          {:ok, volume_id, file}
+        end
     end
   end
 
