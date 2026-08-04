@@ -69,6 +69,9 @@ defmodule NeonFS.Client.ChunkReader do
 
   @default_chunk_timeout 30_000
 
+  # Sparse regions are synthesised in bounded blocks, matching core's read path.
+  @zero_fill_block_bytes 64 * 1024
+
   @type read_opts :: [
           offset: non_neg_integer(),
           length: non_neg_integer() | :all,
@@ -122,7 +125,7 @@ defmodule NeonFS.Client.ChunkReader do
 
     case refs_call(volume_name, target, refs_opts) do
       {:ok, %{chunks: chunks} = result} ->
-        dispatch_read(chunks, result.file_size, volume_name, target, opts)
+        dispatch_read(chunks, result.hole_bytes, volume_name, target, opts)
 
       {:error, :stripe_refs_unsupported} ->
         fallback_read(volume_name, target, opts)
@@ -178,8 +181,8 @@ defmodule NeonFS.Client.ChunkReader do
     refs_opts = Keyword.take(opts, [:offset, :length, :uid, :gids])
 
     case refs_call(volume_name, target, refs_opts) do
-      {:ok, %{chunks: chunks, file_size: file_size}} ->
-        stream = build_chunk_stream(chunks, volume_name, target, opts)
+      {:ok, %{chunks: chunks, file_size: file_size, hole_bytes: hole_bytes}} ->
+        stream = build_chunk_stream(chunks, hole_bytes, volume_name, target, opts)
         {:ok, %{stream: stream, file_size: file_size}}
 
       {:error, :stripe_refs_unsupported} ->
@@ -212,18 +215,23 @@ defmodule NeonFS.Client.ChunkReader do
   defp meta_call(volume_name, {:id, file_id}, opts),
     do: Router.call(NeonFS.Core, :get_file_meta_by_id, [volume_name, file_id, opts])
 
-  defp dispatch_read(chunks, file_size, volume_name, target, opts) do
+  defp dispatch_read(chunks, hole_bytes, volume_name, target, opts) do
     if Enum.any?(chunks, &needs_server_processing?/1) do
       fallback_read(volume_name, target, opts)
     else
-      case assemble(chunks, file_size, volume_name, opts) do
+      case assemble(chunks, hole_bytes, volume_name, opts) do
         {:error, :no_data_endpoint} -> fallback_read(volume_name, target, opts)
         other -> other
       end
     end
   end
 
-  defp assemble(chunks, _file_size, volume_name, opts) do
+  # `hole_bytes` is the sparse tail core reported for this range — a file grown
+  # by `truncate` has bytes inside its own size that no chunk backs, and POSIX
+  # requires them to read as zeros. Core decides how many, because it is the
+  # only side that can tell an unwritten region from a chunk whose metadata is
+  # missing.
+  defp assemble(chunks, hole_bytes, volume_name, opts) do
     timeout = Keyword.get(opts, :timeout, @default_chunk_timeout)
     exclude = Keyword.get(opts, :exclude_nodes, [])
 
@@ -239,8 +247,11 @@ defmodule NeonFS.Client.ChunkReader do
       end
     end)
     |> case do
-      {:ok, parts} -> {:ok, parts |> Enum.reverse() |> IO.iodata_to_binary()}
-      error -> error
+      {:ok, parts} ->
+        {:ok, [Enum.reverse(parts), :binary.copy(<<0>>, hole_bytes)] |> IO.iodata_to_binary()}
+
+      error ->
+        error
     end
   end
 
@@ -354,22 +365,40 @@ defmodule NeonFS.Client.ChunkReader do
     core_read(volume_name, target, forward_opts)
   end
 
-  defp build_chunk_stream(chunks, volume_name, target, opts) do
+  defp build_chunk_stream(chunks, hole_bytes, volume_name, target, opts) do
     timeout = Keyword.get(opts, :timeout, @default_chunk_timeout)
     exclude = Keyword.get(opts, :exclude_nodes, [])
 
-    Stream.unfold(chunks, fn
-      [] ->
+    chunk_stream =
+      Stream.unfold(chunks, fn
+        [] ->
+          nil
+
+        [ref | rest] ->
+          case stream_fetch_chunk(ref, volume_name, target, exclude, timeout) do
+            {:ok, bytes} ->
+              {bytes, rest}
+
+            {:error, reason} ->
+              raise StreamError, reason: reason
+          end
+      end)
+
+    Stream.concat(chunk_stream, zero_fill_stream(hole_bytes))
+  end
+
+  # A block at a time. A freshly sized sparse file is entirely hole, so
+  # materialising it as one binary would trade a short read for an OOM.
+  defp zero_fill_stream(0), do: []
+
+  defp zero_fill_stream(total) do
+    Stream.unfold(total, fn
+      0 ->
         nil
 
-      [ref | rest] ->
-        case stream_fetch_chunk(ref, volume_name, target, exclude, timeout) do
-          {:ok, bytes} ->
-            {bytes, rest}
-
-          {:error, reason} ->
-            raise StreamError, reason: reason
-        end
+      remaining ->
+        emit = min(remaining, @zero_fill_block_bytes)
+        {:binary.copy(<<0>>, emit), remaining - emit}
     end)
   end
 
