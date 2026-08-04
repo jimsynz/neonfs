@@ -476,6 +476,17 @@ defmodule NeonFS.Cluster.Join do
       :ok ->
         Logger.info("Registered service", type: type, joining_node: joining_node)
 
+      # Warn and carry on, deliberately. Every participant repairs its own
+      # registration: a core node's `ServiceRegistry` self-registers on boot
+      # and re-checks a few seconds later, and an interface node's
+      # `NeonFS.Client.Registrar` re-registers on the same cadence. So a write
+      # that does not replicate here costs discoverability for seconds rather
+      # than for the node's uptime.
+      #
+      # Failing the join instead would strand the node. Its invite token is
+      # single-use and already spent by the time this runs, so a transient Ra
+      # timeout would cost the operator a fresh token and another round trip
+      # to fix something that heals itself.
       {:error, reason} ->
         Logger.warning("Failed to register service",
           joining_node: joining_node,
