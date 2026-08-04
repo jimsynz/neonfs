@@ -525,6 +525,13 @@ defmodule NeonFS.Core.ServiceRegistryTest do
     start_peer_with_retry(peer_opts, attempts_left - 1)
   end
 
+  # The original of this classifier is in `NeonFS.TestSupport.PeerCluster`.
+  # Calling it is not an option: `neonfs_test_support` depends on this package,
+  # so the arrow does not run this way, and this file needs the same peer-boot
+  # hardening `PeerCluster` grew. A new transient reason therefore has to be
+  # added in both places — it has been revised twice already, and a revision
+  # that lands in only one surfaces as a peer-boot flake in whichever package
+  # was not updated.
   defp transient_boot_error?({:boot_failed, reason}), do: transient_boot_error?(reason)
   defp transient_boot_error?(:timeout), do: true
   defp transient_boot_error?(:tcp_closed), do: true

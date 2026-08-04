@@ -189,6 +189,14 @@ defmodule NeonFS.TestSupport.PeerCluster do
     min(@peer_boot_backoff_ms * Integer.pow(2, retries_used), @peer_boot_max_backoff_ms)
   end
 
+  # A second copy of this classifier lives in `neonfs_core`'s
+  # `test/neon_fs/core/service_registry_test.exs`. It cannot call this one, and
+  # this one cannot be moved somewhere both could reach: this package depends on
+  # `neonfs_core`, so the arrow does not run the other way, and a shared package
+  # for one retry classifier is not worth an extra node in the dependency graph.
+  # A new transient reason therefore has to be added in both places — it has
+  # been revised twice already, and a revision that lands in only one surfaces
+  # as a peer-boot flake in whichever package was not updated.
   defp transient_boot_error?({:boot_failed, reason}), do: transient_boot_error?(reason)
   defp transient_boot_error?(:tcp_closed), do: true
   defp transient_boot_error?(:timeout), do: true
