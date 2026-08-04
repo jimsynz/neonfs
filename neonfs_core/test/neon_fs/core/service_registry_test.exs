@@ -181,6 +181,17 @@ defmodule NeonFS.Core.ServiceRegistryTest do
 
       for mod <- [RaSupervisor, Listener, PoolManager], do: Mimic.allow(mod, self(), registry)
 
+      # Attach before the stand-in goes up, not after. The event waited for
+      # below is the one that *ends* the chain, so it is emitted exactly once —
+      # an attach that lands after the endpoint already exists misses it and
+      # then waits out its timeout for a second one that never comes.
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:neonfs, :service_registry, :self_registered],
+          [:neonfs, :service_registry, :self_registration_failed],
+          [:neonfs, :service_registry, :self_register_retry_scheduled]
+        ])
+
       # `build_self_metadata/0` gates on a live `Listener` before it asks for a
       # port, so without a stand-in every attempt looks like the endpoint case
       # and masks the write case this exercises.
@@ -190,13 +201,6 @@ defmodule NeonFS.Core.ServiceRegistryTest do
 
       stub(Listener, :get_port, fn -> 4001 end)
       stub(PoolManager, :advertise_endpoint, fn port -> "127.0.0.1:#{port}" end)
-
-      ref =
-        :telemetry_test.attach_event_handlers(self(), [
-          [:neonfs, :service_registry, :self_registered],
-          [:neonfs, :service_registry, :self_registration_failed],
-          [:neonfs, :service_registry, :self_register_retry_scheduled]
-        ])
 
       # The boot registration found no `Listener` and left an endpoint-retry
       # chain ticking once a second. Now that the stand-in is up, its next tick
@@ -269,6 +273,17 @@ defmodule NeonFS.Core.ServiceRegistryTest do
 
       for mod <- [Listener, PoolManager], do: Mimic.allow(mod, self(), registry)
 
+      # Attach before the endpoint exists, not after. The event asserted below
+      # fires exactly once — a poll that finds an endpoint registers, and a
+      # registration that succeeds ends the chain — so an attach that lands
+      # after the stubs can miss it outright and then wait for a second event
+      # that is never coming.
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:neonfs, :service_registry, :self_registered],
+          [:neonfs, :service_registry, :self_registration_healed]
+        ])
+
       # Without an endpoint the boot registration leaves a retry chain running,
       # and the self-heal defers to it. Give it one so the chain terminates and
       # the heal is the only thing acting.
@@ -278,12 +293,6 @@ defmodule NeonFS.Core.ServiceRegistryTest do
 
       stub(Listener, :get_port, fn -> 4001 end)
       stub(PoolManager, :advertise_endpoint, fn port -> "127.0.0.1:#{port}" end)
-
-      ref =
-        :telemetry_test.attach_event_handlers(self(), [
-          [:neonfs, :service_registry, :self_registered],
-          [:neonfs, :service_registry, :self_registration_healed]
-        ])
 
       assert_receive {[:neonfs, :service_registry, :self_registered], ^ref, _m,
                       %{data_endpoint: "127.0.0.1:4001"}},
