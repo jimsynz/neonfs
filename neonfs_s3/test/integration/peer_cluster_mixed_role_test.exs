@@ -14,7 +14,8 @@ defmodule NeonFS.S3.IntegrationTest.PeerClusterMixedRoleTest do
   - `PeerCluster.stop_cluster/1` tears everything down cleanly.
 
   This test is deliberately scoped to the harness itself; substantive
-  coverage for the streaming-write path lives with the peak-RSS tests.
+  coverage for the streaming-write path across mixed roles lives in
+  `mixed_role_data_plane_test.exs`.
   Uses plain `ExUnit.Case` rather than `ClusterCase` so the per-test
   auto-starter doesn't spawn a second cluster alongside the one we
   test.

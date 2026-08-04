@@ -691,7 +691,7 @@ defmodule NeonFS.WebDAV.Backend do
   # It must log. Every one of these sites reduces a real cause — a timeout, an
   # unreachable node, a rejected commit — to one indistinguishable struct, and
   # a caller that gets it back has no way to find out what happened. Three
-  # recorded occurrences of the peak-RSS upload flake were undiagnosable for
+  # recorded occurrences of a cross-node upload flake were undiagnosable for
   # exactly that reason: the assertion reported the struct and nothing, in any
   # log, said why.
   #
