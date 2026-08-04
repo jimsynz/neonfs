@@ -32,6 +32,10 @@ defmodule NeonFS.Core.ReadOperation do
 
   require Logger
 
+  # Sparse regions are synthesised a block at a time rather than as one
+  # binary, so the working set stays bounded no matter how large the hole is.
+  @zero_fill_block_bytes 64 * 1024
+
   @type read_result :: {:ok, binary()} | {:error, term()}
   @type stream_result ::
           {:ok, %{stream: Enumerable.t(), file_size: non_neg_integer()}} | {:error, term()}
@@ -48,8 +52,18 @@ defmodule NeonFS.Core.ReadOperation do
           locations: [ChunkMeta.location()]
         }
 
+  # `hole_bytes` is the sparse tail of the *requested range* that no chunk or
+  # stripe backs. Core computes it rather than leaving the caller to infer it
+  # from `file_size`, because only core can tell an unwritten region from a
+  # chunk whose metadata went missing — and it must not synthesise zeros over
+  # the latter.
   @type refs_result ::
-          {:ok, %{file_size: non_neg_integer(), chunks: [chunk_ref()]}}
+          {:ok,
+           %{
+             file_size: non_neg_integer(),
+             chunks: [chunk_ref()],
+             hole_bytes: non_neg_integer()
+           }}
           | {:error, term()}
 
   @doc """
@@ -355,7 +369,7 @@ defmodule NeonFS.Core.ReadOperation do
     end_byte = calculate_end_byte(file_meta.size, offset, length)
 
     if offset >= file_meta.size or end_byte <= offset do
-      {:ok, %{file_size: file_meta.size, chunks: []}}
+      {:ok, %{file_size: file_meta.size, chunks: [], hole_bytes: 0}}
     else
       stripes
       |> Enum.filter(fn stripe_ref ->
@@ -364,21 +378,30 @@ defmodule NeonFS.Core.ReadOperation do
       end)
       |> build_stripe_refs_list(file_meta.volume_id, offset, end_byte)
       |> case do
-        {:ok, refs} -> {:ok, %{file_size: file_meta.size, chunks: refs}}
-        {:error, _} = err -> err
+        {:ok, refs} ->
+          {:ok,
+           %{
+             file_size: file_meta.size,
+             chunks: refs,
+             hole_bytes: stripe_hole_bytes(file_meta, offset, end_byte)
+           }}
+
+        {:error, _} = err ->
+          err
       end
     end
   end
 
   defp build_refs_result(file_meta, offset, length) do
     end_byte = calculate_end_byte(file_meta.size, offset, length)
+    empty_range? = offset >= file_meta.size or end_byte <= offset
+    chunk_infos = build_chunk_info_list(file_meta.chunks, file_meta.volume_id, 0, [])
 
     refs =
-      if offset >= file_meta.size or end_byte <= offset do
+      if empty_range? do
         []
       else
-        file_meta.chunks
-        |> build_chunk_info_list(file_meta.volume_id, 0, [])
+        chunk_infos
         |> Enum.filter(fn {_hash, chunk_start, chunk_end} ->
           chunk_start < end_byte and chunk_end > offset
         end)
@@ -386,7 +409,10 @@ defmodule NeonFS.Core.ReadOperation do
         |> Enum.reject(&is_nil/1)
       end
 
-    {:ok, %{file_size: file_meta.size, chunks: refs}}
+    hole =
+      if empty_range?, do: 0, else: chunk_hole_bytes(file_meta, chunk_infos, offset, end_byte)
+
+    {:ok, %{file_size: file_meta.size, chunks: refs, hole_bytes: hole}}
   end
 
   defp to_chunk_ref({hash, chunk_start, chunk_end}, volume_id, offset, end_byte) do
@@ -628,8 +654,64 @@ defmodule NeonFS.Core.ReadOperation do
 
       should_verify = should_verify_on_read?(volume.verification)
 
-      Stream.unfold(needed, &stream_next_chunk(&1, should_verify, volume_id))
+      Stream.concat(
+        Stream.unfold(needed, &stream_next_chunk(&1, should_verify, volume_id)),
+        zero_fill_stream(chunk_hole_bytes(file_meta, chunk_infos, offset, end_byte))
+      )
     end
+  end
+
+  # `truncate/3` grows a file without allocating chunks or stripes, so a
+  # declared size can exceed the bytes actually backed. Those bytes exist as
+  # far as every caller is concerned, and POSIX requires them to read as zeros,
+  # so a read has to synthesise them instead of stopping at the last chunk.
+  #
+  # Chunk extents are cumulative — a chunk's position is the sum of its
+  # predecessors' sizes — so an unbacked region can only ever be the tail.
+  #
+  # The completeness guard is deliberate. `build_chunk_info_list/4` drops a
+  # chunk whose metadata is missing, which leaves every later chunk's extent
+  # wrong and the covered total short. Zero-filling over that would dress
+  # corruption up as valid data, so an incomplete list synthesises nothing and
+  # the read stays short, as it was before.
+  defp chunk_hole_bytes(file_meta, chunk_infos, offset, end_byte) do
+    if length(chunk_infos) == length(file_meta.chunks) do
+      covered =
+        case List.last(chunk_infos) do
+          {_hash, _start, chunk_end} -> chunk_end
+          nil -> 0
+        end
+
+      max(0, end_byte - max(offset, covered))
+    else
+      0
+    end
+  end
+
+  # Stripes carry an explicit `byte_range`, so the covered total is the last
+  # one's end rather than a running sum.
+  defp stripe_hole_bytes(file_meta, offset, end_byte) do
+    covered =
+      file_meta.stripes
+      |> Enum.map(fn %{byte_range: {_s, e}} -> e end)
+      |> Enum.max(fn -> 0 end)
+
+    max(0, end_byte - max(offset, covered))
+  end
+
+  # A block at a time: a sized-but-unwritten device is entirely hole, so
+  # materialising one binary would trade a short read for an OOM.
+  defp zero_fill_stream(0), do: []
+
+  defp zero_fill_stream(total) do
+    Stream.unfold(total, fn
+      0 ->
+        nil
+
+      remaining ->
+        emit = min(remaining, @zero_fill_block_bytes)
+        {:binary.copy(<<0>>, emit), remaining - emit}
+    end)
   end
 
   defp stream_next_chunk([], _should_verify, _volume_id), do: nil
@@ -665,7 +747,13 @@ defmodule NeonFS.Core.ReadOperation do
         file_meta.stripes
         |> Enum.filter(fn %{byte_range: {s, e}} -> s < end_byte and e > offset end)
 
-      Stream.unfold({relevant, offset, end_byte, should_verify, volume_id}, &stream_next_stripe/1)
+      Stream.concat(
+        Stream.unfold(
+          {relevant, offset, end_byte, should_verify, volume_id},
+          &stream_next_stripe/1
+        ),
+        zero_fill_stream(stripe_hole_bytes(file_meta, offset, end_byte))
+      )
     end
   end
 
@@ -695,17 +783,26 @@ defmodule NeonFS.Core.ReadOperation do
   # ─── Chunk-based Read Path (replicated) ───────────────────────────────
 
   defp read_from_chunks(file_meta, volume, offset, length) do
-    with {:ok, needed_chunks} <- calculate_needed_chunks(file_meta, offset, length),
-         {:ok, chunk_data} <- fetch_chunks(needed_chunks, volume, volume.id) do
-      assemble_data(chunk_data)
+    with {:ok, needed_chunks, chunk_infos} <- calculate_needed_chunks(file_meta, offset, length),
+         {:ok, chunk_data} <- fetch_chunks(needed_chunks, volume, volume.id),
+         {:ok, assembled} <- assemble_data(chunk_data) do
+      end_byte = calculate_end_byte(file_meta.size, offset, length)
+      {:ok, assembled <> zero_tail(file_meta, chunk_infos, offset, end_byte)}
     end
+  end
+
+  # Same synthesis as the streaming path, for the range-read one. Bounded by
+  # the caller's requested range rather than the file, so it inherits whatever
+  # bound the caller already had.
+  defp zero_tail(file_meta, chunk_infos, offset, end_byte) do
+    :binary.copy(<<0>>, chunk_hole_bytes(file_meta, chunk_infos, offset, end_byte))
   end
 
   defp calculate_needed_chunks(file_meta, offset, length) do
     end_byte = calculate_end_byte(file_meta.size, offset, length)
 
     if offset >= file_meta.size do
-      {:ok, []}
+      {:ok, [], []}
     else
       chunk_infos = build_chunk_info_list(file_meta.chunks, file_meta.volume_id, 0, [])
 
@@ -720,7 +817,7 @@ defmodule NeonFS.Core.ReadOperation do
           %{hash: hash, read_start: read_start, read_end: read_end}
         end)
 
-      {:ok, needed}
+      {:ok, needed, chunk_infos}
     end
   end
 

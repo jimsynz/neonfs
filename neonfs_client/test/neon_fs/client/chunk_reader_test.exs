@@ -56,7 +56,7 @@ defmodule NeonFS.Client.ChunkReaderTest do
       ]
 
       expect(Router, :call, fn NeonFS.Core, :read_file_refs, ["vol", "/a.txt", []] ->
-        {:ok, %{file_size: byte_size(bytes), chunks: refs}}
+        {:ok, %{file_size: byte_size(bytes), chunks: refs, hole_bytes: 0}}
       end)
 
       expect(Router, :data_call, fn :node1@host, :get_chunk, args, _opts ->
@@ -83,7 +83,7 @@ defmodule NeonFS.Client.ChunkReaderTest do
       ]
 
       expect(Router, :call, fn NeonFS.Core, :read_file_refs, _ ->
-        {:ok, %{file_size: 16, chunks: refs}}
+        {:ok, %{file_size: 16, chunks: refs, hole_bytes: 0}}
       end)
 
       expect(Router, :data_call, fn _, :get_chunk, _args, _opts ->
@@ -111,7 +111,7 @@ defmodule NeonFS.Client.ChunkReaderTest do
       ]
 
       expect(Router, :call, fn NeonFS.Core, :read_file_refs, _ ->
-        {:ok, %{file_size: 30, chunks: refs}}
+        {:ok, %{file_size: 30, chunks: refs, hole_bytes: 0}}
       end)
 
       # The data plane returns chunks matched by hash, not call order.
@@ -130,7 +130,7 @@ defmodule NeonFS.Client.ChunkReaderTest do
       expect(Router, :call, fn NeonFS.Core, :read_file_refs, [_, _, opts] ->
         assert opts[:offset] == 100
         assert opts[:length] == 50
-        {:ok, %{file_size: 200, chunks: []}}
+        {:ok, %{file_size: 200, chunks: [], hole_bytes: 0}}
       end)
 
       assert {:ok, ""} = ChunkReader.read_file("vol", "/x", offset: 100, length: 50)
@@ -156,7 +156,7 @@ defmodule NeonFS.Client.ChunkReaderTest do
         )
       ]
 
-      expect(Router, :call, fn _, _, _ -> {:ok, %{file_size: 4, chunks: refs}} end)
+      expect(Router, :call, fn _, _, _ -> {:ok, %{file_size: 4, chunks: refs, hole_bytes: 0}} end)
 
       expect(Router, :data_call, fn ^local_node, :get_chunk, _args, _opts ->
         {:ok, "abcd"}
@@ -183,7 +183,7 @@ defmodule NeonFS.Client.ChunkReaderTest do
         )
       ]
 
-      expect(Router, :call, fn _, _, _ -> {:ok, %{file_size: 4, chunks: refs}} end)
+      expect(Router, :call, fn _, _, _ -> {:ok, %{file_size: 4, chunks: refs, hole_bytes: 0}} end)
 
       expect(Router, :data_call, fn ^good, :get_chunk, _args, _opts -> {:ok, "okok"} end)
 
@@ -208,7 +208,7 @@ defmodule NeonFS.Client.ChunkReaderTest do
         )
       ]
 
-      expect(Router, :call, fn _, _, _ -> {:ok, %{file_size: 4, chunks: refs}} end)
+      expect(Router, :call, fn _, _, _ -> {:ok, %{file_size: 4, chunks: refs, hole_bytes: 0}} end)
 
       stub(Router, :data_call, fn
         ^n1, :get_chunk, _args, _opts -> {:error, :no_data_endpoint}
@@ -233,7 +233,7 @@ defmodule NeonFS.Client.ChunkReaderTest do
         )
       ]
 
-      expect(Router, :call, fn _, _, _ -> {:ok, %{file_size: 4, chunks: refs}} end)
+      expect(Router, :call, fn _, _, _ -> {:ok, %{file_size: 4, chunks: refs, hole_bytes: 0}} end)
 
       stub(Router, :data_call, fn _node, :get_chunk, _args, _opts ->
         {:error, :connection_refused}
@@ -254,7 +254,7 @@ defmodule NeonFS.Client.ChunkReaderTest do
         )
       ]
 
-      expect(Router, :call, fn _, _, _ -> {:ok, %{file_size: 4, chunks: refs}} end)
+      expect(Router, :call, fn _, _, _ -> {:ok, %{file_size: 4, chunks: refs, hole_bytes: 0}} end)
 
       assert {:error, :no_available_locations} =
                ChunkReader.read_file("vol", "/x", exclude_nodes: [:only@host])
@@ -281,7 +281,7 @@ defmodule NeonFS.Client.ChunkReaderTest do
         )
       ]
 
-      expect(Router, :call, fn _, _, _ -> {:ok, %{file_size: 4, chunks: refs}} end)
+      expect(Router, :call, fn _, _, _ -> {:ok, %{file_size: 4, chunks: refs, hole_bytes: 0}} end)
 
       stub(Router, :data_call, fn
         ^n1, :get_chunk, _args, _opts -> {:ok, "evil"}
@@ -299,7 +299,7 @@ defmodule NeonFS.Client.ChunkReaderTest do
 
       refs = [ref_a]
 
-      expect(Router, :call, fn _, _, _ -> {:ok, %{file_size: 4, chunks: refs}} end)
+      expect(Router, :call, fn _, _, _ -> {:ok, %{file_size: 4, chunks: refs, hole_bytes: 0}} end)
       stub(Router, :data_call, fn _node, :get_chunk, _args, _opts -> {:ok, "evil"} end)
 
       ref_tel =
@@ -329,7 +329,7 @@ defmodule NeonFS.Client.ChunkReaderTest do
       ]
 
       expect(Router, :call, fn NeonFS.Core, :read_file_refs, _ ->
-        {:ok, %{file_size: 20, chunks: refs}}
+        {:ok, %{file_size: 20, chunks: refs, hole_bytes: 0}}
       end)
 
       expect(Router, :call, fn NeonFS.Core, :read_file, ["vol", "/c.txt", opts] ->
@@ -353,7 +353,7 @@ defmodule NeonFS.Client.ChunkReaderTest do
       ]
 
       expect(Router, :call, fn NeonFS.Core, :read_file_refs, _ ->
-        {:ok, %{file_size: 10, chunks: refs}}
+        {:ok, %{file_size: 10, chunks: refs, hole_bytes: 0}}
       end)
 
       expect(Router, :call, fn NeonFS.Core, :read_file, _ ->
@@ -391,7 +391,7 @@ defmodule NeonFS.Client.ChunkReaderTest do
       ]
 
       expect(Router, :call, fn NeonFS.Core, :read_file_refs, _ ->
-        {:ok, %{file_size: 4, chunks: refs}}
+        {:ok, %{file_size: 4, chunks: refs, hole_bytes: 0}}
       end)
 
       stub(Router, :data_call, fn _node, :get_chunk, _args, _opts ->
@@ -431,7 +431,7 @@ defmodule NeonFS.Client.ChunkReaderTest do
 
     test "returns empty bytes for empty file" do
       expect(Router, :call, fn NeonFS.Core, :read_file_refs, _ ->
-        {:ok, %{file_size: 0, chunks: []}}
+        {:ok, %{file_size: 0, chunks: [], hole_bytes: 0}}
       end)
 
       assert {:ok, ""} = ChunkReader.read_file("vol", "/empty.txt")
@@ -439,7 +439,7 @@ defmodule NeonFS.Client.ChunkReaderTest do
 
     test "returns empty bytes when read range does not overlap any chunk" do
       expect(Router, :call, fn NeonFS.Core, :read_file_refs, _ ->
-        {:ok, %{file_size: 100, chunks: []}}
+        {:ok, %{file_size: 100, chunks: [], hole_bytes: 0}}
       end)
 
       assert {:ok, ""} =
@@ -458,7 +458,7 @@ defmodule NeonFS.Client.ChunkReaderTest do
       ]
 
       expect(Router, :call, fn NeonFS.Core, :read_file_refs, ["vol", "/f.txt", []] ->
-        {:ok, %{file_size: 20, chunks: refs}}
+        {:ok, %{file_size: 20, chunks: refs, hole_bytes: 0}}
       end)
 
       stub(Router, :data_call, fn _node, :get_chunk, args, _opts ->
@@ -478,7 +478,7 @@ defmodule NeonFS.Client.ChunkReaderTest do
       expect(Router, :call, fn NeonFS.Core, :read_file_refs, [_, _, opts] ->
         assert opts[:offset] == 100
         assert opts[:length] == 50
-        {:ok, %{file_size: 200, chunks: []}}
+        {:ok, %{file_size: 200, chunks: [], hole_bytes: 0}}
       end)
 
       assert {:ok, %{stream: stream, file_size: 200}} =
@@ -501,7 +501,7 @@ defmodule NeonFS.Client.ChunkReaderTest do
       ]
 
       expect(Router, :call, fn NeonFS.Core, :read_file_refs, _ ->
-        {:ok, %{file_size: 16, chunks: refs}}
+        {:ok, %{file_size: 16, chunks: refs, hole_bytes: 0}}
       end)
 
       expect(Router, :data_call, fn _, :get_chunk, _args, _opts ->
@@ -530,7 +530,7 @@ defmodule NeonFS.Client.ChunkReaderTest do
       ]
 
       expect(Router, :call, fn NeonFS.Core, :read_file_refs, _ ->
-        {:ok, %{file_size: 20, chunks: refs}}
+        {:ok, %{file_size: 20, chunks: refs, hole_bytes: 0}}
       end)
 
       expect(Router, :data_call, fn _, :get_chunk, args, _ ->
@@ -561,7 +561,7 @@ defmodule NeonFS.Client.ChunkReaderTest do
       ]
 
       expect(Router, :call, fn NeonFS.Core, :read_file_refs, _ ->
-        {:ok, %{file_size: 10, chunks: refs}}
+        {:ok, %{file_size: 10, chunks: refs, hole_bytes: 0}}
       end)
 
       expect(Router, :call, fn NeonFS.Core, :read_file, ["vol", "/e.txt", opts] ->
@@ -590,7 +590,7 @@ defmodule NeonFS.Client.ChunkReaderTest do
       ]
 
       expect(Router, :call, fn NeonFS.Core, :read_file_refs, _ ->
-        {:ok, %{file_size: 4, chunks: refs}}
+        {:ok, %{file_size: 4, chunks: refs, hole_bytes: 0}}
       end)
 
       stub(Router, :data_call, fn _node, :get_chunk, _args, _opts ->
@@ -781,7 +781,7 @@ defmodule NeonFS.Client.ChunkReaderTest do
       ]
 
       expect(Router, :call, fn NeonFS.Core, :read_file_refs, _ ->
-        {:ok, %{file_size: 8, chunks: refs}}
+        {:ok, %{file_size: 8, chunks: refs, hole_bytes: 0}}
       end)
 
       stub(Router, :data_call, fn _node, :get_chunk, args, _opts ->
@@ -811,7 +811,7 @@ defmodule NeonFS.Client.ChunkReaderTest do
       hash = Enum.at(refs, 0).hash
 
       expect(Router, :call, fn NeonFS.Core, :read_file_refs, _ ->
-        {:ok, %{file_size: 64, chunks: refs}}
+        {:ok, %{file_size: 64, chunks: refs, hole_bytes: 0}}
       end)
 
       expect(Router, :data_call, fn :node1@host, :get_chunk, _args, _opts -> {:ok, chunk} end)
@@ -850,7 +850,7 @@ defmodule NeonFS.Client.ChunkReaderTest do
       ]
 
       stub(Router, :call, fn NeonFS.Core, :read_file_refs, _ ->
-        {:ok, %{file_size: byte_size(bytes), chunks: refs}}
+        {:ok, %{file_size: byte_size(bytes), chunks: refs, hole_bytes: 0}}
       end)
 
       expect(Router, :data_call, 1, fn _node, :get_chunk, _args, _opts -> {:ok, bytes} end)
@@ -890,7 +890,7 @@ defmodule NeonFS.Client.ChunkReaderTest do
       # read_file_refs is metadata (per read); the chunk bytes data_call
       # must fire only on the first read — the second hits the cache.
       stub(Router, :call, fn NeonFS.Core, :read_file_refs, _ ->
-        {:ok, %{file_size: byte_size(bytes), chunks: refs}}
+        {:ok, %{file_size: byte_size(bytes), chunks: refs, hole_bytes: 0}}
       end)
 
       expect(Router, :data_call, 1, fn _node, :get_chunk, _args, _opts -> {:ok, bytes} end)
@@ -919,7 +919,7 @@ defmodule NeonFS.Client.ChunkReaderTest do
       ]
 
       expect(Router, :call, fn NeonFS.Core, :read_file_refs_by_id, ["vol", "file-1", []] ->
-        {:ok, %{file_size: byte_size(bytes), chunks: refs}}
+        {:ok, %{file_size: byte_size(bytes), chunks: refs, hole_bytes: 0}}
       end)
 
       expect(Router, :data_call, fn :node1@host, :get_chunk, _args, _opts -> {:ok, bytes} end)
@@ -940,7 +940,7 @@ defmodule NeonFS.Client.ChunkReaderTest do
       ]
 
       expect(Router, :call, fn NeonFS.Core, :read_file_refs_by_id, _ ->
-        {:ok, %{file_size: 10, chunks: refs}}
+        {:ok, %{file_size: 10, chunks: refs, hole_bytes: 0}}
       end)
 
       expect(Router, :call, fn NeonFS.Core, :read_file_by_id, ["vol", "file-1", opts] ->
@@ -959,7 +959,7 @@ defmodule NeonFS.Client.ChunkReaderTest do
       ]
 
       expect(Router, :call, fn NeonFS.Core, :read_file_refs_by_id, _ ->
-        {:ok, %{file_size: 4, chunks: refs}}
+        {:ok, %{file_size: 4, chunks: refs, hole_bytes: 0}}
       end)
 
       expect(Router, :data_call, fn _node, :get_chunk, _args, _opts ->
@@ -1002,7 +1002,7 @@ defmodule NeonFS.Client.ChunkReaderTest do
       {:ok, fetches} = Agent.start_link(fn -> 0 end)
 
       expect(Router, :call, fn NeonFS.Core, :read_file_refs_by_id, ["vol", "file-1", []] ->
-        {:ok, %{file_size: 30, chunks: refs}}
+        {:ok, %{file_size: 30, chunks: refs, hole_bytes: 0}}
       end)
 
       stub(Router, :data_call, fn _node, :get_chunk, args, _opts ->
@@ -1035,7 +1035,7 @@ defmodule NeonFS.Client.ChunkReaderTest do
       ]
 
       expect(Router, :call, fn NeonFS.Core, :read_file_refs_by_id, _ ->
-        {:ok, %{file_size: 24, chunks: refs}}
+        {:ok, %{file_size: 24, chunks: refs, hole_bytes: 0}}
       end)
 
       expect(Router, :call, fn NeonFS.Core, :read_file_by_id, ["vol", "file-1", opts] ->
@@ -1101,7 +1101,7 @@ defmodule NeonFS.Client.ChunkReaderTest do
       ]
 
       expect(Router, :call, fn NeonFS.Core, :read_file_refs_by_id, _ ->
-        {:ok, %{file_size: 8, chunks: refs}}
+        {:ok, %{file_size: 8, chunks: refs, hole_bytes: 0}}
       end)
 
       stub(Router, :data_call, fn _node, :get_chunk, args, _opts ->
@@ -1115,6 +1115,61 @@ defmodule NeonFS.Client.ChunkReaderTest do
 
       assert ["abcd"] = Enum.take(stream, 1)
       assert_raise ChunkReader.StreamError, fn -> Enum.to_list(stream) end
+    end
+  end
+
+  describe "sparse tails" do
+    # A file grown by `truncate` has bytes inside its own size that no chunk
+    # backs. Core reports how many; the client has to render them as zeros
+    # rather than returning a short read.
+    test "read_file/3 appends core's reported hole as zeros" do
+      bytes = "abc"
+
+      refs = [
+        ref(
+          content: bytes,
+          original_size: 3,
+          chunk_offset: 0,
+          read_start: 0,
+          read_length: 3
+        )
+      ]
+
+      expect(Router, :call, fn NeonFS.Core, :read_file_refs, _ ->
+        {:ok, %{file_size: 8192, chunks: refs, hole_bytes: 8189}}
+      end)
+
+      expect(Router, :data_call, fn :node1@host, :get_chunk, _args, _opts -> {:ok, bytes} end)
+
+      assert {:ok, read} = ChunkReader.read_file("vol", "/sparse.img")
+      assert byte_size(read) == 8192
+      assert binary_part(read, 0, 3) == "abc"
+      assert binary_part(read, 3, 8189) == :binary.copy(<<0>>, 8189)
+    end
+
+    test "read_file/3 renders an all-hole range with no chunks at all" do
+      expect(Router, :call, fn NeonFS.Core, :read_file_refs, _ ->
+        {:ok, %{file_size: 8192, chunks: [], hole_bytes: 4096}}
+      end)
+
+      assert {:ok, read} = ChunkReader.read_file("vol", "/sparse.img", offset: 4096, length: 4096)
+      assert read == :binary.copy(<<0>>, 4096)
+    end
+
+    test "read_file_stream/3 yields the hole in bounded blocks" do
+      expect(Router, :call, fn NeonFS.Core, :read_file_refs, _ ->
+        {:ok, %{file_size: 300_000, chunks: [], hole_bytes: 200_000}}
+      end)
+
+      assert {:ok, %{stream: stream}} = ChunkReader.read_file_stream("vol", "/big.img")
+      blocks = Enum.to_list(stream)
+
+      assert Enum.sum(Enum.map(blocks, &byte_size/1)) == 200_000
+
+      assert Enum.all?(blocks, &(byte_size(&1) <= 64 * 1024)),
+             "a hole must not be materialised as one binary, whatever its size"
+
+      assert Enum.all?(blocks, &(&1 == :binary.copy(<<0>>, byte_size(&1))))
     end
   end
 end
