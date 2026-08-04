@@ -1,10 +1,9 @@
-# .check.exs - ex_check configuration for neonfs_containerd
+# .check.exs - ex_check configuration for neonfs_webdav
 # Run with: mix check
+#
+# Only the advisory tooling is configured here; everything else stays on
+# ex_check's defaults.
 [
-  # Serialised in CI. `mix check` runs its tools concurrently, and on a
-  # concurrency-1 runner that contention is self-inflicted. Left parallel
-  # locally, where wall-clock matters more than isolation.
-  parallel: System.get_env("NEONFS_CHECK_PARALLEL", "true") == "true",
   tools: [
     # Advisory data comes from hex.pm via `mix hex.audit`, not from the
     # community mirror `mix deps.audit` reads. The mirror produced two
