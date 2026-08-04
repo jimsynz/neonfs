@@ -350,16 +350,56 @@ defmodule NeonFS.FUSE.IntegrationTest.UnlinkWhileOpenTest do
       assert_receive {:fuse_op_complete, 4, {"attr_ok", %{"size" => size}}}, op_timeout()
       assert size == byte_size(payload)
 
+      # A write through the handle. `write_dispatch/5` routes a registered
+      # `fh` to the by-id facade, so the append lands on the file the
+      # handle was opened on — the name it was opened *under* is gone.
+      appended = "and bytes appended after it"
+      grown = payload <> appended
+
+      send(
+        handler,
+        {:fuse_op, 5,
+         {"write",
+          %{
+            "ino" => file_inode,
+            "offset" => byte_size(payload),
+            "data" => appended,
+            "fh" => fh
+          }}}
+      )
+
+      assert_receive {:fuse_op_complete, 5, {"write_ok", %{}}}, op_timeout()
+
+      send(
+        handler,
+        {:fuse_op, 6, {"read", %{"ino" => file_inode, "offset" => 0, "size" => 1024, "fh" => fh}}}
+      )
+
+      assert_receive {:fuse_op_complete, 6, {"read_ok", %{"data" => ^grown}}}, op_timeout()
+
+      # Resolving the *new* name is what proves the by-id write hit the
+      # renamed file rather than recreating the old one: a path-routed
+      # write would have left this size at the pre-append value.
+      assert {:ok, %{size: grown_size}} =
+               Router.call(NeonFS.Core, :get_file_meta, [volume_name, "/" <> new_name])
+
+      assert grown_size == byte_size(grown)
+
+      # `fsync` keys off the tracked `file_id` as well, so the durability
+      # barrier has to find the file under a name it has never seen.
+      send(handler, {:fuse_op, 7, {"fsync", %{"fh" => fh}}})
+      assert_receive {:fuse_op_complete, 7, {"ok", %{}}}, op_timeout()
+
       # And a truncate through the handle, which routes to the by-id facade.
       send(
         handler,
-        {:fuse_op, 5, {"setattr", %{"ino" => file_inode, "fh" => fh, "size" => 4}}}
+        {:fuse_op, 8, {"setattr", %{"ino" => file_inode, "fh" => fh, "size" => 4}}}
       )
 
-      assert_receive {:fuse_op_complete, 5, {"attr_ok", %{"size" => 4}}}, op_timeout()
+      assert_receive {:fuse_op_complete, 8, {"attr_ok", %{"size" => 4}}}, op_timeout()
 
-      send(handler, {:fuse_op, 6, {"release", %{"fh" => fh}}})
-      assert_receive {:fuse_op_complete, 6, {"ok", %{}}}, op_timeout()
+      send(handler, {:fuse_op, 9, {"release", %{"fh" => fh}}})
+      assert_receive {:fuse_op_complete, 9, {"ok", %{}}}, op_timeout()
     end
 
     # A directory created through the mount used to be a `file:` record with
