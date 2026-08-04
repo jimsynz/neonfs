@@ -20,11 +20,12 @@ defmodule NeonFS.S3.IntegrationTest.MixedRoleDataPlaneTest do
     * `NeonFS.Core.read_file/2` on the core peer reads the bytes back
       identically to what was streamed in.
 
-  Substantive RSS bounds and cross-interface readback
-  (S3-write-then-WebDAV-read) are out of scope here; they live with the
-  peak-RSS tests. Uses plain
-  `ExUnit.Case` rather than `ClusterCase` because the per-test default
-  cluster setup would conflict with the mixed-role spawn.
+  Memory bounds on the streaming pipeline are out of scope: the e2e tests
+  that asserted them proved too load-sensitive on shared runners to be
+  worth their reds, so the bound is a post-hoc profiling question rather
+  than a suite one. Uses plain `ExUnit.Case` rather than
+  `ClusterCase` because the per-test default cluster setup would conflict
+  with the mixed-role spawn.
   """
 
   use ExUnit.Case, async: false

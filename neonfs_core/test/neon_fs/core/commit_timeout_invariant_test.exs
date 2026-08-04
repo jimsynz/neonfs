@@ -5,9 +5,9 @@ defmodule NeonFS.Core.CommitTimeoutInvariantTest do
   Every mutation stages into a windowed flush that commits through
   `VolumeCommitter`. If the client call gives up first, a slow-but-
   successful commit is reported to the caller as a timeout while the write
-  goes on to land — which is how `NFSv3BeamPeakRSSTest` failed with
+  goes on to land — observed on a loaded runner as
   `{:timeout, {GenServer, :call, [FileIndex, {:create_committing_chunks, …}]}}`
-  under a loaded runner.
+  from a multi-MiB NFSv3 write that in fact succeeded.
 
   The committer's `@commit_timeout` comment already asserted this
   ordering; nothing enforced it, and the two had drifted to 30 s versus

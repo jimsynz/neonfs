@@ -8,8 +8,7 @@ defmodule NeonFS.Integration.NFSv3BeamReadTest do
   `:node1` with the live `NeonFS.NFS.NFSv3Backend`. No socket, no
   `ExportManager` — production wiring through ExportManager is tracked
   separately. This is the foundation slice; the
-  cross-node-via-`ChunkReader` path and peak-RSS bound
-  build on the same harness.
+  cross-node-via-`ChunkReader` path builds on the same harness.
 
   ## What's exercised
 
@@ -26,7 +25,6 @@ defmodule NeonFS.Integration.NFSv3BeamReadTest do
 
     * Cross-node reads via `ChunkReader` streaming path — covered by a
       mixed-role peer cluster so the harness shape differs.
-    * Peak-RSS memory bound — a separate slice for tuning headroom.
   """
 
   use NeonFS.TestSupport.ClusterCase, async: false

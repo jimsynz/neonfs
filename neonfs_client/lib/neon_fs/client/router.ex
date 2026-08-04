@@ -99,8 +99,8 @@ defmodule NeonFS.Client.Router do
   # rather than a debug. It used to be neither: callers got a bare
   # `:data_call_failed` and the cause sat below the default log level, so a
   # write that aborted here reached the operator as "Internal error" with
-  # nothing anywhere saying what broke. Five recorded occurrences of the
-  # peak-RSS upload flake got no further than this atom.
+  # nothing anywhere saying what broke. Five recorded occurrences of a
+  # cross-node upload flake got no further than this atom.
   defp refresh_and_fail(node, reason) do
     PoolManager.refresh_peer(node)
 

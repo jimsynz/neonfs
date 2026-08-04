@@ -73,10 +73,10 @@ defmodule NeonFS.Client.ChunkWriter do
   (`:ssl_gen_statem`) inside `NeonFS.Transport.ConnPool` accumulates
   pending plaintext / encrypted records while the pipeline is in
   flight. Empirically that's ≈ 3–5% of the upload size for the
-  duration of the upload window. See the peak-RSS tests for the profile
-  and the reasoning behind the bound being set at 25% of
-  upload size — which accommodates the TLS overhead without papering
-  over a real regression.
+  duration of the upload window, measured with `:erlang.memory(:processes_used)`
+  — `:total` is dominated by the BEAM's binary heap, whose major-GC
+  timing bounds it rather than anything this pipeline retains. Confirm
+  the figure by profiling a live upload; the suite no longer asserts it.
   """
 
   require Logger
