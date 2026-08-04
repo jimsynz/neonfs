@@ -14,6 +14,11 @@ defmodule NeonFS.Core.ServiceRegistryTest do
   @peer_boot_attempts 5
   @peer_boot_backoff_ms 500
 
+  # How long the self-registration chain may stay silent before it counts as
+  # stuck rather than slow. Added to whatever delay the chain last announced,
+  # never used as a budget for the whole chain.
+  @registration_quiet_ms 5_000
+
   setup %{tmp_dir: tmp_dir} do
     configure_test_dirs(tmp_dir)
 
@@ -156,6 +161,64 @@ defmodule NeonFS.Core.ServiceRegistryTest do
       assert Agent.get(attempts, & &1) > 1, "the first attempt must actually have failed"
     end
 
+    # The self-registration counterpart to the above. `register_service!/1`
+    # only covers registrations a test issues itself; the endpoint-retry chain
+    # registers on its own timer, so a setup waiting on telemetry needs the
+    # same tolerance and had none.
+    #
+    # Three failed writes back off `500 + 1000 + 2000`ms, so the registration
+    # lands well over the 1s this passes in. That is the whole point: the
+    # argument bounds how long the chain may go *quiet*, not how long it may
+    # take. Swap the call below for `assert_receive ..., slack_ms` and this
+    # fails with "no matching message after 1000ms" — the exact shape of the
+    # CI failure it guards. The elapsed-time assertion keeps it honest if the
+    # backoff constants shrink.
+    test "await_self_registration!/3 outlasts a backoff longer than its slack" do
+      registry = Process.whereis(ServiceRegistry)
+      for mod <- [Listener, PoolManager], do: Mimic.allow(mod, self(), registry)
+
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:neonfs, :service_registry, :self_registered],
+          [:neonfs, :service_registry, :self_registration_failed],
+          [:neonfs, :service_registry, :self_register_retry_scheduled]
+        ])
+
+      listener = spawn(fn -> receive do: (:stop -> :ok) end)
+      Process.register(listener, Listener)
+      on_exit(fn -> Process.exit(listener, :kill) end)
+
+      stub(Listener, :get_port, fn -> 4001 end)
+      stub(PoolManager, :advertise_endpoint, fn port -> "127.0.0.1:#{port}" end)
+
+      {:ok, attempts} = Agent.start_link(fn -> 0 end)
+
+      stub(RaSupervisor, :command, fn
+        {:register_service, _info} = cmd, timeout ->
+          case Agent.get_and_update(attempts, &{&1, &1 + 1}) do
+            n when n < 3 -> {:timeout, Node.self()}
+            _ -> Mimic.call_original(RaSupervisor, :command, [cmd, timeout])
+          end
+
+        cmd, timeout ->
+          Mimic.call_original(RaSupervisor, :command, [cmd, timeout])
+      end)
+
+      slack_ms = 1_000
+      started_at = System.monotonic_time(:millisecond)
+
+      ServiceRegistry.refresh_self()
+
+      assert :ok = await_self_registration!(ref, "127.0.0.1:4001", slack_ms)
+
+      elapsed_ms = System.monotonic_time(:millisecond) - started_at
+
+      assert Agent.get(attempts, & &1) > 3, "the first three writes must actually have failed"
+
+      assert elapsed_ms > slack_ms,
+             "the backoff must outlast the slack, or this passes without exercising it"
+    end
+
     test "register_service!/1 still raises when the write never lands" do
       stub(RaSupervisor, :command, fn _cmd, _timeout -> {:timeout, Node.self()} end)
 
@@ -208,9 +271,7 @@ defmodule NeonFS.Core.ServiceRegistryTest do
       # what it emitted on the way — `assert_receive` matches selectively, so a
       # leftover would satisfy an assertion below without the test having caused
       # it.
-      assert_receive {[:neonfs, :service_registry, :self_registered], ^ref, _measurements,
-                      %{data_endpoint: "127.0.0.1:4001"}},
-                     5_000
+      await_self_registration!(ref, "127.0.0.1:4001")
 
       flush_telemetry(ref)
 
@@ -278,10 +339,16 @@ defmodule NeonFS.Core.ServiceRegistryTest do
       # registration that succeeds ends the chain — so an attach that lands
       # after the stubs can miss it outright and then wait for a second event
       # that is never coming.
+      # The retry events are attached for `await_self_registration!/3` below,
+      # which reads the chain's announced delay to know how long to wait. The
+      # assertions in this block match selectively, so the extra traffic is
+      # inert to them.
       ref =
         :telemetry_test.attach_event_handlers(self(), [
           [:neonfs, :service_registry, :self_registered],
-          [:neonfs, :service_registry, :self_registration_healed]
+          [:neonfs, :service_registry, :self_registration_healed],
+          [:neonfs, :service_registry, :self_registration_failed],
+          [:neonfs, :service_registry, :self_register_retry_scheduled]
         ])
 
       # Without an endpoint the boot registration leaves a retry chain running,
@@ -294,9 +361,7 @@ defmodule NeonFS.Core.ServiceRegistryTest do
       stub(Listener, :get_port, fn -> 4001 end)
       stub(PoolManager, :advertise_endpoint, fn port -> "127.0.0.1:#{port}" end)
 
-      assert_receive {[:neonfs, :service_registry, :self_registered], ^ref, _m,
-                      %{data_endpoint: "127.0.0.1:4001"}},
-                     5_000
+      await_self_registration!(ref, "127.0.0.1:4001")
 
       # Shorten the interval and tick once, so the chain the assertions wait on
       # reschedules itself at the test cadence. The heal under test still comes
@@ -440,6 +505,39 @@ defmodule NeonFS.Core.ServiceRegistryTest do
       |> Enum.find(&(&1.node == Node.self() and &1.type == :core))
 
     assert entry.status == :maintenance
+  end
+
+  # A write that misses the 500ms `@ra_write_timeout_ms` is reported as failed
+  # even when Ra commits it moments later, so on a loaded runner the
+  # registration waited for here can be preceded by any number of write-cause
+  # retries, each backing off further than the last. No fixed window bounds
+  # that — but the chain announces its own next tick, so wait for what it said
+  # plus slack and fail only once it has gone quiet for longer than that.
+  # `register_service!/1` rides out the same deadline for an explicit
+  # registration; this is the self-registration counterpart.
+  defp await_self_registration!(ref, endpoint, slack_ms \\ @registration_quiet_ms) do
+    do_await_self_registration!(ref, endpoint, slack_ms, slack_ms)
+  end
+
+  defp do_await_self_registration!(ref, endpoint, slack_ms, wait_ms) do
+    receive do
+      {[:neonfs, :service_registry, :self_registered], ^ref, _measurements,
+       %{data_endpoint: ^endpoint}} ->
+        :ok
+
+      {[:neonfs, :service_registry, :self_register_retry_scheduled], ^ref, %{delay_ms: delay_ms},
+       _metadata} ->
+        do_await_self_registration!(ref, endpoint, slack_ms, delay_ms + slack_ms)
+
+      {_event, ^ref, _measurements, _metadata} ->
+        do_await_self_registration!(ref, endpoint, slack_ms, wait_ms)
+    after
+      wait_ms ->
+        flunk(
+          "the self-registration chain never registered #{endpoint} and has been " <>
+            "quiet for #{wait_ms}ms"
+        )
+    end
   end
 
   defp flush_telemetry(ref) do
