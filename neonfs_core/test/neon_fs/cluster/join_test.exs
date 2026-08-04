@@ -4,7 +4,7 @@ defmodule NeonFS.Cluster.JoinTest do
   use Mimic
 
   alias NeonFS.Cluster.{Init, Invite, Join, State}
-  alias NeonFS.Core.VolumeRegistry
+  alias NeonFS.Core.{RaSupervisor, ServiceRegistry, VolumeRegistry}
   alias NeonFS.Transport.TLS
 
   @moduletag :tmp_dir
@@ -120,6 +120,43 @@ defmodule NeonFS.Cluster.JoinTest do
 
       assert {:ok, cluster_info} = Join.accept_join(token, :core_peer@localhost, :core, csr)
       assert is_binary(cluster_info.node_cert_pem)
+    end
+  end
+
+  describe "accept_join/4 service-registration resilience" do
+    # The joining node is registered on its behalf by whichever node services
+    # the join, and that write can fail to replicate. Continuing anyway is the
+    # intended behaviour, because the joiner repairs its own registration
+    # within seconds and its invite token is already spent — see the comment on
+    # `register_service/3`. Pinned here so a future change to fail the join
+    # instead has to be a decision rather than an accident.
+    test "join succeeds when the joining node's registration does not replicate" do
+      {:ok, token} = Invite.create_invite(3600)
+      key = TLS.generate_node_key()
+      csr = TLS.create_csr(key, "fuse_unregistered@localhost")
+
+      Mimic.allow(RaSupervisor, self(), Process.whereis(ServiceRegistry))
+
+      # Fail only the joining node's registration. Everything else the join
+      # does — issuing the certificate, recording peers, sizing the system
+      # volume — still needs a working Ra, so those commands pass through.
+      stub(RaSupervisor, :command, fn
+        {:register_service, %{node: :fuse_unregistered@localhost}}, _timeout ->
+          {:timeout, Node.self()}
+
+        cmd, timeout ->
+          Mimic.call_original(RaSupervisor, :command, [cmd, timeout])
+      end)
+
+      assert {:ok, cluster_info} =
+               Join.accept_join(token, :fuse_unregistered@localhost, :fuse, csr)
+
+      assert is_binary(cluster_info.node_cert_pem),
+             "the join has to have completed, certificate and all"
+
+      assert {:error, :not_found} =
+               ServiceRegistry.get(:fuse_unregistered@localhost, :fuse),
+             "and the registration has to have genuinely failed, or this proves nothing"
     end
   end
 
