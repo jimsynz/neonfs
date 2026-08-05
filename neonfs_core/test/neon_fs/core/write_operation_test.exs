@@ -870,6 +870,86 @@ defmodule NeonFS.Core.WriteOperationTest do
       assert updated_volume.physical_size > 0
       assert updated_volume.chunk_count > 0
     end
+
+    test "an append at EOF lands in a new stripe", %{ec_volume: volume} do
+      {:ok, _} =
+        WriteOperation.write_file_at(volume.id, "/ec_append.bin", 0, "head-bytes",
+          chunk_strategy: :single
+        )
+
+      assert {:ok, meta} = WriteOperation.write_file_at(volume.id, "/ec_append.bin", 10, "tail")
+
+      assert meta.size == 14
+      assert_stripes_tile(meta)
+      assert {:ok, "head-bytestail"} = ReadOperation.read_file(volume.id, "/ec_append.bin")
+    end
+
+    test "a write starting past the end zero-fills the hole and no more",
+         %{ec_volume: volume} do
+      {:ok, _} =
+        WriteOperation.write_file_at(volume.id, "/ec_hole.bin", 0, "head",
+          chunk_strategy: :single
+        )
+
+      assert {:ok, meta} = WriteOperation.write_file_at(volume.id, "/ec_hole.bin", 10, "tail")
+
+      assert meta.size == 14
+      assert_stripes_tile(meta)
+
+      assert {:ok, read_data} = ReadOperation.read_file(volume.id, "/ec_hole.bin")
+      assert read_data == "head" <> :binary.copy(<<0>>, 6) <> "tail"
+    end
+
+    test "successive appends each land at the end", %{ec_volume: volume} do
+      {:ok, _} =
+        WriteOperation.write_file_at(volume.id, "/ec_seq.bin", 0, "aaa", chunk_strategy: :single)
+
+      for part <- ["bbb", "ccc", "ddd"] do
+        {:ok, meta} = FileIndex.get_by_path(volume.id, "/ec_seq.bin")
+        assert {:ok, _} = WriteOperation.write_file_at(volume.id, "/ec_seq.bin", meta.size, part)
+      end
+
+      assert {:ok, meta} = FileIndex.get_by_path(volume.id, "/ec_seq.bin")
+      assert_stripes_tile(meta)
+      assert {:ok, "aaabbbcccddd"} = ReadOperation.read_file(volume.id, "/ec_seq.bin")
+    end
+
+    test "a write overlapping the last stripe keeps both the overlap and the tail",
+         %{ec_volume: volume} do
+      head = :crypto.strong_rand_bytes(2048)
+
+      {:ok, _} =
+        WriteOperation.write_file_at(volume.id, "/ec_overlap.bin", 0, head,
+          chunk_strategy: {:fixed, 1024}
+        )
+
+      tail = :crypto.strong_rand_bytes(2048)
+
+      assert {:ok, meta} =
+               WriteOperation.write_file_at(volume.id, "/ec_overlap.bin", 1024, tail,
+                 chunk_strategy: {:fixed, 1024}
+               )
+
+      assert meta.size == 3072
+      assert_stripes_tile(meta)
+
+      assert {:ok, read_data} = ReadOperation.read_file(volume.id, "/ec_overlap.bin")
+      assert read_data == binary_part(head, 0, 1024) <> tail
+    end
+
+    test "an in-place write inside an existing stripe rewrites just that stripe",
+         %{ec_volume: volume} do
+      {:ok, _} =
+        WriteOperation.write_file_at(volume.id, "/ec_inplace.bin", 0, "0123456789",
+          chunk_strategy: :single
+        )
+
+      assert {:ok, meta} = WriteOperation.write_file_at(volume.id, "/ec_inplace.bin", 3, "XY")
+
+      assert meta.size == 10
+      assert_stripes_tile(meta)
+      assert {:ok, "012XY56789"} = ReadOperation.read_file(volume.id, "/ec_inplace.bin")
+    end
   end
 
   describe "encrypted write path" do
@@ -1404,6 +1484,18 @@ defmodule NeonFS.Core.WriteOperationTest do
 
       assert file_meta.size == byte_size("streamed mine")
     end
+  end
+
+  defp assert_stripes_tile(file_meta) do
+    ranges = Enum.map(file_meta.stripes, & &1.byte_range)
+
+    assert ranges == Enum.sort(ranges)
+
+    Enum.reduce(ranges, 0, fn {start, stop}, expected_start ->
+      assert start == expected_start
+      stop
+    end)
+    |> then(fn covered -> assert covered == file_meta.size end)
   end
 
   # Telemetry event handler

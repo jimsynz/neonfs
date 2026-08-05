@@ -753,6 +753,19 @@ defmodule NeonFS.Core.WriteOperation do
 
   # ─── Offset Write (erasure-coded) ──────────────────────────────────────
 
+  # An offset write is served by rebuilding one contiguous *region* of the
+  # file and re-striping it. The region spans from the start of the first
+  # stripe the write touches (or, when it touches none, from the end of the
+  # stripes that precede it) through to whichever is further: the end of the
+  # last touched stripe, or the end of the write.
+  #
+  # Rebuilding the whole region rather than patching each stripe in place is
+  # what lets a write grow the file: a write that extends past the last
+  # stripe's end simply produces a longer region, and `build_and_store_stripes/4`
+  # lays out however many stripes that needs. The previous per-stripe rewrite
+  # clamped every splice to the stripe's existing length, so an append at EOF
+  # touched no stripe at all and stored nothing, while a write that overlapped
+  # the last stripe kept only the overlapping prefix and dropped its tail.
   defp erasure_write_at(volume, file_meta, offset, data, write_ctx, opts) do
     write_end = offset + byte_size(data)
 
@@ -761,38 +774,117 @@ defmodule NeonFS.Core.WriteOperation do
     {prefix_stripes, affected_stripes, suffix_stripes} =
       partition_stripes(stripe_refs, offset, write_end)
 
-    case rewrite_affected_stripes(
-           affected_stripes,
-           offset,
-           data,
-           write_end,
-           volume,
-           write_ctx,
-           opts
-         ) do
-      {:ok, new_stripe_results} ->
-        all_new_chunks = Enum.flat_map(new_stripe_results, fn sr -> sr.chunks end)
+    region_start = region_start(prefix_stripes, affected_stripes)
+    new_size = max(file_meta.size, write_end)
 
-        new_stripe_refs =
-          Enum.map(new_stripe_results, fn sr ->
-            %{stripe_id: sr.stripe_id, byte_range: sr.byte_range}
-          end)
+    with {:ok, region_data} <-
+           build_region_data(affected_stripes, region_start, offset, data, volume),
+         {:ok, new_stripe_results} <- restripe_region(region_data, volume, write_ctx, opts),
+         new_stripe_refs = region_stripe_refs(new_stripe_results, region_start),
+         all_stripes = prefix_stripes ++ new_stripe_refs ++ suffix_stripes,
+         :ok <- validate_stripes_tile(all_stripes, new_size) do
+      new_stripes = Enum.map(new_stripe_results, & &1.stripe)
 
-        new_size = max(file_meta.size, write_end)
-        all_stripes = prefix_stripes ++ new_stripe_refs ++ suffix_stripes
-
-        update_file_and_commit(
-          file_meta.volume_id,
-          file_meta.id,
-          write_ctx.write_id,
-          all_new_chunks,
-          stripes: all_stripes,
-          size: new_size
-        )
-
+      update_file_and_commit(
+        file_meta.volume_id,
+        file_meta.id,
+        write_ctx.write_id,
+        Enum.flat_map(new_stripe_results, & &1.chunks),
+        [stripes: all_stripes, size: new_size],
+        extra_mutations: StripeIndex.put_mutations(new_stripes),
+        on_commit: fn -> StripeIndex.materialize(new_stripes) end
+      )
+    else
       {:error, _reason} = error ->
         abort_chunks(write_ctx.write_id)
         error
+    end
+  end
+
+  # Stripes tile the file from zero, so the end of the last untouched stripe
+  # before the write is where the rebuilt region begins.
+  defp region_start([], []), do: 0
+  defp region_start(prefix_stripes, []), do: prefix_stripes |> List.last() |> stripe_end()
+
+  defp region_start(_prefix_stripes, affected_stripes),
+    do: affected_stripes |> List.first() |> stripe_start()
+
+  defp stripe_start(%{byte_range: {start, _end}}), do: start
+  defp stripe_end(%{byte_range: {_start, stop}}), do: stop
+
+  defp build_region_data(affected_stripes, region_start, offset, data, volume) do
+    with {:ok, existing} <- read_stripes(affected_stripes, volume) do
+      splice_at = offset - region_start
+      leading = binary_part(existing, 0, min(splice_at, byte_size(existing)))
+      hole = :binary.copy(<<0>>, max(0, splice_at - byte_size(existing)))
+      trailing_start = splice_at + byte_size(data)
+
+      trailing =
+        if trailing_start < byte_size(existing) do
+          binary_part(existing, trailing_start, byte_size(existing) - trailing_start)
+        else
+          <<>>
+        end
+
+      {:ok, leading <> hole <> data <> trailing}
+    end
+  end
+
+  defp read_stripes(stripe_refs, volume) do
+    stripe_refs
+    |> Enum.reduce_while({:ok, []}, fn %{stripe_id: stripe_id}, {:ok, acc} ->
+      case read_stripe(stripe_id, volume) do
+        {:ok, bytes} -> {:cont, {:ok, [bytes | acc]}}
+        {:error, _} = error -> {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, parts} -> {:ok, parts |> Enum.reverse() |> IO.iodata_to_binary()}
+      error -> error
+    end
+  end
+
+  defp read_stripe(stripe_id, volume) do
+    with {:ok, stripe} <- StripeIndex.get(volume.id, stripe_id) do
+      stripe.chunks
+      |> Enum.take(stripe.config.data_chunks)
+      |> read_stripe_data(volume.id, stripe.data_bytes)
+    end
+  end
+
+  defp restripe_region(<<>>, _volume, _write_ctx, _opts), do: {:ok, []}
+
+  defp restripe_region(region_data, volume, write_ctx, opts) do
+    with {:ok, chunk_results} <- chunk_data(region_data, opts) do
+      build_and_store_stripes(chunk_results, volume, write_ctx, opts)
+    end
+  end
+
+  # `build_and_store_stripes/4` numbers its byte offsets from the start of the
+  # data it was handed, which here is the region rather than the file.
+  defp region_stripe_refs(stripe_results, region_start) do
+    Enum.map(stripe_results, fn sr ->
+      %{
+        stripe_id: sr.stripe_id,
+        byte_range: {region_start + sr.byte_offset, region_start + sr.byte_offset + sr.data_bytes}
+      }
+    end)
+  end
+
+  # The read path resolves a byte offset by walking these ranges, so a gap or
+  # an overshoot is silent data loss. Refuse the commit instead.
+  defp validate_stripes_tile(stripes, size) do
+    covered =
+      Enum.reduce_while(stripes, 0, fn %{byte_range: {start, stop}}, expected_start ->
+        if start == expected_start,
+          do: {:cont, stop},
+          else: {:halt, {:gap, expected_start, start}}
+      end)
+
+    case covered do
+      {:gap, expected, got} -> {:error, {:stripe_gap, expected: expected, got: got}}
+      ^size -> :ok
+      short_or_long -> {:error, {:stripe_coverage, expected: size, got: short_or_long}}
     end
   end
 
@@ -809,72 +901,6 @@ defmodule NeonFS.Core.WriteOperation do
       end)
 
     {prefix, affected, suffix}
-  end
-
-  defp rewrite_affected_stripes(
-         affected_stripes,
-         offset,
-         data,
-         write_end,
-         volume,
-         write_ctx,
-         opts
-       ) do
-    results =
-      Enum.reduce_while(affected_stripes, {:ok, []}, fn stripe_ref, {:ok, acc} ->
-        case rewrite_single_stripe(stripe_ref, offset, data, write_end, volume, write_ctx, opts) do
-          {:ok, stripe_result} -> {:cont, {:ok, [stripe_result | acc]}}
-          {:error, _} = error -> {:halt, error}
-        end
-      end)
-
-    case results do
-      {:ok, list} -> {:ok, Enum.reverse(list)}
-      error -> error
-    end
-  end
-
-  defp rewrite_single_stripe(stripe_ref, offset, data, write_end, volume, write_ctx, opts) do
-    %{stripe_id: old_stripe_id, byte_range: {stripe_start, stripe_end}} = stripe_ref
-
-    case StripeIndex.get(volume.id, old_stripe_id) do
-      {:ok, stripe} ->
-        data_chunk_count = stripe.config.data_chunks
-        data_hashes = Enum.take(stripe.chunks, data_chunk_count)
-
-        with {:ok, stripe_data} <- read_stripe_data(data_hashes, volume.id, stripe.data_bytes),
-             modified <-
-               splice_stripe_data(stripe_data, data, offset, write_end, stripe_start, stripe_end),
-             {:ok, chunk_results} <- chunk_data(modified, opts),
-             {:ok, [stripe_result]} <-
-               build_and_store_stripes(chunk_results, volume, write_ctx, opts) do
-          new_byte_range = {stripe_start, stripe_start + stripe_result.data_bytes}
-          {:ok, %{stripe_result | byte_range: new_byte_range}}
-        end
-
-      {:error, _} = error ->
-        error
-    end
-  end
-
-  defp splice_stripe_data(stripe_data, data, offset, write_end, stripe_start, stripe_end) do
-    splice_start = max(0, offset - stripe_start)
-    splice_end = min(stripe_end - stripe_start, write_end - stripe_start)
-    data_offset_in_write = max(0, stripe_start - offset)
-    data_len = splice_end - splice_start
-
-    new_data_slice = binary_part(data, data_offset_in_write, data_len)
-
-    before = if splice_start > 0, do: binary_part(stripe_data, 0, splice_start), else: <<>>
-
-    after_data =
-      if splice_end < byte_size(stripe_data) do
-        binary_part(stripe_data, splice_end, byte_size(stripe_data) - splice_end)
-      else
-        <<>>
-      end
-
-    before <> new_data_slice <> after_data
   end
 
   defp read_stripe_data(data_hashes, volume_id, data_bytes) do
@@ -1739,12 +1765,12 @@ defmodule NeonFS.Core.WriteOperation do
     end
   end
 
-  defp update_file_and_commit(_volume_id, file_id, write_id, new_chunks, update_attrs) do
+  defp update_file_and_commit(_volume_id, file_id, write_id, new_chunks, update_attrs, opts \\ []) do
     now = DateTime.utc_now()
     attrs = update_attrs ++ [modified_at: now, changed_at: now]
     new_hashes = Enum.map(new_chunks, & &1.hash)
 
-    case FileIndex.update_committing_chunks(file_id, attrs, write_id, new_hashes) do
+    case FileIndex.update_committing_chunks(file_id, attrs, write_id, new_hashes, opts) do
       {:ok, updated_meta} ->
         {:ok, updated_meta}
 
