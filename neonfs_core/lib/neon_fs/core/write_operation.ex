@@ -575,9 +575,15 @@ defmodule NeonFS.Core.WriteOperation do
     with :ok <- check_capacity(volume, max(0, write_end - file_meta.size)),
          {:ok, enc_ctx} <- resolve_encryption(volume),
          write_ctx = %{write_id: write_id, enc_ctx: enc_ctx},
-         {:ok, modified_data} <-
-           splice_affected_chunks(affected, offset, data, write_end, volume.id),
-         new_data = maybe_pad_before(modified_data, offset, file_meta.size, chunk_positions),
+         {:ok, new_data} <-
+           splice_affected_chunks(
+             affected,
+             chunks_end(prefix),
+             offset,
+             data,
+             write_end,
+             volume.id
+           ),
          {:ok, new_chunks} <- chunk_and_store(new_data, volume, write_ctx, opts) do
       prefix_hashes = Enum.map(prefix, fn {hash, _start, _end} -> hash end)
       suffix_hashes = Enum.map(suffix, fn {hash, _start, _end} -> hash end)
@@ -631,6 +637,11 @@ defmodule NeonFS.Core.WriteOperation do
     end
   end
 
+  # Chunk positions are contiguous from zero, so the end of the last one is
+  # the total byte span they cover.
+  defp chunks_end([]), do: 0
+  defp chunks_end(chunk_positions), do: chunk_positions |> List.last() |> elem(2)
+
   defp partition_chunks(chunk_positions, write_start, write_end) do
     prefix = Enum.filter(chunk_positions, fn {_h, _s, e} -> e <= write_start end)
     suffix = Enum.filter(chunk_positions, fn {_h, s, _e} -> s >= write_end end)
@@ -643,15 +654,17 @@ defmodule NeonFS.Core.WriteOperation do
     {prefix, affected, suffix}
   end
 
-  defp splice_affected_chunks([], offset, data, _write_end, _volume_id) do
-    if offset > 0 do
-      {:ok, :binary.copy(<<0>>, offset) <> data}
-    else
-      {:ok, data}
-    end
+  # `chunks_end(prefix)` is where the rewritten region begins: the new chunks
+  # are concatenated *after* the prefix, so their first byte already sits at
+  # that absolute offset. Only the hole between there and `offset` has to be
+  # materialised as zeros. Padding by the absolute `offset` instead pushed the
+  # written bytes to `prefix_end + offset`, past the file's new size, where no
+  # read could reach them — so every append at EOF stored its data and lost it.
+  defp splice_affected_chunks([], prefix_end, offset, data, _write_end, _volume_id) do
+    {:ok, :binary.copy(<<0>>, offset - prefix_end) <> data}
   end
 
-  defp splice_affected_chunks(affected, offset, data, write_end, volume_id) do
+  defp splice_affected_chunks(affected, _prefix_end, offset, data, write_end, volume_id) do
     first_chunk_start = affected |> List.first() |> elem(1)
 
     chunk_data_results =
@@ -682,20 +695,12 @@ defmodule NeonFS.Core.WriteOperation do
           <<>>
         end
 
-      result = before_splice <> data <> after_splice
-
-      if first_chunk_start < offset do
-        {:ok, result}
-      else
-        {:ok, result}
-      end
+      {:ok, before_splice <> data <> after_splice}
     else
       Enum.find(chunk_data_results, &match?({:error, _}, &1)) ||
         {:error, :chunk_fetch_failed}
     end
   end
-
-  defp maybe_pad_before(data, _offset, _file_size, _chunk_positions), do: data
 
   defp fetch_chunk_for_write(hash, volume_id) do
     case ChunkIndex.get(volume_id, hash) do

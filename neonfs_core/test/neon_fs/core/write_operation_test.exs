@@ -8,6 +8,7 @@ defmodule NeonFS.Core.WriteOperationTest do
     KeyManager,
     LockManager,
     RaServer,
+    ReadOperation,
     StripeIndex,
     VolumeEncryption,
     VolumeRegistry,
@@ -1034,6 +1035,43 @@ defmodule NeonFS.Core.WriteOperationTest do
                )
 
       assert updated_meta.size == byte_size(initial_data) + byte_size(append_data)
+
+      # Reading it back is the assertion this test was missing. The size grew
+      # correctly while the appended bytes were stored past it, so every
+      # size-only assertion passed against a file whose tail was unreachable.
+      assert {:ok, read_data} = ReadOperation.read_file(volume.id, "/offset.txt")
+      assert read_data == initial_data <> append_data
+    end
+
+    test "a write starting past the end zero-fills the hole and no more",
+         %{volume: volume} do
+      {:ok, _file_meta} =
+        WriteOperation.write_file_streamed(volume.id, "/hole.bin", ["head"],
+          chunk_strategy: :single
+        )
+
+      assert {:ok, updated_meta} =
+               WriteOperation.write_file_at(volume.id, "/hole.bin", 10, "tail")
+
+      assert updated_meta.size == 14
+
+      assert {:ok, read_data} = ReadOperation.read_file(volume.id, "/hole.bin")
+      assert read_data == "head" <> :binary.copy(<<0>>, 6) <> "tail"
+    end
+
+    test "successive appends each land at the end", %{volume: volume} do
+      {:ok, _file_meta} =
+        WriteOperation.write_file_streamed(volume.id, "/seq.bin", ["aaa"],
+          chunk_strategy: :single
+        )
+
+      for part <- ["bbb", "ccc", "ddd"] do
+        {:ok, meta} = FileIndex.get_by_path(volume.id, "/seq.bin")
+        assert {:ok, _} = WriteOperation.write_file_at(volume.id, "/seq.bin", meta.size, part)
+      end
+
+      assert {:ok, read_data} = ReadOperation.read_file(volume.id, "/seq.bin")
+      assert read_data == "aaabbbcccddd"
     end
 
     test "overwriting middle of existing file does not crash", %{volume: volume} do
@@ -1051,7 +1089,6 @@ defmodule NeonFS.Core.WriteOperationTest do
 
       assert updated_meta.size == 100
 
-      alias NeonFS.Core.ReadOperation
       assert {:ok, read_data} = ReadOperation.read_file(volume.id, "/middle.txt")
       expected = String.duplicate("A", 10) <> overwrite_data <> String.duplicate("A", 80)
       assert read_data == expected
