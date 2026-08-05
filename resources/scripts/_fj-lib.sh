@@ -7,12 +7,21 @@
 #   FJ_REPO   — owner/name (default: project-neon/neonfs, override via env)
 #   FJ_API    — base API URL: https://$FJ_HOST/api/v1/repos/$FJ_REPO
 #   fj_curl   — curl wrapper that injects auth, dies on HTTP >= 400
+#   fj_json   — fj_curl plus "the body must parse as JSON"
 #   fj_die    — print to stderr and exit 1
+#
+# Both wrappers bound each request with --max-time and retry transient
+# failures (connection errors, 429, 5xx) before giving up, so a blip on the
+# instance does not abort a caller that is mid-poll. Tunable via
+# FJ_MAX_TIME, FJ_RETRIES and FJ_RETRY_DELAY.
 
 set -euo pipefail
 
 : "${FJ_HOST:=harton.dev}"
 : "${FJ_REPO:=project-neon/neonfs}"
+: "${FJ_MAX_TIME:=45}"
+: "${FJ_RETRIES:=3}"
+: "${FJ_RETRY_DELAY:=5}"
 
 FJ_API="https://$FJ_HOST/api/v1/repos/$FJ_REPO"
 
@@ -39,6 +48,15 @@ fj_die() {
 # Path may be absolute (https://...) or repo-relative (/issues/123).
 # Repo-relative paths are joined onto $FJ_API.
 # Body for POST/PATCH: pipe JSON on stdin or pass --data via curl-args.
+#
+# Retries transient failures — a connection error (curl exit, reported as
+# HTTP 000), 429, or any 5xx — up to $FJ_RETRIES times. A 4xx other than 429
+# is the server answering, so it fails immediately.
+#
+# NOTE for POST/PATCH callers: a retry re-sends the request, and a request
+# whose *response* was lost has still been applied. Only retry-safe verbs
+# should rely on this; `fj-pr-create` and friends must still check whether
+# the resource exists before retrying by hand.
 fj_curl() {
   local method="$1"
   local target="$2"
@@ -51,36 +69,97 @@ fj_curl() {
     *)         url="$FJ_API/$target" ;;
   esac
 
-  local body status
+  local body status attempt=1
   body=$(mktemp)
-  status=$(curl -sS -w '%{http_code}' -o "$body" \
-    -X "$method" \
-    -H "Authorization: token $FJ_TOKEN" \
-    -H "Content-Type: application/json" \
-    -H "Accept: application/json" \
-    "$@" \
-    "$url")
 
-  if [ "$status" -ge 400 ]; then
-    echo "fj: $method $url → HTTP $status" >&2
-    cat "$body" >&2
-    echo >&2
-    rm -f "$body"
-    return 1
-  fi
+  while :; do
+    status=$(curl -sS -m "$FJ_MAX_TIME" -w '%{http_code}' -o "$body" \
+      -X "$method" \
+      -H "Authorization: token $FJ_TOKEN" \
+      -H "Content-Type: application/json" \
+      -H "Accept: application/json" \
+      "$@" \
+      "$url" 2>/dev/null) || status=000
 
-  cat "$body"
-  rm -f "$body"
+    if [ "$status" -lt 400 ] && [ "$status" != "000" ]; then
+      cat "$body"
+      rm -f "$body"
+      return 0
+    fi
+
+    if ! fj_transient_status "$status" || [ "$attempt" -ge "$FJ_RETRIES" ]; then
+      echo "fj: $method $url → HTTP $status" >&2
+      cat "$body" >&2
+      echo >&2
+      rm -f "$body"
+      return 1
+    fi
+
+    echo "fj: $method $url → HTTP $status, retrying ($attempt/$FJ_RETRIES)" >&2
+    attempt=$((attempt + 1))
+    sleep "$FJ_RETRY_DELAY"
+  done
+}
+
+# fj_transient_status <http-status> — true when the status is worth retrying.
+# 000 is curl's stand-in for "never got a response" (timeout, reset, DNS).
+fj_transient_status() {
+  case "$1" in
+    000|429|5??) return 0 ;;
+    *)           return 1 ;;
+  esac
+}
+
+# fj_json <method> <path-or-url> [curl-args...]
+# fj_curl, plus the body must parse as JSON — retried if it does not.
+#
+# A degraded Forgejo answers with an HTML error page under a 2xx often
+# enough to matter, and a caller that pipes that into jq gets `null` for
+# every field. `null` then reads as a legitimate value: this is exactly how
+# `fj-pr-merge-when-green` came to announce an open PR as "already merged"
+# and exit 5. An unreadable answer is not an answer.
+fj_json() {
+  local out attempt=1
+
+  while :; do
+    if out=$(fj_curl "$@") && printf '%s' "$out" | jq -e . >/dev/null 2>&1; then
+      printf '%s' "$out"
+      return 0
+    fi
+
+    if [ "$attempt" -ge "$FJ_RETRIES" ]; then
+      fj_die "$1 $2 → no parseable JSON after $FJ_RETRIES attempts"
+    fi
+
+    echo "fj: $1 $2 → unparseable body, retrying ($attempt/$FJ_RETRIES)" >&2
+    attempt=$((attempt + 1))
+    sleep "$FJ_RETRY_DELAY"
+  done
 }
 
 # fj_pr_head_sha <pr-number> — print head SHA for a PR.
 fj_pr_head_sha() {
-  fj_curl GET "/pulls/$1" | jq -r '.head.sha'
+  fj_json GET "/pulls/$1" | jq -r '.head.sha'
 }
 
 # fj_statuses <sha> — print latest-per-context status entries as JSON array.
 # Forgejo returns oldest→newest; we keep the last entry per context.
+#
+# Deduplicating is not optional: the endpoint returns every status ever
+# posted for the SHA, so a re-run leaves the superseded entries in place and
+# a raw `select(.status == "pending")` count never reaches zero.
 fj_statuses() {
-  fj_curl GET "/commits/$1/statuses" \
+  fj_json GET "/commits/$1/statuses?limit=100" \
     | jq '[.[]] | sort_by(.id) | reverse | unique_by(.context) | sort_by(.context)'
+}
+
+# fj_run_id <sha> — print the API id of the newest Actions run for a commit.
+#
+# Runs have two identifiers and they are not interchangeable: `index_in_repo`
+# is the number in web URLs (/actions/runs/3624), `id` is what the REST API
+# keys on (13801). Passing the former to the API returns "resource does not
+# exist", which is indistinguishable from an unimplemented endpoint.
+fj_run_id() {
+  fj_json GET "/actions/runs?head_sha=$1" \
+    | jq -r '[.workflow_runs[].id] | max // empty'
 }

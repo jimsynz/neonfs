@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# Per-job state for a PR's (or commit's) latest Actions run, as TSV:
+#   <status><TAB><job name><TAB>attempt=<n><TAB>task=<id>
+#
+# Usage:
+#   fj-run-jobs <pr-number>
+#   fj-run-jobs <sha>
+#
+# Why this exists alongside `fj-pr-status`: commit statuses flatten every
+# incomplete job to `pending`, so a job that is not progressing gives no clue
+# as to why. The jobs endpoint distinguishes the cases that matter:
+#
+#   blocked   waiting on `needs`; no task allocated yet (task=0)
+#   waiting   dispatchable, but no runner has claimed it (task=0)
+#   running   a runner has it (task=<id>)
+#   success / failure / skipped
+#
+# `blocked` versus `waiting` is the difference between "its dependencies
+# haven't finished" and "no runner is available", which is otherwise
+# invisible — and `task=0` is why a rerun of such a job fails: there is no
+# task to re-run.
+
+source "$(dirname "$(readlink -f "$0")")/_fj-lib.sh"
+
+ref="${1:-}"
+[ -n "$ref" ] || fj_die "usage: fj-run-jobs <pr-number-or-sha>"
+
+if [[ "$ref" =~ ^[0-9]+$ ]]; then
+  sha=$(fj_pr_head_sha "$ref")
+else
+  sha="$ref"
+fi
+
+[ -n "$sha" ] && [ "$sha" != "null" ] || fj_die "could not resolve a commit for: $ref"
+
+run_id=$(fj_run_id "$sha")
+[ -n "$run_id" ] || fj_die "no Actions run found for $sha"
+
+fj_json GET "/actions/runs/$run_id/jobs" \
+  | jq -r '.[] | [.status, .name, "attempt=\(.attempt)", "task=\(.task_id)"]
+                 | @tsv' \
+  | sort

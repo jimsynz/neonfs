@@ -38,11 +38,22 @@ done
 deadline=$(( $(date +%s) + timeout ))
 
 while :; do
-  pr=$(fj_curl GET "/pulls/$n")
+  pr=$(fj_json GET "/pulls/$n")
   state=$(echo "$pr" | jq -r '.state')
   merged=$(echo "$pr" | jq -r '.merged')
   mergeable=$(echo "$pr" | jq -r '.mergeable')
   sha=$(echo "$pr" | jq -r '.head.sha')
+
+  # Guard every field this loop makes a decision on. `fj_json` already
+  # rejects a body that will not parse, but a JSON body missing these keys
+  # would still yield "null" — and "null" is not "closed". Deciding on one
+  # is how this script came to report an open, mid-CI PR as already merged
+  # and exit 5, which tells its caller the work is done.
+  for field in state merged mergeable sha; do
+    if [ -z "${!field}" ] || [ "${!field}" = "null" ]; then
+      fj_die "PR #$n: response has no usable .$field — refusing to guess"
+    fi
+  done
 
   if [ "$state" != "open" ] || [ "$merged" = "true" ]; then
     echo "PR #$n is $state (merged=$merged) — nothing to do"
@@ -75,9 +86,18 @@ while :; do
   if [ "$pending" -eq 0 ] && [ "$total" -gt 0 ]; then
     echo "all green"
     if [ "$do_merge" = "1" ]; then
+      # Not via fj_curl's retry: a merge whose response is lost has still
+      # merged, and re-sending it would report a spurious failure. One
+      # attempt, then confirm against the PR's own state.
       jq -nc '{Do: "squash"}' \
-        | fj_curl POST "/pulls/$n/merge" --data-binary @- > /dev/null
-      echo "merged #$n"
+        | FJ_RETRIES=1 fj_curl POST "/pulls/$n/merge" --data-binary @- > /dev/null \
+        || echo "merge request failed or its response was lost — verifying" >&2
+
+      if [ "$(fj_json GET "/pulls/$n" | jq -r '.merged')" = "true" ]; then
+        echo "merged #$n"
+      else
+        fj_die "PR #$n still reports merged=false after the merge request"
+      fi
     fi
     exit 0
   fi

@@ -8,6 +8,11 @@
 # `run-index` is the per-repo run number (the integer in the public URL
 # /actions/runs/<N>), NOT the global API id. `job-index` is 0-based.
 # `attempt` defaults to 1.
+#
+# This uses the web download endpoint because a `target_url` already carries
+# the run index it wants. Forgejo 16 also has a REST route keyed on the job
+# id — GET /api/v1/repos/{owner}/{repo}/actions/jobs/{job_id}/logs — which
+# needs no `attempt`; `fj-run-jobs` is where you get a job id.
 
 source "$(dirname "$(readlink -f "$0")")/_fj-lib.sh"
 

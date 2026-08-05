@@ -293,6 +293,7 @@ Each script handles auth, error reporting, and JSON parsing; they read the token
 | `fj-token` | Print the API token (for one-off `curl` if needed). |
 | `fj-whoami` | Print the authenticated login. |
 | `fj-pr-status <pr#-or-sha>` | Latest CI status per context, TSV. |
+| `fj-run-jobs <pr#-or-sha>` | Per-job state of the latest Actions run, TSV — distinguishes `blocked` (waiting on `needs`) from `waiting` (no runner has claimed it) from `running`, which commit statuses flatten to `pending`. |
 | `fj-pr-failing <pr#-or-sha>` | Only the failing contexts, with `target_url` for log retrieval. |
 | `fj-job-logs <run-index> <job-index> [attempt]` | Download a single job's log. Also accepts a `target_url` from `fj-pr-failing`. |
 | `fj-job-logs-failing <pr#-or-sha> [--tail N]` | Dump every failing job's log, one section per job. |
@@ -303,17 +304,34 @@ Each script handles auth, error reporting, and JSON parsing; they read the token
 | `fj-pr-merge-when-green <pr#> [--timeout S] [--poll S] [--no-merge]` | Poll until CI is green, then squash-merge. Exit codes encode outcome: 0 merged, 2 needs rebase, 3 failure, 4 timeout, 5 already closed. |
 | `fj-branch-prune [--delete] [--include-unmerged]` | List (or `--delete`) branches whose PR is merged/closed and safe to remove — squash-merge defeats `git branch --merged`, so it matches branches to PRs via the API. Dry-run by default; TSV `<verb><TAB><branch><TAB><pr#><TAB><note>`. |
 
-Two debug knobs the scripts honour: `FJ_HOST` (default `harton.dev`) and `FJ_REPO` (default `project-neon/neonfs`).
+Debug knobs the scripts honour: `FJ_HOST` (default `harton.dev`), `FJ_REPO` (default `project-neon/neonfs`), and — for the request layer in `_fj-lib.sh` — `FJ_MAX_TIME`, `FJ_RETRIES`, `FJ_RETRY_DELAY`.
+
+Every request is bounded by `--max-time` and retries transient failures (connection error, 429, 5xx) before giving up, and `fj_json` additionally rejects a body that will not parse. Both matter because a degraded instance answers with HTML often enough that piping it into `jq` yields `null` for every field — and `null` reads as a legitimate value. That is how `fj-pr-merge-when-green` once announced an open, mid-CI PR as "already merged" and exited 5, which tells its caller the work is done. **When writing a new helper, decide on `fj_json`, not `fj_curl` + `jq`.** A retry is only safe for reads: a POST whose response was lost has still been applied, so `fj-pr-create` and the merge call verify state rather than re-sending.
 
 ### Reading failing-job logs
 
-Forgejo does not expose job logs via the public REST API, but the web download endpoint (`/<repo>/actions/runs/<N>/jobs/<i>/attempt/<a>/logs`) accepts an `Authorization: token` header. `fj-job-logs` and `fj-job-logs-failing` use that endpoint, so you no longer need to reproduce CI failures locally just to see the log:
+`fj-job-logs` and `fj-job-logs-failing` use the web download endpoint (`/<repo>/actions/runs/<N>/jobs/<i>/attempt/<a>/logs`), which accepts an `Authorization: token` header, so you don't need to reproduce a CI failure locally just to read its log:
 
 ```bash
 fj-job-logs-failing 581 --tail 200    # last 200 lines of every failing job
 ```
 
 If a particular failing job needs deeper inspection, get the `target_url` from `fj-pr-failing` and pass it to `fj-job-logs` directly.
+
+A REST route for the same thing exists as of Forgejo 16 — `GET /api/v1/repos/{owner}/{repo}/actions/jobs/{job_id}/logs`, plain text, token auth, no `attempt` to guess. The web endpoint is kept because a `target_url` already carries the run index it wants; reach for the REST one when you have a `job_id` from `fj-run-jobs`.
+
+### Actions API: two identifiers, and no rerun
+
+A run has **two** identifiers and they are not interchangeable:
+
+- `index_in_repo` — the number in web URLs (`/actions/runs/3624`), which is what `target_url` and `fj-job-logs` use;
+- `id` — what the REST API keys on (`13801`).
+
+Passing the web number to the REST API returns `{"message":"resource does not exist"}`, which is indistinguishable from an unimplemented endpoint and has been misread as one. Resolve the id from a commit instead of guessing: `GET /actions/runs?head_sha=<sha>` (`fj_run_id` in `_fj-lib.sh`).
+
+**There is no rerun in the REST API.** `/actions/runs/{run_id}/cancel` exists; rerun does not. The web UI's per-job rerun button posts to `/<owner>/<repo>/actions/runs/<index>/jobs/<job-index>/rerun`, which is **session-cookie only** — `Authorization: token`, `Bearer`, `?token=`, `?access_token=` and anonymous all return a bare `404 Not found.`, and Cloudflare adds a `cf_clearance` requirement on top. So re-triggering CI from a script still means pushing a new SHA; since PRs here squash-merge, an empty commit does the job and disappears on merge.
+
+Before spending a full suite re-run on a job that looks stuck, check `fj-run-jobs`: `blocked` means its `needs` haven't finished, and a job showing `task=0` was never dispatched to a runner — which is also why rerunning it fails with `task with job_id … and attempt 0: resource does not exist`. An undispatched job is not necessarily dead, either: jobs orphaned by a runner outage were picked up and completed once the runners returned.
 
 ## Container Building
 
