@@ -197,6 +197,12 @@ defmodule NeonFS.TestSupport.PeerCluster do
   # A new transient reason therefore has to be added in both places — it has
   # been revised twice already, and a revision that lands in only one surfaces
   # as a peer-boot flake in whichever package was not updated.
+  #
+  # The retry *budget* wrapped around the classifier has to stay in step too —
+  # attempts, initial backoff and the cap. Naming only the classifier here is
+  # how the copy came to be taken from an already-widened shape without
+  # carrying the widening, and sat two attempts and a missing cap behind for
+  # six weeks under a comment that read as though it covered everything.
   defp transient_boot_error?({:boot_failed, reason}), do: transient_boot_error?(reason)
   defp transient_boot_error?(:tcp_closed), do: true
   defp transient_boot_error?(:timeout), do: true
