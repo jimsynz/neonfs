@@ -784,16 +784,28 @@ defmodule NeonFS.Core.WriteOperation do
          all_stripes = prefix_stripes ++ new_stripe_refs ++ suffix_stripes,
          :ok <- validate_stripes_tile(all_stripes, new_size) do
       new_stripes = Enum.map(new_stripe_results, & &1.stripe)
+      new_chunks = Enum.flat_map(new_stripe_results, & &1.chunks)
 
-      update_file_and_commit(
-        file_meta.volume_id,
-        file_meta.id,
-        write_ctx.write_id,
-        Enum.flat_map(new_stripe_results, & &1.chunks),
-        [stripes: all_stripes, size: new_size],
-        extra_mutations: StripeIndex.put_mutations(new_stripes),
-        on_commit: fn -> StripeIndex.materialize(new_stripes) end
-      )
+      case update_file_and_commit(
+             file_meta.volume_id,
+             file_meta.id,
+             write_ctx.write_id,
+             new_chunks,
+             [stripes: all_stripes, size: new_size],
+             extra_mutations: StripeIndex.put_mutations(new_stripes),
+             on_commit: fn -> StripeIndex.materialize(new_stripes) end
+           ) do
+        {:ok, _updated_meta} = ok ->
+          # The same accounting the replicated offset write does: only the
+          # grown bytes are new logical data. `new_chunks` carries each
+          # stripe's parity shards alongside its data, so `physical_size`
+          # picks up the erasure overhead without special-casing it.
+          safe_update_volume_stats(volume.id, new_size - file_meta.size, new_chunks)
+          ok
+
+        error ->
+          error
+      end
     else
       {:error, _reason} = error ->
         abort_chunks(write_ctx.write_id)
