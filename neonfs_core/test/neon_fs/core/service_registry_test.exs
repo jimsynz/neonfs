@@ -11,8 +11,14 @@ defmodule NeonFS.Core.ServiceRegistryTest do
 
   @moduletag :tmp_dir
 
-  @peer_boot_attempts 5
-  @peer_boot_backoff_ms 500
+  # Kept in step with `NeonFS.TestSupport.PeerCluster`, which shares this
+  # file's retry classifier. The budget is about how loaded the host is, not
+  # how much work a boot does: this module runs under `mix test --partitions 2`
+  # on a runner shared with an integration shard, which is the sustained load
+  # the widening was written for. The cap only ever lands on the failure path.
+  @peer_boot_attempts 8
+  @peer_boot_backoff_ms 250
+  @peer_boot_max_backoff_ms 5_000
 
   # How long the self-registration chain may stay silent before it counts as
   # stuck rather than slow. Added to whatever delay the chain last announced,
@@ -619,8 +625,18 @@ defmodule NeonFS.Core.ServiceRegistryTest do
         "retrying (#{attempts_left - 1} attempt(s) left)"
     )
 
-    Process.sleep(@peer_boot_backoff_ms * Integer.pow(2, @peer_boot_attempts - attempts_left))
+    Process.sleep(boot_backoff_ms(attempts_left))
     start_peer_with_retry(peer_opts, attempts_left - 1)
+  end
+
+  # Widen the wait as attempts are consumed so a runner under sustained load
+  # near the end of a long run gets progressively more breathing room before
+  # the suite gives up, capped so a stuck boot doesn't stall setup for long.
+  # Without the cap, the eighth attempt would sleep `250 × 2⁶` = 16 s on its
+  # own.
+  defp boot_backoff_ms(attempts_left) do
+    retries_used = @peer_boot_attempts - attempts_left
+    min(@peer_boot_backoff_ms * Integer.pow(2, retries_used), @peer_boot_max_backoff_ms)
   end
 
   # The original of this classifier is in `NeonFS.TestSupport.PeerCluster`.
@@ -630,6 +646,10 @@ defmodule NeonFS.Core.ServiceRegistryTest do
   # added in both places — it has been revised twice already, and a revision
   # that lands in only one surfaces as a peer-boot flake in whichever package
   # was not updated.
+  #
+  # The retry *budget* above has to stay in step too — attempts, initial
+  # backoff and the cap. Naming only the classifier is how this copy came to
+  # be taken from an already-widened shape without carrying the widening.
   defp transient_boot_error?({:boot_failed, reason}), do: transient_boot_error?(reason)
   defp transient_boot_error?(:timeout), do: true
   defp transient_boot_error?(:tcp_closed), do: true
