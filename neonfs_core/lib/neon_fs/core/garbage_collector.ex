@@ -17,7 +17,8 @@ defmodule NeonFS.Core.GarbageCollector do
     FileIndex,
     MetadataStateMachine,
     RaSupervisor,
-    StripeIndex
+    StripeIndex,
+    VolumeRegistry
   }
 
   alias NeonFS.Core.Volume.{MetadataReader, MetadataValue}
@@ -360,11 +361,48 @@ defmodule NeonFS.Core.GarbageCollector do
     case delete_chunk_from_storage(chunk_meta) do
       :ok ->
         ChunkIndex.delete(chunk_meta.hash)
+        release_chunk_usage(chunk_meta)
         :ok
 
       :error ->
         :error
     end
+  end
+
+  # Give the volume back the bytes and the chunk this reclamation freed.
+  # Without this the counters only ever climb: a rewrite charges its new
+  # chunks and nothing ever credits the superseded ones back.
+  #
+  # Decrement one `stored_size`, not the `bytes_freed` this chunk's
+  # deletions reported. `BlobStore.delete_chunk/3` returns the bytes freed
+  # from *one location* and the sweep above deletes from every replica,
+  # while the write side charges a single `stored_size` per chunk
+  # regardless of replication — summing per-replica frees would
+  # over-decrement by the replication factor.
+  #
+  # Only chunks flagged `new` were ever charged, so a deduplicated chunk
+  # must not be credited back while another file still references it. The
+  # mark phase is what guarantees that; this runs only on chunks it swept.
+  #
+  # Best-effort: the blob is already gone, so a `VolumeRegistry` timeout
+  # (which exits) must not fail the sweep. The reconcile corrects whatever
+  # a missed decrement leaves behind.
+  defp release_chunk_usage(chunk_meta) do
+    case ChunkMeta.any_volume_id(chunk_meta) do
+      nil ->
+        :ok
+
+      volume_id ->
+        _ =
+          VolumeRegistry.adjust_stats(volume_id,
+            physical_size: -chunk_meta.stored_size,
+            chunk_count: -1
+          )
+
+        :ok
+    end
+  catch
+    :exit, _ -> :ok
   end
 
   defp delete_chunk_from_storage(%{locations: locations, hash: hash} = chunk_meta)

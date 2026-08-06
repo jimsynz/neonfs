@@ -58,6 +58,50 @@ defmodule NeonFS.Core.GarbageCollectorTest do
       end)
     end
 
+    test "credits reclaimed bytes and chunks back to the volume", %{volume: vol} do
+      {:ok, baseline} = VolumeRegistry.get(vol.id)
+
+      {:ok, file} =
+        WriteOperation.write_file_streamed(vol.id, "/accounted.txt", ["some bytes to reclaim"])
+
+      {:ok, written} = VolumeRegistry.get(vol.id)
+      assert written.physical_size > baseline.physical_size
+      assert written.chunk_count > baseline.chunk_count
+
+      FileIndex.delete(file.id)
+      assert {:ok, result} = GarbageCollector.collect()
+      assert result.chunks_deleted > 0
+
+      # Before this credit existed both counters only ever climbed: the
+      # write charged its chunks and the sweep that reclaimed them said
+      # nothing.
+      {:ok, collected} = VolumeRegistry.get(vol.id)
+      assert collected.physical_size == baseline.physical_size
+      assert collected.chunk_count == baseline.chunk_count
+    end
+
+    test "credits one stored_size per chunk, not one per replica", %{volume: vol} do
+      {:ok, baseline} = VolumeRegistry.get(vol.id)
+
+      {:ok, file} =
+        WriteOperation.write_file_streamed(vol.id, "/replicated.txt", ["bytes on every replica"])
+
+      {:ok, written} = VolumeRegistry.get(vol.id)
+      charged = written.physical_size - baseline.physical_size
+      assert charged > 0
+
+      FileIndex.delete(file.id)
+      assert {:ok, _} = GarbageCollector.collect()
+
+      # `BlobStore.delete_chunk/3` reports bytes freed per *location* and the
+      # sweep deletes every replica, while the write charges one
+      # `stored_size` per chunk. Crediting the summed per-replica figure
+      # would overshoot by the replication factor and clamp at zero, hiding
+      # itself on a single-replica volume — so assert the exact return.
+      {:ok, collected} = VolumeRegistry.get(vol.id)
+      assert collected.physical_size == baseline.physical_size
+    end
+
     test "removes blob files from disk when deleting unreferenced chunks", %{volume: vol} do
       {:ok, file} =
         WriteOperation.write_file_streamed(vol.id, "/blob-check.txt", ["blob data here"])

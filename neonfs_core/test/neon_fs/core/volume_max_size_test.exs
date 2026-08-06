@@ -167,5 +167,29 @@ defmodule NeonFS.Core.VolumeMaxSizeTest do
       assert {:ok, _} = VolumeRegistry.reconcile_stats(volume.id)
       assert logical_size(volume.id) == 100
     end
+
+    test "recomputes physical_size and chunk_count from the chunk index" do
+      volume = create_volume(max_size: nil)
+
+      assert {:ok, _} =
+               WriteOperation.write_file_streamed(volume.id, "/p.bin", [
+                 String.duplicate("y", 100)
+               ])
+
+      {:ok, written} = VolumeRegistry.get(volume.id)
+      assert written.physical_size > 0
+      assert written.chunk_count > 0
+
+      # These two drift by design, not only by crash: every rewrite charges
+      # its new chunks while the superseded ones are reclaimed later by GC.
+      # Until this reconcile covered them, nothing ever brought them back.
+      {:ok, _} = VolumeRegistry.adjust_stats(volume.id, physical_size: 9_000, chunk_count: 40)
+
+      assert {:ok, _} = VolumeRegistry.reconcile_stats(volume.id)
+
+      {:ok, reconciled} = VolumeRegistry.get(volume.id)
+      assert reconciled.physical_size == written.physical_size
+      assert reconciled.chunk_count == written.chunk_count
+    end
   end
 end
