@@ -20,7 +20,7 @@ You are an autonomous coding agent working on NeonFS. Each iteration picks one i
 
 First filter out everything you can't work on:
 
-- Labelled `blocked`, `wontfix`, `duplicate`, or `invalid`.
+- Labelled `blocked`, `maintainer-only`, `wontfix`, `duplicate`, or `invalid`.
 - Marked as blocked or deferred in the issue body.
 - Waiting on an upstream issue that is still open (look for `Depends on #N` in the body).
 - Already assigned to someone else.
@@ -58,6 +58,8 @@ Instead:
 
 - Open a new issue capturing the design question, with the `maintainer-only` label so the loop skips it on future iterations. Link it from the original issue.
 - Move on to a different issue this iteration.
+
+**Never re-apply `maintainer-only` to an issue that already had it.** The label is applied once, by whoever first identifies the design call. If an issue reads as a design call but the label is absent, check the comment thread before concluding anything: a maintainer decision arrives as a comment, while the body keeps describing the open question forever. A decision comment supersedes the body — implement to it. If the label was removed and you cannot find a decision, ask rather than re-labelling.
 
 Concrete signals an issue needs a design call rather than implementation:
 
