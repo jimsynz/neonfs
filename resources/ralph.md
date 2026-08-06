@@ -15,6 +15,7 @@ You are an autonomous coding agent working on NeonFS. Each iteration picks one i
 9. If you discovered a reusable pattern, update the Codebase Patterns wiki page (see below).
 10. Commit, push, and open a pull request that closes the issue.
 11. **Drive the PR to merge in this iteration** — wait for CI, fix failures inline, squash-merge when green. Don't move on to the next iteration with a non-merged PR. See "Driving the PR to Merge" below.
+12. Once merged, clear the `blocked` label from any issue your work unblocked. See "Clearing `blocked` Labels" below.
 
 ## Issue Selection
 
@@ -195,6 +196,29 @@ EOF
 ```
 
 For other label IDs: `fj-token` then `curl -H "Authorization: token $(fj-token)" https://harton.dev/api/v1/repos/project-neon/neonfs/labels | jq -r '.[] | "\(.id) \(.name)"'`.
+
+## Clearing `blocked` Labels
+
+`blocked` has an application step and needs a clearing step, or it becomes permanent — a downstream issue stays filtered out of issue selection long after the thing blocking it landed. Clearing it is part of finishing the work that unblocked it, not a separate chore.
+
+Once your PR merges, check whether the issue it closed was blocking anything:
+
+```bash
+fj issue search --state open --labels blocked
+```
+
+For each result, read its body and comment thread for a `Depends on #N`, `blocked on #N`, or "Part of #N" reference to the issue you just closed. Where the issue you closed was the **only** remaining blocker, clear the label:
+
+```bash
+fj issue edit <N> labels -r blocked
+```
+
+Rules:
+
+- Leave the label if other blockers are still open — and comment naming which, so the next reader doesn't re-derive it.
+- If you can't tell whether a dependency is satisfied, leave the label and ask. A wrongly-cleared `blocked` sends the next iteration at work that can't be finished.
+- An issue whose body says "Done when ... #N is unblocked" is telling you to clear that label as part of the issue's acceptance criteria. It is an instruction, not a status note.
+- Don't close a downstream issue just because you unblocked it. Clearing the label makes it pickable; that's all.
 
 ## Quality Requirements
 
