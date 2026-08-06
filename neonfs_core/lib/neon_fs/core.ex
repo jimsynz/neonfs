@@ -18,6 +18,7 @@ defmodule NeonFS.Core do
   alias NeonFS.Core.NamespaceCoordinator
   alias NeonFS.Core.RaSupervisor
   alias NeonFS.Core.ReadOperation
+  alias NeonFS.Core.StripeIndex
   alias NeonFS.Core.SyncOperation
   alias NeonFS.Core.VolumeRegistry
   alias NeonFS.Core.WriteOperation
@@ -593,11 +594,11 @@ defmodule NeonFS.Core do
   # must match. Best-effort — the file is already gone, so a counter
   # glitch (including a VolumeRegistry call timeout, which exits) must
   # not fail the delete.
-  defp release_file_usage(%FileMeta{volume_id: volume_id, size: size, chunks: chunks}) do
+  defp release_file_usage(%FileMeta{volume_id: volume_id, size: size} = file) do
     _ =
       VolumeRegistry.adjust_stats(volume_id,
         logical_size: -size,
-        chunk_count: -length(chunks),
+        chunk_count: -referenced_chunk_count(file),
         file_count: -1
       )
 
@@ -605,6 +606,28 @@ defmodule NeonFS.Core do
   catch
     :exit, _ -> :ok
   end
+
+  # Where a file's chunks are recorded depends on its durability. A
+  # replicated file lists them in `chunks`; an erasure-coded one leaves
+  # that empty and reaches them through `stripes` → `StripeIndex`, which is
+  # the same walk `GarbageCollector` does to decide what a file still
+  # references. Counting `chunks` alone charged an erasure write for its
+  # data *and* parity and then freed none of it on delete.
+  defp referenced_chunk_count(%FileMeta{chunks: chunks} = file) do
+    length(chunks) + stripe_chunk_count(file)
+  end
+
+  defp stripe_chunk_count(%FileMeta{stripes: stripes, volume_id: volume_id})
+       when is_list(stripes) do
+    Enum.reduce(stripes, 0, fn %{stripe_id: stripe_id}, acc ->
+      case StripeIndex.get(volume_id, stripe_id) do
+        {:ok, stripe} -> acc + length(stripe.chunks)
+        {:error, :not_found} -> acc
+      end
+    end)
+  end
+
+  defp stripe_chunk_count(_file), do: 0
 
   defp apply_delete(file, []) do
     FileIndex.delete(file.id)

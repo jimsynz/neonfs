@@ -365,6 +365,53 @@ defmodule NeonFS.CoreTest do
       assert {:error, %FileNotFound{}} = Core.get_file_meta(vol_name, "/to-delete.txt")
     end
 
+    test "frees a replicated file's chunks from the volume counter",
+         %{volume: volume, volume_name: vol_name} do
+      {:ok, before} = VolumeRegistry.get(volume.id)
+
+      {:ok, _} = Core.write_file_streamed(vol_name, "/counted.bin", ["some bytes"])
+      {:ok, written} = VolumeRegistry.get(volume.id)
+      assert written.chunk_count > before.chunk_count
+
+      assert :ok = Core.delete_file(vol_name, "/counted.bin")
+
+      {:ok, deleted} = VolumeRegistry.get(volume.id)
+      assert deleted.chunk_count == before.chunk_count
+      assert deleted.logical_size == before.logical_size
+    end
+
+    # An erasure file's chunks hang off its stripes, not its (empty)
+    # `chunks` list, so the delete used to free nothing and the volume
+    # went on reporting the file's data and parity forever.
+    test "frees an erasure-coded file's chunks from the volume counter" do
+      vol_name = "ec-delete-#{:rand.uniform(999_999)}"
+
+      {:ok, volume} =
+        VolumeRegistry.create(vol_name,
+          durability: %{type: :erasure, data_chunks: 2, parity_chunks: 1},
+          compression: %{algorithm: :none}
+        )
+
+      {:ok, before} = VolumeRegistry.get(volume.id)
+
+      {:ok, meta} =
+        Core.write_file_at(vol_name, "/counted_ec.bin", 0, :crypto.strong_rand_bytes(2048),
+          chunk_strategy: {:fixed, 1024}
+        )
+
+      assert meta.chunks == []
+      refute meta.stripes == []
+
+      {:ok, written} = VolumeRegistry.get(volume.id)
+      assert written.chunk_count > before.chunk_count
+
+      assert :ok = Core.delete_file(vol_name, "/counted_ec.bin")
+
+      {:ok, deleted} = VolumeRegistry.get(volume.id)
+      assert deleted.chunk_count == before.chunk_count
+      assert deleted.logical_size == before.logical_size
+    end
+
     test "returns error for nonexistent file", %{volume_name: vol_name} do
       assert {:error, %FileNotFound{}} = Core.delete_file(vol_name, "/missing.txt")
     end
