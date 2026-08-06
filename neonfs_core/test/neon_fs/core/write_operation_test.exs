@@ -900,6 +900,57 @@ defmodule NeonFS.Core.WriteOperationTest do
       assert read_data == "head" <> :binary.copy(<<0>>, 6) <> "tail"
     end
 
+    test "successive appends fill the trailing partial stripe instead of adding one each",
+         %{ec_volume: volume} do
+      {:ok, _} =
+        WriteOperation.write_file_at(volume.id, "/ec_coalesce.bin", 0, "aaa",
+          chunk_strategy: :single
+        )
+
+      for part <- ["bbb", "ccc", "ddd"] do
+        {:ok, meta} = FileIndex.get_by_path(volume.id, "/ec_coalesce.bin")
+
+        assert {:ok, _} =
+                 WriteOperation.write_file_at(volume.id, "/ec_coalesce.bin", meta.size, part,
+                   chunk_strategy: :single
+                 )
+      end
+
+      assert {:ok, meta} = FileIndex.get_by_path(volume.id, "/ec_coalesce.bin")
+
+      # Four appends, one stripe — the trailing partial stripe was reopened
+      # each time rather than a fresh stripe (and a fresh parity shard)
+      # being started per write call.
+      assert length(meta.stripes) == 1
+      assert_stripes_tile(meta)
+      assert {:ok, "aaabbbcccddd"} = ReadOperation.read_file(volume.id, "/ec_coalesce.bin")
+    end
+
+    test "an append after a full stripe starts a new one", %{ec_volume: volume} do
+      # 2048 bytes at 1024/chunk fills both data chunks — a complete stripe,
+      # which has no room to reopen.
+      {:ok, _} =
+        WriteOperation.write_file_at(
+          volume.id,
+          "/ec_full.bin",
+          0,
+          :crypto.strong_rand_bytes(2048),
+          chunk_strategy: {:fixed, 1024}
+        )
+
+      {:ok, before} = FileIndex.get_by_path(volume.id, "/ec_full.bin")
+      assert length(before.stripes) == 1
+
+      assert {:ok, meta} =
+               WriteOperation.write_file_at(volume.id, "/ec_full.bin", 2048, "tail",
+                 chunk_strategy: :single
+               )
+
+      assert length(meta.stripes) == 2
+      assert meta.size == 2052
+      assert_stripes_tile(meta)
+    end
+
     test "successive appends each land at the end", %{ec_volume: volume} do
       {:ok, _} =
         WriteOperation.write_file_at(volume.id, "/ec_seq.bin", 0, "aaa", chunk_strategy: :single)

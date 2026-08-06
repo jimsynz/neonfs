@@ -771,8 +771,11 @@ defmodule NeonFS.Core.WriteOperation do
 
     stripe_refs = file_meta.stripes || []
 
-    {prefix_stripes, affected_stripes, suffix_stripes} =
+    {partitioned_prefix, partitioned_affected, suffix_stripes} =
       partition_stripes(stripe_refs, offset, write_end)
+
+    {prefix_stripes, affected_stripes} =
+      absorb_trailing_partial(partitioned_prefix, partitioned_affected, volume)
 
     region_start = region_start(prefix_stripes, affected_stripes)
     new_size = max(file_meta.size, write_end)
@@ -810,6 +813,41 @@ defmodule NeonFS.Core.WriteOperation do
       {:error, _reason} = error ->
         abort_chunks(write_ctx.write_id)
         error
+    end
+  end
+
+  # An append starts at or past every existing stripe's end, so
+  # `partition_stripes/3` finds none affected and the write opens a fresh
+  # stripe. Left at that, each write call costs a stripe of its own —
+  # parity shards, zero-fill chunks and a stripe record for however few
+  # bytes it carried — and FUSE and NFS append in page-sized pieces, so a
+  # file ends up with one partial stripe per write rather than per stripe's
+  # worth of data.
+  #
+  # Pulling a trailing *partial* stripe into the region instead lets the
+  # append fill it before a new one is started. Only a partial stripe is
+  # worth reopening: a full one has no room, so rewriting it would re-encode
+  # its parity for nothing. The region stays bounded by the stripe it
+  # reopens, never by the file.
+  defp absorb_trailing_partial([], [], _volume), do: {[], []}
+
+  defp absorb_trailing_partial(prefix_stripes, [], volume) do
+    last = List.last(prefix_stripes)
+
+    if partial_stripe?(last, volume) do
+      {Enum.drop(prefix_stripes, -1), [last]}
+    else
+      {prefix_stripes, []}
+    end
+  end
+
+  defp absorb_trailing_partial(prefix_stripes, affected_stripes, _volume),
+    do: {prefix_stripes, affected_stripes}
+
+  defp partial_stripe?(%{stripe_id: stripe_id}, volume) do
+    case StripeIndex.get(volume.id, stripe_id) do
+      {:ok, stripe} -> stripe.partial
+      {:error, _} -> false
     end
   end
 
