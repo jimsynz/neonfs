@@ -618,6 +618,23 @@ defmodule NeonFS.Core.FileIndexTest do
     test "is a no-op for a non-existent file_id" do
       assert :ok = FileIndex.decrement_pin("nonexistent-id", "c1")
     end
+
+    test "successive decrements empty the list even when the cached row is stale" do
+      {:ok, created} = FileIndex.create(FileMeta.new("vol1", "/racing-pins.txt"))
+      {:ok, detached} = FileIndex.mark_detached(created.id, ["c1", "c2"])
+
+      assert :ok = FileIndex.decrement_pin(created.id, "c1")
+
+      # Stand in for whatever republishes the local materialisation behind
+      # a decrement's back — another node's read, a scan, a replay. Planning
+      # the second decrement off this row instead of the committed record
+      # restores "c1", so the list never empties and the tombstone is never
+      # purged. That is the unlink-while-open leak this guards.
+      :ets.insert(:file_index_by_id, {created.id, detached})
+
+      assert :ok = FileIndex.decrement_pin(created.id, "c2")
+      assert {:error, :not_found} = FileIndex.get(created.volume_id, created.id)
+    end
   end
 
   describe "purge_detached/1" do

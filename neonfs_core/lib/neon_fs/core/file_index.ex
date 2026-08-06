@@ -1143,7 +1143,7 @@ defmodule NeonFS.Core.FileIndex do
   ## Private — Decrement pin (POSIX unlink-while-open)
 
   defp plan_decrement_pin(file_id, claim_id, overlay) do
-    case fetch_file(file_id, overlay) do
+    case fetch_file_for_pin_change(file_id, overlay) do
       {:ok, %FileMeta{detached: true, pinned_claim_ids: ids} = file} ->
         plan_decrement(file, claim_id, ids)
 
@@ -1154,6 +1154,31 @@ defmodule NeonFS.Core.FileIndex do
 
       {:error, :not_found} ->
         {:now, :ok}
+    end
+  end
+
+  # A decrement is a read-modify-write of `pinned_claim_ids` that
+  # republishes the whole record, so it has to read the record as it
+  # stands rather than as a cache remembers it. `fetch_file/2` falls back
+  # to the `:file_index_by_id` ETS row, which is a materialisation — and
+  # when a holder drops several pins at once the GC decrements them in
+  # consecutive calls, so a second decrement served a pre-decrement copy
+  # writes back the claim the first one removed. The list then never
+  # empties, `plan_purge_record/2` is never reached, and nothing retries:
+  # the tombstone and its chunks are stranded for the life of the volume.
+  # `plan_rename/5` reads authoritatively for the same reason.
+  defp fetch_file_for_pin_change(file_id, overlay) do
+    case Map.get(overlay, file_id) do
+      :deleted ->
+        {:error, :not_found}
+
+      %FileMeta{} = file ->
+        {:ok, file}
+
+      nil ->
+        with {:ok, %FileMeta{volume_id: volume_id}} <- fetch_file_from_ets(file_id) do
+          get_from_metadata_reader(volume_id, file_id)
+        end
     end
   end
 
