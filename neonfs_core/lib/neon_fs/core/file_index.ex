@@ -253,14 +253,18 @@ defmodule NeonFS.Core.FileIndex do
   batched root flip — the `update/2` counterpart of
   `create_committing_chunks/3`, used by the append / partial-write commit
   path.
+
+  Accepts the same `:extra_mutations` / `:on_commit` opts as
+  `create_committing_chunks/4`, which the erasure offset write uses to
+  persist the stripes it rebuilt alongside the file-meta update.
   """
-  @spec update_committing_chunks(file_id(), keyword(), binary(), [binary()]) ::
+  @spec update_committing_chunks(file_id(), keyword(), binary(), [binary()], keyword()) ::
           {:ok, FileMeta.t()} | {:error, term()}
-  def update_committing_chunks(file_id, updates, write_id, chunk_hashes)
-      when is_binary(write_id) and is_list(chunk_hashes) do
+  def update_committing_chunks(file_id, updates, write_id, chunk_hashes, opts)
+      when is_binary(write_id) and is_list(chunk_hashes) and is_list(opts) do
     GenServer.call(
       __MODULE__,
-      {:update_committing_chunks, file_id, updates, write_id, chunk_hashes},
+      {:update_committing_chunks, file_id, updates, write_id, chunk_hashes, opts},
       mutation_call_timeout()
     )
   end
@@ -715,12 +719,16 @@ defmodule NeonFS.Core.FileIndex do
 
   @impl true
   def handle_call(
-        {:update_committing_chunks, file_id, updates, write_id, chunk_hashes},
+        {:update_committing_chunks, file_id, updates, write_id, chunk_hashes, opts},
         from,
         state
       ) do
-    plan = plan_update(file_id, updates, state.pending_files)
-    stage_or_reply(with_chunk_commit(plan, write_id, chunk_hashes), from, state)
+    plan =
+      plan_update(file_id, updates, state.pending_files)
+      |> with_chunk_commit(write_id, chunk_hashes)
+      |> with_extra_mutations(opts)
+
+    stage_or_reply(plan, from, state)
   end
 
   @impl true
