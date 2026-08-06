@@ -950,6 +950,44 @@ defmodule NeonFS.Core.WriteOperationTest do
       assert_stripes_tile(meta)
       assert {:ok, "012XY56789"} = ReadOperation.read_file(volume.id, "/ec_inplace.bin")
     end
+
+    test "an append accounts its grown bytes and its chunks against the volume",
+         %{ec_volume: volume} do
+      {:ok, _} =
+        WriteOperation.write_file_at(volume.id, "/ec_append_stats.bin", 0, "head-bytes",
+          chunk_strategy: :single
+        )
+
+      {:ok, before} = VolumeRegistry.get(volume.id)
+
+      assert {:ok, _} =
+               WriteOperation.write_file_at(volume.id, "/ec_append_stats.bin", 10, "tail")
+
+      {:ok, updated} = VolumeRegistry.get(volume.id)
+
+      assert updated.logical_size == before.logical_size + 4
+      assert updated.chunk_count > before.chunk_count
+      # The appended stripe's parity shards land on the drives too.
+      assert updated.physical_size > before.physical_size
+    end
+
+    test "an in-place write adds no logical bytes but still counts its chunks",
+         %{ec_volume: volume} do
+      {:ok, _} =
+        WriteOperation.write_file_at(volume.id, "/ec_inplace_stats.bin", 0, "0123456789",
+          chunk_strategy: :single
+        )
+
+      {:ok, before} = VolumeRegistry.get(volume.id)
+
+      assert {:ok, _} =
+               WriteOperation.write_file_at(volume.id, "/ec_inplace_stats.bin", 3, "XY")
+
+      {:ok, updated} = VolumeRegistry.get(volume.id)
+
+      assert updated.logical_size == before.logical_size
+      assert updated.chunk_count > before.chunk_count
+    end
   end
 
   describe "encrypted write path" do
