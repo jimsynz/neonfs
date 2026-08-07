@@ -52,6 +52,27 @@ classify() {
     # neonfs_fuse's alerts_yml_test asserts on deploy/prometheus/alerts.yml.
     deploy/prometheus/*) mark neonfs_fuse ;;
 
+    # The two scripts CI actually runs. `ci-affected` decides the whole
+    # matrix, so a change to it has to exercise everything — including
+    # itself. `ci-scrub-path-deps` runs inside three jobs.
+    #
+    # Listed before the inert rule below, and named individually rather than
+    # by glob: "the rest of resources/scripts/ is inert" is the tempting
+    # shape and the wrong one, because it would silently stop testing these
+    # two.
+    resources/scripts/ci-affected | resources/scripts/ci-scrub-path-deps)
+      run_all=true
+      ;;
+
+    # Everything else in there is developer tooling — the `fj-*` forge
+    # helpers, `neonfs-each`, `neonfs-release`, the container build script.
+    # None is referenced by .forgejo/workflows/ci.yml, so none can change a
+    # build result. They fell through to the catch-all, which sets
+    # `run_vfs`, so editing a forge helper cost an hour on the Samba build
+    # (#1565) with `canary` blocked behind it — the same trade already
+    # rejected for `neonfs_client/*` below.
+    resources/scripts/*) ;;
+
     # packaging/build-vfs-deb.sh drives the vfs_neonfs job; the rest of
     # packaging/ (nfpm configs, systemd units) isn't exercised by CI.
     packaging/*) mark vfs ;;
