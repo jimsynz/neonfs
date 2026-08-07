@@ -23,6 +23,15 @@ set -euo pipefail
 : "${FJ_RETRIES:=3}"
 : "${FJ_RETRY_DELAY:=5}"
 
+# Budget for endpoints that make the server *do* something — merge a branch,
+# create a PR or issue — rather than read a record back. One budget for every
+# endpoint means the cheap calls set it and the expensive one is the first to
+# fail: with the instance answering a plain GET in ~35s, every merge blew past
+# the 45s read budget, curl aborted, and the wrapper reported HTTP 000 — which
+# is indistinguishable from the server refusing. Three merges "failed" that
+# way before the fourth, with this budget, went through.
+: "${FJ_WRITE_MAX_TIME:=300}"
+
 FJ_API="https://$FJ_HOST/api/v1/repos/$FJ_REPO"
 
 if [ -z "${FJ_TOKEN:-}" ]; then
@@ -135,6 +144,47 @@ fj_json() {
     attempt=$((attempt + 1))
     sleep "$FJ_RETRY_DELAY"
   done
+}
+
+# fj_create <path> <payload> <verify-cmd...> — POST once, then verify.
+# Prints the created resource's `.number`.
+#
+# A create is not idempotent, so `fj_curl`'s retry is unsafe here: a POST
+# whose *response* was lost has still been applied, and re-sending it creates
+# a second resource. That is not hypothetical — one `fj-issue-create`
+# invocation produced three identical issues when the instance answered
+# HTTP 000 while applying every attempt.
+#
+# So: send once, and if the answer is lost, ask the server what happened
+# rather than asking it to do the thing again. `verify-cmd` is run in that
+# case and must print the number of the resource if it exists, or nothing.
+#
+# `fj-pr-create` survived this only by accident — Forgejo rejects a second PR
+# for the same head/base with a 4xx, which is not retried. Issues have no
+# such uniqueness constraint, so nothing caught the duplicates.
+fj_create() {
+  local path="$1" payload="$2"
+  shift 2
+
+  local out
+  if out=$(FJ_RETRIES=1 FJ_MAX_TIME="$FJ_WRITE_MAX_TIME" \
+             fj_curl POST "$path" --data-binary "$payload"); then
+    printf '%s' "$out" | jq -r '.number'
+    return 0
+  fi
+
+  echo "fj: create failed or its response was lost — verifying" >&2
+
+  local existing
+  existing=$("$@" 2>/dev/null) || existing=""
+
+  if [ -n "$existing" ] && [ "$existing" != "null" ]; then
+    echo "fj: the create had in fact been applied" >&2
+    printf '%s' "$existing"
+    return 0
+  fi
+
+  return 1
 }
 
 # fj_pr_head_sha <pr-number> — print head SHA for a PR.
