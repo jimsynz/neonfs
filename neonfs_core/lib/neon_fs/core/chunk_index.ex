@@ -160,6 +160,41 @@ defmodule NeonFS.Core.ChunkIndex do
   end
 
   @doc """
+  Sums a volume's stored bytes and counts its chunks from the
+  **authoritative** metadata tree.
+
+  The `physical_size` / `chunk_count` counterpart to
+  `NeonFS.Core.FileIndex.volume_usage/1`, and it backs the same
+  volume-stats reconcile. The incremental counters drift because a rewrite
+  charges the new chunks while the superseded ones are only reclaimed later
+  by GC, so the scrub recomputes the exact figures.
+
+  Counts every chunk in the volume's namespace, including uncommitted ones:
+  the write charges a chunk when it is stored rather than when it commits,
+  so excluding them here would make the reconcile disagree with the
+  incremental counter for the duration of every in-flight write.
+
+  `stored_size` is the on-disk size of one replica. That matches what the
+  write side charges — `update_volume_stats_with_size/4` sums `stored_size`
+  once per new chunk, not once per replica — so neither side is
+  replica-multiplied.
+  """
+  @spec volume_usage(binary()) ::
+          {:ok, %{physical_size: non_neg_integer(), chunk_count: non_neg_integer()}}
+          | {:error, term()}
+  def volume_usage(volume_id) when is_binary(volume_id) do
+    case list_volume_chunks(volume_id) do
+      {:ok, chunks} ->
+        physical = Enum.reduce(chunks, 0, fn chunk, acc -> acc + chunk.stored_size end)
+
+        {:ok, %{physical_size: physical, chunk_count: length(chunks)}}
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
+  @doc """
   Returns all chunks associated with a volume.
 
   Resolves chunks through FileIndex: gets all files for the volume, collects

@@ -10,6 +10,7 @@ defmodule NeonFS.Core.VolumeRegistry do
   require Logger
 
   alias NeonFS.Cluster.State, as: ClusterState
+  alias NeonFS.Core.ChunkIndex
   alias NeonFS.Core.DriveRegistry
   alias NeonFS.Core.FileIndex
   alias NeonFS.Core.MetadataStateMachine
@@ -598,8 +599,18 @@ defmodule NeonFS.Core.VolumeRegistry do
 
   defp do_reconcile_stats(id) do
     with {:ok, _volume} <- get(id),
-         {:ok, %{logical_size: logical, file_count: files}} <- FileIndex.volume_usage(id) do
-      absolutes = %{logical_size: logical, file_count: files}
+         {:ok, %{logical_size: logical, file_count: files}} <- FileIndex.volume_usage(id),
+         {:ok, %{physical_size: physical, chunk_count: chunks}} <- ChunkIndex.volume_usage(id) do
+      # `physical_size` and `chunk_count` need the recompute more than
+      # `logical_size` does, not less: every rewrite charges its new chunks
+      # while the superseded ones are reclaimed later by GC, so the
+      # incremental counters run ahead between scrubs by design.
+      absolutes = %{
+        logical_size: logical,
+        file_count: files,
+        physical_size: physical,
+        chunk_count: chunks
+      }
 
       case maybe_ra_command({:set_volume_stats, id, absolutes}) do
         {:ok, {:ok, volume_map}} ->
