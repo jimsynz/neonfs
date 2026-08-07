@@ -295,25 +295,76 @@ defmodule NeonFS.Core.GarbageCollector do
   defp sweep_chunks(referenced_set, volume_filter) do
     all_committed = list_committed_chunks(volume_filter)
 
-    Enum.reduce(all_committed, {0, 0}, fn chunk_meta, {deleted, protected} ->
-      cond do
-        MapSet.member?(referenced_set, chunk_meta.hash) ->
-          {deleted, protected}
+    {deleted, protected, freed} =
+      Enum.reduce(all_committed, {0, 0, %{}}, fn chunk_meta, {deleted, protected, freed} ->
+        cond do
+          MapSet.member?(referenced_set, chunk_meta.hash) ->
+            {deleted, protected, freed}
 
-        has_active_writes?(chunk_meta) ->
-          {deleted, protected + 1}
+          has_active_writes?(chunk_meta) ->
+            {deleted, protected + 1, freed}
 
-        true ->
-          sweep_unreferenced_chunk(chunk_meta, deleted, protected)
-      end
-    end)
+          true ->
+            sweep_unreferenced_chunk(chunk_meta, deleted, protected, freed)
+        end
+      end)
+
+    release_freed_usage(freed)
+
+    {deleted, protected}
   end
 
-  defp sweep_unreferenced_chunk(chunk_meta, deleted, protected) do
+  defp sweep_unreferenced_chunk(chunk_meta, deleted, protected, freed) do
     case delete_chunk(chunk_meta) do
-      :ok -> {deleted + 1, protected}
-      :error -> {deleted, protected}
+      :ok -> {deleted + 1, protected, tally_freed(freed, chunk_meta)}
+      :error -> {deleted, protected, freed}
     end
+  end
+
+  # Tally one `stored_size`, not the `bytes_freed` this chunk's deletions
+  # reported. `BlobStore.delete_chunk/3` returns the bytes freed from *one
+  # location* and the sweep deletes from every replica, while the write side
+  # charges a single `stored_size` per chunk regardless of replication —
+  # summing per-replica frees would over-decrement by the replication factor.
+  #
+  # Only chunks flagged `new` were ever charged, so a deduplicated chunk must
+  # not be credited back while another file still references it. The mark
+  # phase is what guarantees that; this runs only on chunks it swept.
+  defp tally_freed(freed, chunk_meta) do
+    case ChunkMeta.any_volume_id(chunk_meta) do
+      nil ->
+        freed
+
+      volume_id ->
+        Map.update(
+          freed,
+          volume_id,
+          {chunk_meta.stored_size, 1},
+          fn {bytes, count} -> {bytes + chunk_meta.stored_size, count + 1} end
+        )
+    end
+  end
+
+  # One `adjust_stats/2` per volume for the whole sweep, not one per chunk.
+  # `adjust_stats/2` is a `GenServer.call` into `VolumeRegistry` that lands a
+  # Ra-backed write, so calling it inside the sweep loop would serialise the
+  # registry behind a sweep for as many round-trips as there are dead chunks —
+  # and every unrelated caller (a volume lookup on the write path, say) queues
+  # behind it. The deltas are additive, so batching them changes nothing but
+  # the number of round-trips.
+  #
+  # Best-effort, as elsewhere: the blobs are already gone, so a registry
+  # timeout (which exits) must not fail the sweep. The reconcile corrects a
+  # missed decrement.
+  defp release_freed_usage(freed) do
+    Enum.each(freed, fn {volume_id, {bytes, count}} ->
+      _ =
+        VolumeRegistry.adjust_stats(volume_id, physical_size: -bytes, chunk_count: -count)
+
+      :ok
+    end)
+  catch
+    :exit, _ -> :ok
   end
 
   defp sweep_stripes(referenced_set, volume_filter) do
@@ -361,48 +412,11 @@ defmodule NeonFS.Core.GarbageCollector do
     case delete_chunk_from_storage(chunk_meta) do
       :ok ->
         ChunkIndex.delete(chunk_meta.hash)
-        release_chunk_usage(chunk_meta)
         :ok
 
       :error ->
         :error
     end
-  end
-
-  # Give the volume back the bytes and the chunk this reclamation freed.
-  # Without this the counters only ever climb: a rewrite charges its new
-  # chunks and nothing ever credits the superseded ones back.
-  #
-  # Decrement one `stored_size`, not the `bytes_freed` this chunk's
-  # deletions reported. `BlobStore.delete_chunk/3` returns the bytes freed
-  # from *one location* and the sweep above deletes from every replica,
-  # while the write side charges a single `stored_size` per chunk
-  # regardless of replication — summing per-replica frees would
-  # over-decrement by the replication factor.
-  #
-  # Only chunks flagged `new` were ever charged, so a deduplicated chunk
-  # must not be credited back while another file still references it. The
-  # mark phase is what guarantees that; this runs only on chunks it swept.
-  #
-  # Best-effort: the blob is already gone, so a `VolumeRegistry` timeout
-  # (which exits) must not fail the sweep. The reconcile corrects whatever
-  # a missed decrement leaves behind.
-  defp release_chunk_usage(chunk_meta) do
-    case ChunkMeta.any_volume_id(chunk_meta) do
-      nil ->
-        :ok
-
-      volume_id ->
-        _ =
-          VolumeRegistry.adjust_stats(volume_id,
-            physical_size: -chunk_meta.stored_size,
-            chunk_count: -1
-          )
-
-        :ok
-    end
-  catch
-    :exit, _ -> :ok
   end
 
   defp delete_chunk_from_storage(%{locations: locations, hash: hash} = chunk_meta)
