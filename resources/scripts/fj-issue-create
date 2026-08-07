@@ -35,5 +35,13 @@ payload=$(jq -nc \
   --argjson labels "$labels" \
   '{title: $title, body: $body, labels: $labels}')
 
-response=$(fj_curl POST "/issues" --data-binary "$payload")
-echo "$response" | jq -r '.number'
+# Verify by title: nothing else identifies an issue we may or may not have
+# just created. Newest match wins, so a re-run after a genuinely lost response
+# finds the copy it made rather than an older issue that happens to share a
+# title.
+find_issue_by_title() {
+  fj_json GET "/issues?state=open&limit=50&type=issues" \
+    | jq -r --arg t "$title" '[.[] | select(.title == $t)] | max_by(.number) | .number // empty'
+}
+
+fj_create "/issues" "$payload" find_issue_by_title

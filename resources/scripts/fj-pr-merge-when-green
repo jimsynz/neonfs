@@ -37,6 +37,14 @@ done
 
 deadline=$(( $(date +%s) + timeout ))
 
+# `mergeable` is recomputed in the background, so it reads false in the window
+# right after a push — which is exactly when this script is invoked, every
+# time CI is re-triggered. Treating that as a conflict sent the caller to
+# rebase and force-push a branch that was already a strict descendant of
+# `main`, cancelling the CI run it was waiting for. Require the flag to stay
+# false across a poll before believing it.
+unmergeable_polls=0
+
 while :; do
   pr=$(fj_json GET "/pulls/$n")
   state=$(echo "$pr" | jq -r '.state')
@@ -61,9 +69,20 @@ while :; do
   fi
 
   if [ "$mergeable" != "true" ]; then
-    echo "PR #$n is not mergeable (conflicts) — rebase needed"
-    exit 2
+    unmergeable_polls=$((unmergeable_polls + 1))
+
+    if [ "$unmergeable_polls" -ge 2 ]; then
+      echo "PR #$n is not mergeable (conflicts) — rebase needed"
+      exit 2
+    fi
+
+    echo "PR #$n reports mergeable=$mergeable — re-checking after ${poll}s" \
+         "in case it is still being recomputed"
+    sleep "$poll"
+    continue
   fi
+
+  unmergeable_polls=0
 
   statuses=$(fj_statuses "$sha")
   total=$(echo "$statuses" | jq 'length')
@@ -89,8 +108,13 @@ while :; do
       # Not via fj_curl's retry: a merge whose response is lost has still
       # merged, and re-sending it would report a spurious failure. One
       # attempt, then confirm against the PR's own state.
+      #
+      # `FJ_WRITE_MAX_TIME`, not the read budget: the server does git work
+      # here, and on a slow instance that outlasts the budget a status read
+      # needs — which surfaces as HTTP 000 and reads as a refusal.
       jq -nc '{Do: "squash"}' \
-        | FJ_RETRIES=1 fj_curl POST "/pulls/$n/merge" --data-binary @- > /dev/null \
+        | FJ_RETRIES=1 FJ_MAX_TIME="$FJ_WRITE_MAX_TIME" \
+            fj_curl POST "/pulls/$n/merge" --data-binary @- > /dev/null \
         || echo "merge request failed or its response was lost — verifying" >&2
 
       if [ "$(fj_json GET "/pulls/$n" | jq -r '.merged')" = "true" ]; then

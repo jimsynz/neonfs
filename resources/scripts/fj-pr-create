@@ -29,5 +29,13 @@ payload=$(jq -nc \
   --arg base  "$base" \
   '{title: $title, body: $body, head: $head, base: $base}')
 
-response=$(fj_curl POST "/pulls" --data-binary "$payload")
-echo "$response" | jq -r '.number'
+# A PR is identified by its head branch, which is exact — unlike an issue's
+# title. Forgejo also rejects a duplicate for the same head/base with a 4xx,
+# so this path was already hard to duplicate; verifying makes that a property
+# of the script rather than of the server's uniqueness check.
+find_pr_by_head() {
+  fj_json GET "/pulls?state=open&limit=50" \
+    | jq -r --arg h "$head" '[.[] | select(.head.ref == $h)] | max_by(.number) | .number // empty'
+}
+
+fj_create "/pulls" "$payload" find_pr_by_head
