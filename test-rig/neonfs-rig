@@ -284,6 +284,18 @@ cmd_bench_matrix() {
   log "matrix complete — per-config results under ${RIG_ROOT}/bench/results/ (config_label in meta.json)"
 }
 
+cmd_docker_storage() {
+  node_running 1 || die "no running cluster — bring one up first with 'NODES=2 ./neonfs-rig up'"
+
+  # KEEP=1 leaves the shared volume behind for poking at, matching ./acceptance.
+  if [ "${KEEP:-0}" = "1" ]; then
+    docker_storage_scenario
+  else
+    trap docker_storage_cleanup EXIT
+    docker_storage_scenario
+  fi
+}
+
 cmd_ssh() {
   local i="${1:-1}"; shift || true
   node_ssh "$i" "$@"
@@ -337,6 +349,7 @@ Commands:
   boot               Boot + provision VMs only (skip cluster init)
   init               Initialise/join the cluster on already-provisioned VMs
   iface-join         Boot an interface-only VM (neonfs-nfs) and join it via invite token
+  docker-storage     Docker image blobs via the containerd content proxy + a shared NeonFS docker volume (needs NODES>=2)
   bench [--rev <sha>]  Run the benchee suite against the running cluster; --rev checks out/builds/boots that revision first (for bisect)
   bench-matrix       Boot/bench/teardown across the standard cluster-config matrix (baseline/durable/spread)
   status             Show VM and cluster status
@@ -367,6 +380,7 @@ main() {
     boot)   cmd_boot "$@" ;;
     init)   cmd_init "$@" ;;
     iface-join) cmd_iface_join "$@" ;;
+    docker-storage) cmd_docker_storage "$@" ;;
     bench)  cmd_bench "$@" ;;
     bench-matrix) cmd_bench_matrix "$@" ;;
     status) cmd_status "$@" ;;

@@ -93,6 +93,7 @@ falling back to TCG otherwise.
 | `status` | Show VM state plus `cluster status` / `volume list` from node 1 |
 | `ssh <n> [cmd...]` | SSH into node `<n>` (default 1) |
 | `cli <n> -- <args>` | Run the `neonfs` CLI on node `<n>` |
+| `docker-storage` | Image blobs via the containerd content proxy + a shared NeonFS docker volume (needs `NODES>=2`, see below) |
 | `bench` | Run the benchee benchmark suite against the running cluster (see below) |
 | `bench-matrix` | Boot/bench/teardown across the standard cluster-config matrix (see below) |
 | `down` | Stop all VMs, keep their disks |
@@ -151,6 +152,38 @@ exceeds the number of core nodes).
 Node names are bare IPs (`neonfs@10.10.10.12`), so no DNS or `/etc/hosts` entries
 are needed — `NeonFS.Epmd` feeds the IP straight to the resolver and learns each
 peer's distribution port through the `--via host:9568` join handshake.
+
+## Docker storage on NeonFS
+
+```bash
+NODES=2 ./neonfs-rig up
+./neonfs-rig docker-storage
+```
+
+Exercises the shape docker-on-NeonFS actually takes: **content-addressed
+image blobs live in NeonFS, unpacked layers and container rootfs stay on
+local disk.**
+
+Two steps:
+
+1. **Image blobs through the containerd content proxy.** Spawns a throwaway
+   containerd on node 1 with `io.containerd.content.v1.content` disabled and
+   a `[proxy_plugins.neonfs]` content proxy pointed at the omnibus daemon's
+   socket, keeping the default overlayfs snapshotter. `ctr image pull` then
+   `ctr run` a real image, and the content-store volume's chunk count must
+   have grown — `ctr content ls` alone would pass against a store that never
+   persisted anything.
+2. **A shared NeonFS docker volume across nodes.** `docker volume create -d
+   neonfs` on node 1, then a write from a container on node 1 must become
+   visible to a container on node 2, and a write back from node 2 visible on
+   node 1. This is the half that needs the second node.
+
+`KEEP=1` leaves the shared volume in place; otherwise it is removed on exit.
+
+**Why not docker's whole `data-root` on a FUSE mount?** It cannot work:
+dockerd's boltdb volume store needs `MAP_SHARED` mmap, and the FUSE mount
+returns `ENODEV` for it because it sets `FOPEN_DIRECT_IO` to keep the
+interfaces coherent with one another.
 
 ## Acceptance suite
 
