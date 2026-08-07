@@ -27,7 +27,8 @@ defmodule NeonFS.Core.ChunkIndex do
   alias NeonFS.Core.{
     ChunkCrypto,
     ChunkMeta,
-    FileIndex
+    FileIndex,
+    VolumeCommitter
   }
 
   alias NeonFS.Core.Volume.{MetadataReader, MetadataValue, MetadataWriter}
@@ -35,6 +36,23 @@ defmodule NeonFS.Core.ChunkIndex do
   @type location :: ChunkMeta.location()
 
   @chunk_key_prefix "chunk:"
+
+  # Headroom over the slowest thing a mutation waits on, matching
+  # `FileIndex`'s margin.
+  @mutation_call_margin_ms 10_000
+
+  @doc """
+  How long a mutating client call waits.
+
+  Derived from `NeonFS.Core.VolumeCommitter.commit_timeout/0` rather than
+  written as a literal, for the reason `NeonFS.Core.FileIndex.mutation_call_timeout/0`
+  documents: a call that gives up before the commit it waits on turns a
+  slow-but-successful write into a reported timeout. These calls used to
+  carry a hard-coded 10 s against a 30 s commit timeout — exactly that
+  inversion.
+  """
+  @spec mutation_call_timeout() :: pos_integer()
+  def mutation_call_timeout, do: VolumeCommitter.commit_timeout() + @mutation_call_margin_ms
 
   # Client API
 
@@ -58,11 +76,30 @@ defmodule NeonFS.Core.ChunkIndex do
   @doc """
   Stores or updates chunk metadata.
 
-  Returns `:ok` on success, or `{:error, reason}` if the operation fails.
+  Runs in the **caller's** process rather than through this module's
+  GenServer. A content write fans its chunks out over concurrent tasks, and
+  routing each one's quorum write through a single process made them queue
+  behind one another for a network round-trip apiece — head-of-line blocking
+  that surfaced as a `GenServer.call` timeout killing the chunk task and
+  failing a large upload with a 500.
+
+  `:put` is the one mutation here that reads nothing: it writes the metadata
+  tree and the ETS materialisation unconditionally. Two concurrent puts of
+  the same hash carry identical content, because the index is
+  content-addressed, so racing them is benign. Every other mutation
+  (`add_write_ref/2`, `commit/1`, `update_locations/2`, …) is a
+  read-modify-write against ETS and stays serialised through the GenServer.
+
+  Returns `:ok` on success, or `{:error, reason}` if the operation fails —
+  `MetadataWriter` reports failure rather than exiting, so callers get an
+  error to handle instead of a dead process.
   """
   @spec put(ChunkMeta.t()) :: :ok | {:error, term()}
   def put(%ChunkMeta{} = chunk_meta) do
-    GenServer.call(__MODULE__, {:put, chunk_meta}, 10_000)
+    with :ok <- write_chunk(chunk_meta) do
+      :ets.insert(:chunk_index, {chunk_meta.hash, chunk_meta})
+      :ok
+    end
   end
 
   @doc """
@@ -103,7 +140,7 @@ defmodule NeonFS.Core.ChunkIndex do
   """
   @spec delete(binary()) :: :ok | {:error, term()}
   def delete(hash) when is_binary(hash) do
-    GenServer.call(__MODULE__, {:delete, hash}, 10_000)
+    GenServer.call(__MODULE__, {:delete, hash}, mutation_call_timeout())
   end
 
   @doc """
@@ -306,7 +343,7 @@ defmodule NeonFS.Core.ChunkIndex do
   """
   @spec add_write_ref(binary(), ChunkMeta.write_id()) :: :ok | {:error, term()}
   def add_write_ref(hash, write_id) do
-    GenServer.call(__MODULE__, {:add_write_ref, hash, write_id}, 10_000)
+    GenServer.call(__MODULE__, {:add_write_ref, hash, write_id}, mutation_call_timeout())
   end
 
   @doc """
@@ -316,7 +353,7 @@ defmodule NeonFS.Core.ChunkIndex do
   """
   @spec remove_write_ref(binary(), ChunkMeta.write_id()) :: :ok | {:error, term()}
   def remove_write_ref(hash, write_id) do
-    GenServer.call(__MODULE__, {:remove_write_ref, hash, write_id}, 10_000)
+    GenServer.call(__MODULE__, {:remove_write_ref, hash, write_id}, mutation_call_timeout())
   end
 
   @doc """
@@ -325,7 +362,7 @@ defmodule NeonFS.Core.ChunkIndex do
   """
   @spec commit(binary()) :: :ok | {:error, term()}
   def commit(hash) do
-    GenServer.call(__MODULE__, {:commit, hash}, 10_000)
+    GenServer.call(__MODULE__, {:commit, hash}, mutation_call_timeout())
   end
 
   @doc """
@@ -333,7 +370,7 @@ defmodule NeonFS.Core.ChunkIndex do
   """
   @spec update_locations(binary(), [location()]) :: :ok | {:error, term()}
   def update_locations(hash, locations) when is_binary(hash) and is_list(locations) do
-    GenServer.call(__MODULE__, {:update_locations, hash, locations}, 10_000)
+    GenServer.call(__MODULE__, {:update_locations, hash, locations}, mutation_call_timeout())
   end
 
   @doc """
@@ -372,7 +409,7 @@ defmodule NeonFS.Core.ChunkIndex do
   """
   @spec finalize_commit(ChunkMeta.write_id(), [binary()]) :: :ok
   def finalize_commit(write_id, hashes) when is_list(hashes) do
-    GenServer.call(__MODULE__, {:finalize_commit, write_id, hashes}, 10_000)
+    GenServer.call(__MODULE__, {:finalize_commit, write_id, hashes}, mutation_call_timeout())
   end
 
   # Server Callbacks
@@ -394,18 +431,6 @@ defmodule NeonFS.Core.ChunkIndex do
     :persistent_term.put({__MODULE__, :metadata_writer_opts}, metadata_writer_opts)
 
     {:ok, %{}}
-  end
-
-  @impl true
-  def handle_call({:put, chunk_meta}, _from, state) do
-    case write_chunk(chunk_meta) do
-      :ok ->
-        :ets.insert(:chunk_index, {chunk_meta.hash, chunk_meta})
-        {:reply, :ok, state}
-
-      {:error, reason} ->
-        {:reply, {:error, reason}, state}
-    end
   end
 
   @impl true
