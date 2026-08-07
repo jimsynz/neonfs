@@ -12,8 +12,26 @@ defmodule NeonFS.Core.StripeIndex do
 
   alias NeonFS.Core.Stripe
   alias NeonFS.Core.Volume.{MetadataReader, MetadataValue, MetadataWriter}
+  alias NeonFS.Core.VolumeCommitter
 
   @stripe_key_prefix "stripe:"
+
+  # Headroom over the slowest thing a mutation waits on, matching
+  # `FileIndex`'s margin.
+  @mutation_call_margin_ms 10_000
+
+  @doc """
+  How long a mutating client call waits.
+
+  Derived from `NeonFS.Core.VolumeCommitter.commit_timeout/0` rather than
+  written as a literal, for the reason
+  `NeonFS.Core.FileIndex.mutation_call_timeout/0` documents: a call that
+  gives up before the commit it waits on turns a slow-but-successful write
+  into a reported timeout. These calls used to carry a hard-coded 10 s
+  against a 30 s commit timeout — exactly that inversion.
+  """
+  @spec mutation_call_timeout() :: pos_integer()
+  def mutation_call_timeout, do: VolumeCommitter.commit_timeout() + @mutation_call_margin_ms
 
   # Client API
 
@@ -41,7 +59,7 @@ defmodule NeonFS.Core.StripeIndex do
   """
   @spec put(Stripe.t()) :: {:ok, binary()} | {:error, term()} | {:error, term(), map()}
   def put(%Stripe{} = stripe) do
-    GenServer.call(__MODULE__, {:put, stripe}, 10_000)
+    GenServer.call(__MODULE__, {:put, stripe}, mutation_call_timeout())
   end
 
   @doc """
@@ -66,7 +84,7 @@ defmodule NeonFS.Core.StripeIndex do
   """
   @spec materialize([Stripe.t()]) :: :ok
   def materialize(stripes) when is_list(stripes) do
-    GenServer.call(__MODULE__, {:materialize, stripes}, 10_000)
+    GenServer.call(__MODULE__, {:materialize, stripes}, mutation_call_timeout())
   end
 
   @doc """
@@ -87,7 +105,7 @@ defmodule NeonFS.Core.StripeIndex do
   """
   @spec delete(binary()) :: :ok | {:error, term()} | {:error, term(), map()}
   def delete(stripe_id) when is_binary(stripe_id) do
-    GenServer.call(__MODULE__, {:delete, stripe_id}, 10_000)
+    GenServer.call(__MODULE__, {:delete, stripe_id}, mutation_call_timeout())
   end
 
   @doc """

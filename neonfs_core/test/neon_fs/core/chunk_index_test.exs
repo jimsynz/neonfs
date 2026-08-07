@@ -56,6 +56,43 @@ defmodule NeonFS.Core.ChunkIndexTest do
       assert {:error, :not_found} = ChunkIndex.get("vol-test", hash)
     end
 
+    test "concurrent puts do not queue behind one another" do
+      # A content write fans its chunks over `@max_chunk_concurrency` tasks.
+      # While `put/1` was a `GenServer.call`, each one's quorum write
+      # serialised behind the last, and on a loaded host the queue outran the
+      # call deadline — the timeout *exited* the chunk task, so
+      # `put_chunk_meta/1`'s error clause never ran and a large upload came
+      # back 500. Running the write in the caller's process removes the
+      # single-file queue rather than widening the deadline in front of it.
+      metas =
+        for _ <- 1..16 do
+          ChunkMeta.new("vol-test", :crypto.strong_rand_bytes(32), 1024, 512, :none)
+        end
+
+      results =
+        metas
+        |> Task.async_stream(&ChunkIndex.put/1, max_concurrency: 16, timeout: 30_000)
+        |> Enum.map(fn {:ok, result} -> result end)
+
+      assert Enum.all?(results, &(&1 == :ok))
+
+      for meta <- metas do
+        assert {:ok, _} = ChunkIndex.get("vol-test", meta.hash)
+      end
+    end
+
+    test "reports a write failure as an error rather than killing the caller" do
+      # The other half of the 500: a failure has to come back as a value the
+      # caller can act on. A chunk with no volume cannot be routed to a
+      # metadata tree, which is the reachable failure here.
+      meta = %{
+        ChunkMeta.new("vol-test", :crypto.strong_rand_bytes(32), 1024, 512, :none)
+        | volume_ids: MapSet.new()
+      }
+
+      assert {:error, :missing_volume_id} = ChunkIndex.put(meta)
+    end
+
     test "updates existing chunk metadata" do
       hash = :crypto.strong_rand_bytes(32)
       chunk_meta1 = ChunkMeta.new("vol-test", hash, 1024, 512, :none)
@@ -100,7 +137,9 @@ defmodule NeonFS.Core.ChunkIndexTest do
 
       # Reproduces the ExUnit teardown race: the test-owned store table is
       # deleted while the supervised ChunkIndex is still alive. A late put
-      # must not crash the GenServer.
+      # must survive it — and must not take the GenServer down either, which
+      # is now a weaker claim than it once was, since `put/1` runs in the
+      # caller rather than through the server.
       :ets.delete(store)
 
       assert :ok = ChunkIndex.put(chunk_meta)
