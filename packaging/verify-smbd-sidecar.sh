@@ -211,7 +211,10 @@ CONF
 testparm -s "$conf" >/dev/null || die "smb.conf is not valid"
 log "smb.conf validates"
 
-smbd --foreground --no-process-group --debug-stdout --configfile="$conf" \
+# Without `--no-process-group` smbd leads its own process group, so the
+# signal it sends its children on shutdown cannot reach this script — with
+# it, a fully passing run ended in the shell reporting SIGTERM.
+smbd --foreground --debug-stdout --configfile="$conf" \
   >"${LOG_DIR}/smbd.stdout" 2>&1 &
 smbd_pid=$!
 
@@ -220,7 +223,8 @@ smbd_pid=$!
 # hands the shell that process's 143, so a fully passing run reports SIGTERM.
 cleanup() {
   [ -n "${smbd_pid:-}" ] || return 0
-  kill "$smbd_pid" 2>/dev/null || true
+  # The group, so smbd's per-connection children go with it.
+  kill -- -"$smbd_pid" 2>/dev/null || kill "$smbd_pid" 2>/dev/null || true
   wait "$smbd_pid" 2>/dev/null || true
   smbd_pid=""
   return 0
