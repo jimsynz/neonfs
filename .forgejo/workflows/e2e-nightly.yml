@@ -12,10 +12,11 @@ name: Nightly end-to-end
 # `canary`, and a failure here is a signal to investigate rather than a
 # merge blocker.
 #
-# What this job proves today: the toolchain the CSI end-to-end test needs
-# exists, at the pinned versions, and a real cluster accepts the chart. The
-# conformance run itself (csi-sanity against a deployed driver) is the
-# remaining piece.
+# What these jobs prove today: the toolchain each end-to-end test needs
+# exists — for CSI, at the pinned versions with a real cluster accepting the
+# chart; for CIFS, an `smbd` running the VFS module built against its own
+# Samba. The tests themselves (csi-sanity against a deployed driver, and an
+# SMB round trip through the bridge) are the remaining pieces.
 
 on:
   schedule:
@@ -23,15 +24,30 @@ on:
   workflow_dispatch:
 
 jobs:
+  # The versioned toolchain image the Samba build needs. Same shape as the
+  # cache-warm workflow: a container image cannot be computed inside the job
+  # that runs in it.
+  setup:
+    runs-on: docker
+    timeout-minutes: 10
+    container:
+      image: harton.dev/james/workflows/ci-base:latest
+    outputs:
+      elixir_rust_image: ${{ steps.parse.outputs.elixir_rust_image }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: parse
+        run: |
+          ELIXIR=$(awk '/^elixir/ {print $2}' .tool-versions)
+          ERLANG=$(awk '/^erlang/ {print $2}' .tool-versions)
+          RUST=$(awk '/^rust/ {print $2}' .tool-versions)
+          echo "elixir_rust_image=harton.dev/james/workflows/elixir-rust:${ELIXIR}-erlang-${ERLANG}-rust-${RUST}" >> "$GITHUB_OUTPUT"
+
   csi_tooling:
     runs-on: amd64
     timeout-minutes: 60
     container:
       image: harton.dev/james/workflows/ci-base:latest
-      # kind builds its nodes as containers through the daemon started
-      # below, which needs the privileged container the integration job
-      # also uses.
-      options: --privileged
     steps:
       - uses: actions/checkout@v7
 
@@ -50,68 +66,78 @@ jobs:
           # runs first warms the other.
           key: csi-sanity-v${{ steps.csi-sanity-version.outputs.version }}-${{ runner.arch }}
 
-      - name: Install kind, kubectl and helm
-        run: resources/scripts/ci-install-k8s-tools kind kubectl helm
+      - name: Install kind, k3d, kubectl and helm
+        run: resources/scripts/ci-install-k8s-tools kind k3d kubectl helm
 
       - name: Build csi-sanity
         if: steps.cache-csi-sanity.outputs.cache-hit != 'true'
         run: resources/scripts/ci-install-k8s-tools csi-sanity
 
-      - name: Start Docker daemon
-        env:
-          DOCKER_HOST: unix:///var/run/docker.sock
-        run: |
-          dockerd --host=unix:///var/run/docker.sock \
-            --storage-driver=vfs \
-            --iptables=false --ip-masq=false --bridge=none \
-            >/tmp/dockerd.log 2>&1 &
-          # `/_ping` over the socket rather than `docker info`, which
-          # inherits ambient config and can hang for its full API timeout.
-          for i in $(seq 1 60); do
-            if [ -S /var/run/docker.sock ] && \
-               curl -fsS --max-time 2 --unix-socket /var/run/docker.sock \
-                    http://localhost/_ping >/dev/null 2>&1; then
-              echo "Docker daemon ready after ${i}s"
-              exit 0
-            fi
-            sleep 1
-          done
-          echo "Docker daemon failed to start. Tail of log:"
-          tail -100 /tmp/dockerd.log
-          exit 1
-
-      - name: Boot a kind cluster
-        env:
-          DOCKER_HOST: unix:///var/run/docker.sock
-        run: |
-          kind create cluster --name neonfs-e2e --wait 5m
-          kubectl cluster-info
-          kubectl get nodes -o wide
-
-      # Server-side, so the API server validates the manifests rather than
-      # helm re-checking its own templates. A full install is the CSI e2e
-      # test's job: the driver pods need a NeonFS cluster to register
-      # against, and without one they would crash-loop and prove nothing.
-      - name: Validate the CSI chart against the cluster
-        env:
-          DOCKER_HOST: unix:///var/run/docker.sock
+      # No cluster is booted here, and that is a finding rather than an
+      # omission: neither kind nor k3d can bring one up inside this job's own
+      # Docker daemon. A kind node's systemd never reaches multi-user
+      # ("could not find a log line that matches … Multi-User System"), and a
+      # k3s server never reports ready inside ten minutes. Both were measured
+      # here, not assumed. Booting a cluster needs infrastructure this runner
+      # pool does not have, which is a capacity call rather than a config
+      # tweak.
+      #
+      # So this validates what it can without one. `helm template` renders
+      # every manifest the chart produces and fails on a template error;
+      # `helm lint` checks the chart's own structure. Server-side validation
+      # and the conformance run wait on a cluster.
+      - name: Validate the CSI chart
         run: |
           helm lint deploy/charts/neonfs-csi
-          kubectl create namespace neonfs-csi
-          helm install neonfs-csi deploy/charts/neonfs-csi \
+          helm template neonfs-csi deploy/charts/neonfs-csi \
             --namespace neonfs-csi \
             --set bootstrap.value=nightly-e2e-token \
-            --dry-run=server
+            > /tmp/neonfs-csi-rendered.yaml
+          echo "rendered $(grep -c '^kind:' /tmp/neonfs-csi-rendered.yaml) manifests"
 
       - name: Report the toolchain
         run: |
           kind --version
+          k3d version
           kubectl version --client
           helm version --short
           csi-sanity --version 2>/dev/null || echo "csi-sanity present (reports no version)"
 
-      - name: Tear down the kind cluster
-        if: always()
-        env:
-          DOCKER_HOST: unix:///var/run/docker.sock
-        run: kind delete cluster --name neonfs-e2e || true
+  # =======================================================================
+  # The Samba side of the same problem. The VFS module cannot be built
+  # out-of-tree: it must ABI-match the smbd that loads it and carry the
+  # distro's private-symbol version node, or smbd refuses it and a client
+  # sees a bare connection error. So the sidecar is not a separate image
+  # with its own Samba — it is this job's own container, which is where the
+  # module was just built, and the module package's exact-version
+  # `Depends: samba (= …)` makes apt enforce that rather than the comment.
+  # =======================================================================
+  cifs_smbd:
+    needs: setup
+    runs-on: amd64
+    # The module builds inside the distro's Samba source. A warm
+    # `.samba-build` cache relinks in minutes; a cold one pays the full
+    # Samba build, which is what the vfs_neonfs job's own 120 minutes are
+    # for.
+    timeout-minutes: 150
+    container:
+      # The same image the vfs_neonfs job builds in: build-vfs-deb.sh links
+      # the module against this Erlang's `ei`, and the deb it produces
+      # pins the Samba this image's archive offers.
+      image: ${{ needs.setup.outputs.elixir_rust_image }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Restore Samba build cache
+        uses: actions/cache@v6
+        with:
+          path: .samba-build
+          # The same key the vfs_neonfs job and the cache-warm workflow use,
+          # so this shares their tree instead of building a third copy.
+          key: v4-vfs_neonfs-samba-deb-${{ runner.arch }}
+
+      - name: Build samba-vfs-neonfs.deb
+        run: OUT_DIR="$PWD/dist" bash packaging/build-vfs-deb.sh
+
+      - name: Verify an smbd loads the module
+        run: bash packaging/verify-smbd-sidecar.sh

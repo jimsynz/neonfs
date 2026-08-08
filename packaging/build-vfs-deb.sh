@@ -126,6 +126,11 @@ if [ -z "${SRC}" ]; then
 fi
 log "==> samba source: ${SRC}  (ei: ${EI_DIR})"
 
+# A restored cache brings the previous run's .debs back with it. They are all
+# regenerated below, and leaving them is how a stale module (or a stale samba
+# beside it) gets picked up after a point release moves the version.
+rm -f "${WORKDIR}"/*.deb
+
 # --- drop the module + wire client into the tree ---
 cp "${NATIVE}/vfs_neonfs.c" "${NATIVE}/wire.c" "${NATIVE}/wire.h" "${SRC}/source3/modules/"
 
@@ -209,8 +214,25 @@ fi
 
 # Ship only the module package, not its -dbgsym companion (nothing else in the
 # release produces a dbgsym; no need to publish one).
-deb="$(find "${WORKDIR}" -maxdepth 1 -name 'samba-vfs-neonfs_*.deb' ! -name '*-dbgsym_*' | head -1)"
-[ -n "${deb}" ] || { log "samba-vfs-neonfs deb was not produced"; exit 1; }
+#
+# Pick it by the version the tree just built, not by whichever `find` returns
+# first. A cached `.samba-build` still holds the *previous* run's deb beside
+# the new one, and when the distro moves (u1 → u2) those differ: the stale
+# module then goes out against a Samba it does not match, which is the exact
+# mismatch smbd refuses to load. Seen for real — a u1 module deb selected next
+# to freshly built u2 Samba binaries.
+tree_version="$(sed -nE '1s/^[^(]*\(([^)]+)\).*/\1/p' "${SRC}/debian/changelog")"
+[ -n "${tree_version}" ] || { log "cannot read the built version from debian/changelog"; exit 1; }
+
+# dpkg drops the epoch from filenames, so match on what the name can carry.
+file_version="${tree_version#*:}"
+deb="$(find "${WORKDIR}" -maxdepth 1 \
+  -name "samba-vfs-neonfs_${file_version}_*.deb" ! -name '*-dbgsym_*' | head -1)"
+if [ -z "${deb}" ]; then
+  log "no samba-vfs-neonfs deb at the built version ${tree_version}; the workdir holds:"
+  find "${WORKDIR}" -maxdepth 1 -name 'samba-vfs-neonfs_*.deb' -printf '  %f\n' >&2 || true
+  exit 1
+fi
 cp -f "${deb}" "${OUT_DIR}/"
 log "==> built $(basename "${deb}") -> ${OUT_DIR}"
 printf '%s\n' "${OUT_DIR}/$(basename "${deb}")"
