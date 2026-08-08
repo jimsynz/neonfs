@@ -106,47 +106,4 @@ defmodule NeonFS.Integration.BlockBackingTest do
   defp block_rpc(cluster, node, function, args) do
     PeerCluster.rpc(cluster, node, BlockBacking, function, args)
   end
-
-  defp stabilise_after_restart(cluster) do
-    wait_for_full_mesh(cluster)
-    wait_for_ra_quorum(cluster)
-    rebuild_quorum_rings(cluster)
-    wait_for_drive_registration(cluster)
-  end
-
-  defp wait_for_ra_quorum(cluster) do
-    for node_info <- cluster.nodes do
-      :ok =
-        wait_until(
-          fn ->
-            match?(
-              {:ok, _},
-              PeerCluster.rpc(cluster, node_info.name, NeonFS.Core.RaSupervisor, :get_state, [])
-            )
-          end,
-          timeout: 30_000
-        )
-    end
-
-    :ok
-  end
-
-  # The restarted node has to re-register its drive before it can serve or
-  # store chunks again; a read issued while it is missing falls to the
-  # surviving replica, which would pass this test for the wrong reason.
-  defp wait_for_drive_registration(cluster) do
-    for node_info <- cluster.nodes do
-      :ok =
-        wait_until(
-          fn ->
-            cluster
-            |> PeerCluster.rpc(node_info.name, NeonFS.Core.DriveRegistry, :list_drives, [])
-            |> Enum.any?(&(&1.node == node_info.node))
-          end,
-          timeout: 60_000
-        )
-    end
-
-    :ok
-  end
 end

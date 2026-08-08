@@ -130,29 +130,4 @@ defmodule NeonFS.Integration.MetadataCommitBoundaryRestartTest do
       end
     end
   end
-
-  defp stabilise_after_restart(cluster) do
-    wait_for_full_mesh(cluster)
-    wait_for_ra_quorum(cluster)
-    rebuild_quorum_rings(cluster)
-  end
-
-  # Passing an anonymous function would crash the Ra leader with `:undef`
-  # — funs defined in a test module aren't loadable on a peer.
-  defp wait_for_ra_quorum(cluster) do
-    for node_info <- cluster.nodes do
-      :ok =
-        wait_until(
-          fn ->
-            match?(
-              {:ok, _},
-              PeerCluster.rpc(cluster, node_info.name, NeonFS.Core.RaSupervisor, :get_state, [])
-            )
-          end,
-          timeout: 30_000
-        )
-    end
-
-    :ok
-  end
 end

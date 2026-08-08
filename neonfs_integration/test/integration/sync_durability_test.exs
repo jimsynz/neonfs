@@ -75,29 +75,6 @@ defmodule NeonFS.Integration.SyncDurabilityTest do
     end
   end
 
-  defp stabilise_after_restart(cluster) do
-    wait_for_full_mesh(cluster)
-    wait_for_ra_quorum(cluster)
-    rebuild_quorum_rings(cluster)
-  end
-
-  defp wait_for_ra_quorum(cluster) do
-    for node_info <- cluster.nodes do
-      :ok =
-        wait_until(
-          fn ->
-            match?(
-              {:ok, _},
-              PeerCluster.rpc(cluster, node_info.name, NeonFS.Core.RaSupervisor, :get_state, [])
-            )
-          end,
-          timeout: 30_000
-        )
-    end
-
-    :ok
-  end
-
   # Infrastructure readiness after the cold reform — the volume resolves
   # (metadata) and ChunkIndex is alive on every node. This is not the freeze/thaw
   # durability workaround: it waits for services to restart, not for a
@@ -116,26 +93,6 @@ defmodule NeonFS.Integration.SyncDurabilityTest do
               is_pid(
                 PeerCluster.rpc(cluster, node_name, Process, :whereis, [NeonFS.Core.ChunkIndex])
               )
-          end,
-          timeout: 60_000
-        )
-    end
-
-    :ok
-  end
-
-  # Every node re-registers its local drive after the cold restart, so it can
-  # serve and store chunks again.
-  defp wait_for_drive_registration(cluster) do
-    for node_name <- [:node1, :node2, :node3] do
-      node = PeerCluster.get_node!(cluster, node_name).node
-
-      :ok =
-        wait_until(
-          fn ->
-            cluster
-            |> PeerCluster.rpc(node_name, NeonFS.Core.DriveRegistry, :list_drives, [])
-            |> Enum.any?(&(&1.node == node))
           end,
           timeout: 60_000
         )
