@@ -126,6 +126,11 @@ if [ -z "${SRC}" ]; then
 fi
 log "==> samba source: ${SRC}  (ei: ${EI_DIR})"
 
+# A restored cache brings the previous run's .debs back with it. They are all
+# regenerated below, and leaving them is how a stale module (or a stale samba
+# beside it) gets picked up after a point release moves the version.
+rm -f "${WORKDIR}"/*.deb
+
 # --- drop the module + wire client into the tree ---
 cp "${NATIVE}/vfs_neonfs.c" "${NATIVE}/wire.c" "${NATIVE}/wire.h" "${SRC}/source3/modules/"
 

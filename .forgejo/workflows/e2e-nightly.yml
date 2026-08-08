@@ -48,9 +48,9 @@ jobs:
     timeout-minutes: 60
     container:
       image: harton.dev/james/workflows/ci-base:latest
-      # kind builds its nodes as containers through the daemon started
-      # below, which needs the privileged container the integration job
-      # also uses.
+      # The cluster's node is a container started by the daemon this job
+      # runs itself, which needs the privileged container the integration
+      # job also uses.
       options: --privileged
     steps:
       - uses: actions/checkout@v7
@@ -70,8 +70,8 @@ jobs:
           # runs first warms the other.
           key: csi-sanity-v${{ steps.csi-sanity-version.outputs.version }}-${{ runner.arch }}
 
-      - name: Install kind, kubectl and helm
-        run: resources/scripts/ci-install-k8s-tools kind kubectl helm
+      - name: Install kind, k3d, kubectl and helm
+        run: resources/scripts/ci-install-k8s-tools kind k3d kubectl helm
 
       - name: Build csi-sanity
         if: steps.cache-csi-sanity.outputs.cache-hit != 'true'
@@ -110,11 +110,16 @@ jobs:
           tail -100 /tmp/dockerd.log
           exit 1
 
-      - name: Boot a kind cluster
+      # k3d, not kind. A kind node runs systemd, which does not come up inside
+      # this job's own Docker daemon — it fails with "could not find a log
+      # line that matches … Multi-User System". k3s needs no systemd, so its
+      # node boots in the same place. `kind` is still installed because #1750
+      # asks for it and it is what a developer uses on a normal host.
+      - name: Boot a k3d cluster
         env:
           DOCKER_HOST: unix:///var/run/docker.sock
         run: |
-          kind create cluster --name neonfs-e2e --wait 5m
+          k3d cluster create neonfs-e2e --wait --timeout 5m
           kubectl cluster-info
           kubectl get nodes -o wide
 
@@ -136,15 +141,16 @@ jobs:
       - name: Report the toolchain
         run: |
           kind --version
+          k3d version
           kubectl version --client
           helm version --short
           csi-sanity --version 2>/dev/null || echo "csi-sanity present (reports no version)"
 
-      - name: Tear down the kind cluster
+      - name: Tear down the k3d cluster
         if: always()
         env:
           DOCKER_HOST: unix:///var/run/docker.sock
-        run: kind delete cluster --name neonfs-e2e || true
+        run: k3d cluster delete neonfs-e2e || true
 
   # =======================================================================
   # The Samba side of the same problem. The VFS module cannot be built

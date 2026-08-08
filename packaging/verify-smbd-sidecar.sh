@@ -77,18 +77,26 @@ module_requires="$(dpkg-deb -f "$DEB" Depends |
 # and no exposure to the archive moving on between the source fetch and the
 # install, which is a real gap: the binary package can be a point release
 # ahead of the source index the module was built from.
-samba_deb="$(find "$WORKDIR" -maxdepth 1 -name 'samba_*.deb' ! -name '*-dbgsym_*' |
-  head -1)"
+# Match on the version, not on whichever file `find` returns first: a
+# restored build cache can still hold a previous point release's debs beside
+# this build's. dpkg drops the epoch from filenames, and every package from
+# one Samba build carries that version — either whole or as a `+samba…`
+# suffix — so the version string selects this build's set exactly.
+build_version="${module_requires#*:}"
 
-[ -n "$samba_deb" ] || die "no samba deb in ${WORKDIR}: run packaging/build-vfs-deb.sh first, and keep its work directory"
+samba_deb="$(find "$WORKDIR" -maxdepth 1 -name "samba_${build_version}_*.deb" \
+  ! -name '*-dbgsym_*' | head -1)"
+
+if [ -z "$samba_deb" ]; then
+  die "no samba ${build_version} deb in ${WORKDIR} to match the module. Present:
+$(find "$WORKDIR" -maxdepth 1 -name 'samba_*.deb' -printf '  %f\n' 2>/dev/null)"
+fi
 
 built_samba="$(dpkg-deb -f "$samba_deb" Version)"
+[ "$module_requires" = "$built_samba" ] ||
+  die "the module needs samba ${module_requires} but the matching file declares ${built_samba}"
 
-log "module needs samba ${module_requires}; the build produced ${built_samba}"
-
-if [ "$module_requires" != "$built_samba" ]; then
-  die "the module and the Samba beside it came from different builds: the module needs ${module_requires}, the workdir holds ${built_samba}. Rebuild both from one tree."
-fi
+log "module and daemon both from samba ${built_samba}"
 
 # --- 2. install that Samba, then the module ------------------------------
 
@@ -98,7 +106,8 @@ apt-get update -qq
 # whole set rather than picking a subset keeps the inter-package `(= version)`
 # dependencies satisfiable from these files; apt fills in the rest from the
 # archive.
-mapfile -t built_debs < <(find "$WORKDIR" -maxdepth 1 -name '*.deb' ! -name '*-dbgsym_*')
+mapfile -t built_debs < <(find "$WORKDIR" -maxdepth 1 -name "*${build_version}*.deb" \
+  ! -name '*-dbgsym_*')
 [ "${#built_debs[@]}" -gt 0 ] || die "no debs in ${WORKDIR}"
 
 log "installing ${#built_debs[@]} packages from the build"
