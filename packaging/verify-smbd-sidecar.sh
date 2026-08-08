@@ -106,8 +106,10 @@ apt-get update -qq
 # whole set rather than picking a subset keeps the inter-package `(= version)`
 # dependencies satisfiable from these files; apt fills in the rest from the
 # archive.
+# The module itself is deliberately not in this set: it collides with the
+# `samba` package below and is installed separately, under a check.
 mapfile -t built_debs < <(find "$WORKDIR" -maxdepth 1 -name "*${build_version}*.deb" \
-  ! -name '*-dbgsym_*')
+  ! -name '*-dbgsym_*' ! -name 'samba-vfs-neonfs_*')
 [ "${#built_debs[@]}" -gt 0 ] || die "no debs in ${WORKDIR}"
 
 log "installing ${#built_debs[@]} packages from the build"

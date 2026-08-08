@@ -45,13 +45,9 @@ jobs:
 
   csi_tooling:
     runs-on: amd64
-    timeout-minutes: 90
+    timeout-minutes: 60
     container:
       image: harton.dev/james/workflows/ci-base:latest
-      # The cluster's node is a container started by the daemon this job
-      # runs itself, which needs the privileged container the integration
-      # job also uses.
-      options: --privileged
     steps:
       - uses: actions/checkout@v7
 
@@ -77,78 +73,28 @@ jobs:
         if: steps.cache-csi-sanity.outputs.cache-hit != 'true'
         run: resources/scripts/ci-install-k8s-tools csi-sanity
 
-      # The base image carries no container runtime — the package job that
-      # runs dind gets one from its matrix entry's `apt` list, and this job
-      # is not in that matrix. Trixie splits the CLI into its own package,
-      # which `--no-install-recommends` will not pull in implicitly.
-      - name: Install Docker
-        run: |
-          apt-get update
-          apt-get install -y --no-install-recommends docker.io docker-cli iptables
-          rm -rf /var/lib/apt/lists/*
-
-      - name: Start Docker daemon
-        env:
-          DOCKER_HOST: unix:///var/run/docker.sock
-        run: |
-          # Unlike the package job's dind — which only has to run one
-          # `alpine` container and so switches networking off — a Kubernetes
-          # node needs the bridge, iptables and masquerading. Without them
-          # the k3s server starts and never becomes ready.
-          dockerd --host=unix:///var/run/docker.sock \
-            --storage-driver=vfs \
-            >/tmp/dockerd.log 2>&1 &
-          # `/_ping` over the socket rather than `docker info`, which
-          # inherits ambient config and can hang for its full API timeout.
-          for i in $(seq 1 60); do
-            if [ -S /var/run/docker.sock ] && \
-               curl -fsS --max-time 2 --unix-socket /var/run/docker.sock \
-                    http://localhost/_ping >/dev/null 2>&1; then
-              echo "Docker daemon ready after ${i}s"
-              exit 0
-            fi
-            sleep 1
-          done
-          echo "Docker daemon failed to start. Tail of log:"
-          tail -100 /tmp/dockerd.log
-          exit 1
-
-      # k3d, not kind. A kind node runs systemd, which does not come up inside
-      # this job's own Docker daemon — it fails with "could not find a log
-      # line that matches … Multi-User System". k3s needs no systemd, so its
-      # node boots in the same place. `kind` is still installed because #1750
-      # asks for it and it is what a developer uses on a normal host.
-      - name: Boot a k3d cluster
-        env:
-          DOCKER_HOST: unix:///var/run/docker.sock
-        run: |
-          # Traefik and the metrics server are startup work this job has no
-          # use for — it needs an API server that admits the chart.
-          k3d cluster create neonfs-e2e --wait --timeout 10m \
-            --k3s-arg "--disable=traefik@server:0" \
-            --k3s-arg "--disable=metrics-server@server:0" ||
-            {
-              echo "k3s server log:"
-              docker logs k3d-neonfs-e2e-server-0 2>&1 | tail -60
-              exit 1
-            }
-          kubectl cluster-info
-          kubectl get nodes -o wide
-
-      # Server-side, so the API server validates the manifests rather than
-      # helm re-checking its own templates. A full install is the CSI e2e
-      # test's job: the driver pods need a NeonFS cluster to register
-      # against, and without one they would crash-loop and prove nothing.
-      - name: Validate the CSI chart against the cluster
-        env:
-          DOCKER_HOST: unix:///var/run/docker.sock
+      # No cluster is booted here, and that is a finding rather than an
+      # omission: neither kind nor k3d can bring one up inside this job's own
+      # Docker daemon. A kind node's systemd never reaches multi-user
+      # ("could not find a log line that matches … Multi-User System"), and a
+      # k3s server never reports ready inside ten minutes. Both were measured
+      # here, not assumed. Booting a cluster needs infrastructure this runner
+      # pool does not have, which is a capacity call rather than a config
+      # tweak.
+      #
+      # So this validates what it can without one. `helm template` renders
+      # every manifest the chart produces and fails on a template error;
+      # `helm lint` checks the chart's own structure. Server-side validation
+      # and the conformance run wait on a cluster.
+      - name: Validate the CSI chart
         run: |
           helm lint deploy/charts/neonfs-csi
-          kubectl create namespace neonfs-csi
-          helm install neonfs-csi deploy/charts/neonfs-csi \
+          helm template neonfs-csi deploy/charts/neonfs-csi \
             --namespace neonfs-csi \
             --set bootstrap.value=nightly-e2e-token \
-            --dry-run=server
+            > /tmp/neonfs-csi-rendered.yaml
+          echo "rendered $(grep -c '^kind:' /tmp/neonfs-csi-rendered.yaml) manifests"
+          bash deploy/charts/neonfs-csi/tests/render.sh
 
       - name: Report the toolchain
         run: |
@@ -157,12 +103,6 @@ jobs:
           kubectl version --client
           helm version --short
           csi-sanity --version 2>/dev/null || echo "csi-sanity present (reports no version)"
-
-      - name: Tear down the k3d cluster
-        if: always()
-        env:
-          DOCKER_HOST: unix:///var/run/docker.sock
-        run: k3d cluster delete neonfs-e2e || true
 
   # =======================================================================
   # The Samba side of the same problem. The VFS module cannot be built
