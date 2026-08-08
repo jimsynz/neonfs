@@ -77,6 +77,16 @@ jobs:
         if: steps.cache-csi-sanity.outputs.cache-hit != 'true'
         run: resources/scripts/ci-install-k8s-tools csi-sanity
 
+      # The base image carries no container runtime — the package job that
+      # runs dind gets one from its matrix entry's `apt` list, and this job
+      # is not in that matrix. Trixie splits the CLI into its own package,
+      # which `--no-install-recommends` will not pull in implicitly.
+      - name: Install Docker
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends docker.io docker-cli iptables
+          rm -rf /var/lib/apt/lists/*
+
       - name: Start Docker daemon
         env:
           DOCKER_HOST: unix:///var/run/docker.sock

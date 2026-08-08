@@ -7,11 +7,15 @@
 # load it and a client sees "connection refused" with no explanation. So the
 # match is not documented here and hoped for — it is enforced three ways:
 #
-#   1. `samba-vfs-neonfs` declares `Depends: samba (= <exact version>)`, so
-#      apt refuses the install outright against a different Samba.
-#   2. The declared version is compared against the archive's candidate
-#      before installing, so the failure names both versions instead of
-#      arriving as a dpkg dependency error.
+#   1. The daemon is not installed from the archive. Building the module
+#      inside the distro's Samba source produces that entire Samba, so the
+#      sidecar installs *those* debs — the match is structural rather than
+#      pinned, and immune to the archive moving on between the source fetch
+#      and the install.
+#   2. `samba-vfs-neonfs` declares `Depends: samba (= <exact version>)`, and
+#      the version it names is compared against the Samba deb beside it
+#      before anything is installed, so a mismatch names both versions
+#      instead of arriving as a dpkg dependency error.
 #   3. `ldd -r` on the installed module resolves every symbol against the
 #      installed Samba libraries. A symbol-version mismatch shows up here as
 #      "symbol not found" — which is exactly what smbd would hit at load
@@ -27,7 +31,8 @@
 # Root only, and it installs packages: meant for a CI container.
 #
 # Usage: verify-smbd-sidecar.sh [path/to/samba-vfs-neonfs_*.deb]
-#        (defaults to the newest such deb under dist/)
+#        (defaults to the newest such deb under dist/; the Samba debs from
+#        the same build are read from $WORKDIR, default .samba-build/)
 
 set -euo pipefail
 
@@ -35,6 +40,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 DEB="${1:-}"
+WORKDIR="${WORKDIR:-${REPO_ROOT}/.samba-build}"
 SHARE_DIR="${SHARE_DIR:-/tmp/neonfs-smbd-share}"
 LOG_DIR="${LOG_DIR:-/tmp/neonfs-smbd-logs}"
 SOCKET_PATH="${SOCKET_PATH:-/tmp/neonfs-smbd-bridge.sock}"
@@ -65,18 +71,38 @@ module_requires="$(dpkg-deb -f "$DEB" Depends |
 
 [ -n "$module_requires" ] || die "the deb does not pin an exact samba version in Depends"
 
-apt-get update -qq
-archive_candidate="$(apt-cache policy samba | awk '/Candidate:/ {print $2}')"
+# The daemon comes from the build, not from the archive. Building the module
+# inside the distro's Samba source produces that whole Samba too, so
+# installing those debs makes the match structural — no pin to keep current,
+# and no exposure to the archive moving on between the source fetch and the
+# install, which is a real gap: the binary package can be a point release
+# ahead of the source index the module was built from.
+samba_deb="$(find "$WORKDIR" -maxdepth 1 -name 'samba_*.deb' ! -name '*-dbgsym_*' |
+  head -1)"
 
-log "module built against samba ${module_requires}; archive offers ${archive_candidate}"
+[ -n "$samba_deb" ] || die "no samba deb in ${WORKDIR}: run packaging/build-vfs-deb.sh first, and keep its work directory"
 
-if [ "$module_requires" != "$archive_candidate" ]; then
-  die "samba version mismatch: the module needs ${module_requires} but this image's archive offers ${archive_candidate}. The sidecar must be built from the same image as the module, or smbd will refuse to load it."
+built_samba="$(dpkg-deb -f "$samba_deb" Version)"
+
+log "module needs samba ${module_requires}; the build produced ${built_samba}"
+
+if [ "$module_requires" != "$built_samba" ]; then
+  die "the module and the Samba beside it came from different builds: the module needs ${module_requires}, the workdir holds ${built_samba}. Rebuild both from one tree."
 fi
 
-# --- 2. install the daemon and the module --------------------------------
+# --- 2. install that Samba, then the module ------------------------------
 
-DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends samba smbclient
+apt-get update -qq
+
+# Everything the build produced except the debug companions. Installing the
+# whole set rather than picking a subset keeps the inter-package `(= version)`
+# dependencies satisfiable from these files; apt fills in the rest from the
+# archive.
+mapfile -t built_debs < <(find "$WORKDIR" -maxdepth 1 -name '*.deb' ! -name '*-dbgsym_*')
+[ "${#built_debs[@]}" -gt 0 ] || die "no debs in ${WORKDIR}"
+
+log "installing ${#built_debs[@]} packages from the build"
+DEBIAN_FRONTEND=noninteractive apt-get install -y "${built_debs[@]}"
 
 # Not `dpkg -i`: apt resolves the module's `Depends: samba (= …)` and refuses
 # rather than leaving a half-configured package behind.
