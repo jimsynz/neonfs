@@ -129,14 +129,27 @@ module_path="$(dpkg-deb -c "$DEB" | awk '$NF ~ /\/neonfs\.so$/ {print $NF}' | se
 extract_dir="$(mktemp -d)"
 dpkg-deb -x "$DEB" "${extract_dir}/module"
 
+# Compare build IDs, not bytes: `dh_strip` splits debug symbols per binary
+# package, so one build's two copies of the same object differ on disk while
+# still being the same compilation. The build ID survives stripping and is
+# what actually identifies it.
+build_id() {
+  readelf -n "$1" 2>/dev/null | sed -nE 's/.*Build ID: ([0-9a-f]+).*/\1/p' | head -1
+}
+
 install_opts=()
 if [ -e "${module_path}" ]; then
-  if cmp -s "${module_path}" "${extract_dir}/module${module_path}"; then
-    log "the co-built samba already ships an identical ${module_path}; overwriting it"
-    install_opts+=(-o Dpkg::Options::=--force-overwrite)
-  else
-    die "${module_path} is already installed and differs from the one in $(basename "$DEB") — these are not from the same build"
-  fi
+  installed_id="$(build_id "${module_path}")"
+  package_id="$(build_id "${extract_dir}/module${module_path}")"
+
+  [ -n "$installed_id" ] && [ -n "$package_id" ] ||
+    die "cannot read a build ID from ${module_path} — refusing to overwrite blind"
+
+  [ "$installed_id" = "$package_id" ] ||
+    die "${module_path} is already installed with build ID ${installed_id}, but $(basename "$DEB") carries ${package_id} — these are not from the same build"
+
+  log "the co-built samba ships the same module (build ID ${package_id}); overwriting it"
+  install_opts+=(-o Dpkg::Options::=--force-overwrite)
 fi
 rm -rf "$extract_dir"
 

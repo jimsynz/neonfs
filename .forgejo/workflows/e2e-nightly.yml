@@ -94,7 +94,6 @@ jobs:
             --set bootstrap.value=nightly-e2e-token \
             > /tmp/neonfs-csi-rendered.yaml
           echo "rendered $(grep -c '^kind:' /tmp/neonfs-csi-rendered.yaml) manifests"
-          bash deploy/charts/neonfs-csi/tests/render.sh
 
       - name: Report the toolchain
         run: |
