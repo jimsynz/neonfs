@@ -41,12 +41,29 @@ jobs:
       image: ${{ needs.setup.outputs.elixir_rust_image }}
     steps:
       - uses: actions/checkout@v7
+      # The cache holds a Samba *source tree*, and `build-vfs-deb.sh` refuses
+      # to build against one that no longer matches the archive — so the key
+      # has to move with the archive. A static key cannot: `actions/cache`
+      # will not overwrite an existing entry, so the first point release after
+      # it was written poisons it permanently and every later run restores
+      # half a gigabyte it must then throw away.
+      - name: Resolve the distro samba version
+        id: samba
+        run: |
+          apt-get update -qq
+          version=$(apt-cache policy samba | awk '/Candidate:/ {print $2}')
+          if [ -z "$version" ] || [ "$version" = "(none)" ]; then
+            echo "no samba candidate in this image's archive" >&2
+            exit 1
+          fi
+          echo "version=$(printf '%s' "$version" | sed 's/[^A-Za-z0-9._-]/-/g')" >> "$GITHUB_OUTPUT"
+
       - name: Restore Samba build cache
         uses: actions/cache@v6
         with:
           path: .samba-build
           # Must match the vfs_neonfs job's key exactly (ci.yml) — this
           # workflow exists to keep that cache warm.
-          key: v4-vfs_neonfs-samba-deb-${{ runner.arch }}
+          key: v5-vfs_neonfs-samba-deb-${{ runner.arch }}-${{ steps.samba.outputs.version }}
       - name: Build samba-vfs-neonfs.deb
         run: OUT_DIR="$(mktemp -d)" bash packaging/build-vfs-deb.sh
