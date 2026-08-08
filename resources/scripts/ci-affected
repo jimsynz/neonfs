@@ -64,6 +64,12 @@ classify() {
       run_all=true
       ;;
 
+    # `ci-install-k8s-tools` owns the csi-sanity pin the `neonfs_csi` job
+    # builds and caches against, so a change to it does change that job's
+    # result. The rest of what it installs (kind, kubectl, helm) is only
+    # used by the nightly end-to-end workflow, which no PR triggers.
+    resources/scripts/ci-install-k8s-tools) mark neonfs_csi ;;
+
     # Everything else in there is developer tooling — the `fj-*` forge
     # helpers, `neonfs-each`, `neonfs-release`, the container build script.
     # None is referenced by .forgejo/workflows/ci.yml, so none can change a
@@ -110,6 +116,11 @@ classify() {
     neonfs_omnibus/*) mark neonfs_omnibus ;;
     neonfs_integration/*) mark integration ;;
     neonfs-cli/*) mark cli integration ;;
+
+    # No pull request triggers this workflow — it runs on a schedule and on
+    # demand — so editing it cannot change a PR's result. Falling through to
+    # the catch-all would spend the two-hour Samba build proving that.
+    .forgejo/workflows/e2e-nightly.yml) ;;
 
     # Unknown paths (.forgejo/, .tool-versions, resources/scripts/,
     # scripts/, …) affect shared infrastructure: run everything.

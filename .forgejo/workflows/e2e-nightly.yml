@@ -1,0 +1,117 @@
+name: Nightly end-to-end
+
+# End-to-end jobs that need a whole runner to themselves: a Kubernetes
+# cluster, a container daemon, and minutes of boot before the first
+# assertion. They deliberately do **not** run per push.
+#
+# There are two amd64 runners and the integration suite already shards one
+# job onto each. A job that boots Kubernetes alongside them exhausts both —
+# four integration shards on two runners once filled the disk and the
+# ephemeral port range, which is why the shard count matches the runner
+# count exactly. So this runs on a schedule and on demand, is not wired into
+# `canary`, and a failure here is a signal to investigate rather than a
+# merge blocker.
+#
+# What this job proves today: the toolchain the CSI end-to-end test needs
+# exists, at the pinned versions, and a real cluster accepts the chart. The
+# conformance run itself (csi-sanity against a deployed driver) is the
+# remaining piece.
+
+on:
+  schedule:
+    - cron: "0 14 * * *"
+  workflow_dispatch:
+
+jobs:
+  csi_tooling:
+    runs-on: amd64
+    timeout-minutes: 60
+    container:
+      image: harton.dev/james/workflows/ci-base:latest
+      # kind builds its nodes as containers through the daemon started
+      # below, which needs the privileged container the integration job
+      # also uses.
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Resolve csi-sanity version
+        id: csi-sanity-version
+        run: |
+          version=$(resources/scripts/ci-install-k8s-tools --print-version csi-sanity)
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Cache csi-sanity
+        id: cache-csi-sanity
+        uses: actions/cache@v6
+        with:
+          path: /usr/local/bin/csi-sanity
+          # Same key as the `neonfs_csi` package job in ci.yml, so whichever
+          # runs first warms the other.
+          key: csi-sanity-v${{ steps.csi-sanity-version.outputs.version }}-${{ runner.arch }}
+
+      - name: Install kind, kubectl and helm
+        run: resources/scripts/ci-install-k8s-tools kind kubectl helm
+
+      - name: Build csi-sanity
+        if: steps.cache-csi-sanity.outputs.cache-hit != 'true'
+        run: resources/scripts/ci-install-k8s-tools csi-sanity
+
+      - name: Start Docker daemon
+        env:
+          DOCKER_HOST: unix:///var/run/docker.sock
+        run: |
+          dockerd --host=unix:///var/run/docker.sock \
+            --storage-driver=vfs \
+            --iptables=false --ip-masq=false --bridge=none \
+            >/tmp/dockerd.log 2>&1 &
+          # `/_ping` over the socket rather than `docker info`, which
+          # inherits ambient config and can hang for its full API timeout.
+          for i in $(seq 1 60); do
+            if [ -S /var/run/docker.sock ] && \
+               curl -fsS --max-time 2 --unix-socket /var/run/docker.sock \
+                    http://localhost/_ping >/dev/null 2>&1; then
+              echo "Docker daemon ready after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Docker daemon failed to start. Tail of log:"
+          tail -100 /tmp/dockerd.log
+          exit 1
+
+      - name: Boot a kind cluster
+        env:
+          DOCKER_HOST: unix:///var/run/docker.sock
+        run: |
+          kind create cluster --name neonfs-e2e --wait 5m
+          kubectl cluster-info
+          kubectl get nodes -o wide
+
+      # Server-side, so the API server validates the manifests rather than
+      # helm re-checking its own templates. A full install is the CSI e2e
+      # test's job: the driver pods need a NeonFS cluster to register
+      # against, and without one they would crash-loop and prove nothing.
+      - name: Validate the CSI chart against the cluster
+        env:
+          DOCKER_HOST: unix:///var/run/docker.sock
+        run: |
+          helm lint deploy/charts/neonfs-csi
+          kubectl create namespace neonfs-csi
+          helm install neonfs-csi deploy/charts/neonfs-csi \
+            --namespace neonfs-csi \
+            --set bootstrap.value=nightly-e2e-token \
+            --dry-run=server
+
+      - name: Report the toolchain
+        run: |
+          kind --version
+          kubectl version --client
+          helm version --short
+          csi-sanity --version 2>/dev/null || echo "csi-sanity present (reports no version)"
+
+      - name: Tear down the kind cluster
+        if: always()
+        env:
+          DOCKER_HOST: unix:///var/run/docker.sock
+        run: kind delete cluster --name neonfs-e2e || true
