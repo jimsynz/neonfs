@@ -447,6 +447,8 @@ defmodule NeonFS.Core.ServiceRegistryTest do
       registry = Process.whereis(ServiceRegistry)
       Mimic.allow(RaSupervisor, self(), registry)
 
+      await_self_registration_landed!()
+
       {:ok, writes} = Agent.start_link(fn -> 0 end)
 
       stub(RaSupervisor, :command, fn
@@ -458,10 +460,16 @@ defmodule NeonFS.Core.ServiceRegistryTest do
           Mimic.call_original(RaSupervisor, :command, [cmd, timeout])
       end)
 
+      # Count from what the process has already queued rather than from zero,
+      # so the number belongs to the poll. A `:self_heal` tick can write too,
+      # on its own timer, for a reason this test is not about.
+      :sys.get_state(registry)
+      before_poll = Agent.get(writes, & &1)
+
       send(registry, {:retry_register_self, :endpoint, 1})
       :sys.get_state(registry)
 
-      assert Agent.get(writes, & &1) == 0,
+      assert Agent.get(writes, & &1) == before_poll,
              "nothing has changed since the last registration, so there is nothing to say"
     end
 
@@ -544,6 +552,31 @@ defmodule NeonFS.Core.ServiceRegistryTest do
             "quiet for #{wait_ms}ms"
         )
     end
+  end
+
+  # Blocks until the registry's own boot registration has committed.
+  #
+  # Until it has, a write-cause retry chain is ticking, and every tick
+  # reissues the write — so a test counting Ra writes attributes one of those
+  # ticks to whatever it was doing instead. A committed registration schedules
+  # no further write tick, which is what makes the count attributable.
+  #
+  # Attach before reading the registry, never after: an event that fired in
+  # between is then already in the mailbox, and a read that says "absent" is
+  # therefore a genuine "has not committed yet" rather than a missed event.
+  defp await_self_registration_landed! do
+    ref =
+      :telemetry_test.attach_event_handlers(self(), [
+        [:neonfs, :service_registry, :self_registered]
+      ])
+
+    unless match?({:ok, _info}, ServiceRegistry.get(Node.self(), :core)) do
+      assert_receive {[:neonfs, :service_registry, :self_registered], ^ref, _measurements,
+                      _metadata},
+                     @registration_quiet_ms * 2
+    end
+
+    flush_telemetry(ref)
   end
 
   defp flush_telemetry(ref) do
