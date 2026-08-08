@@ -14,6 +14,24 @@ defmodule NeonFS.S3.PeakRSSTest do
   friendly fakes that consume chunks without retaining bytes, so the
   measurement reflects the S3 backend's in-process allocations rather than
   the mock's. A real cluster is not required.
+
+  ## Do not migrate this to `:processes_used`
+
+  Sibling peak-memory tests that stood up peer clusters were flaky under
+  load and switched their measurement to `:erlang.memory(:processes_used)`
+  before being removed outright. That measurement is wrong here: large
+  binaries live off-heap in the shared binary heap, so `:processes_used`
+  cannot observe a buffered 64 MiB part — i.e. it cannot detect the one
+  defect this test exists to catch.
+
+  `:erlang.memory(:total)` is GC-sensitive in principle, because the binary
+  heap it counts is bounded by major-GC timing rather than by what the
+  pipeline retains. In practice this test has 128 MiB of headroom, stands
+  up no cluster, no data plane and no Ra, and has never tripped. If the GC
+  sensitivity ever does bite, the options are `:erlang.memory(:binary)`
+  (narrower, still statistical) or replacing the measurement with a
+  structural assertion that staged parts are released as they are consumed.
+  Neither is worth doing pre-emptively.
   """
 
   use ExUnit.Case, async: false
