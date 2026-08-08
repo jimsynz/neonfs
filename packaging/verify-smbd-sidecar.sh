@@ -113,9 +113,34 @@ mapfile -t built_debs < <(find "$WORKDIR" -maxdepth 1 -name "*${build_version}*.
 log "installing ${#built_debs[@]} packages from the build"
 DEBIAN_FRONTEND=noninteractive apt-get install -y "${built_debs[@]}"
 
+# Registering the module with `--with-shared-modules` puts `neonfs.so` in the
+# `samba` package's own file list as well as in `samba-vfs-neonfs`, so the two
+# co-built packages claim the same path and dpkg refuses the second. That
+# never bites the release path, where the module is installed against the
+# archive's samba, which has no such file.
+#
+# Overwriting is only safe because both copies come from this one build, so
+# assert that rather than assume it: identical bytes, then force.
+module_path="$(dpkg-deb -c "$DEB" | awk '$NF ~ /\/neonfs\.so$/ {print $NF}' | sed 's|^\.||')"
+[ -n "$module_path" ] || die "the module deb contains no neonfs.so"
+
+extract_dir="$(mktemp -d)"
+dpkg-deb -x "$DEB" "${extract_dir}/module"
+
+install_opts=()
+if [ -e "${module_path}" ]; then
+  if cmp -s "${module_path}" "${extract_dir}/module${module_path}"; then
+    log "the co-built samba already ships an identical ${module_path}; overwriting it"
+    install_opts+=(-o Dpkg::Options::=--force-overwrite)
+  else
+    die "${module_path} is already installed and differs from the one in $(basename "$DEB") — these are not from the same build"
+  fi
+fi
+rm -rf "$extract_dir"
+
 # Not `dpkg -i`: apt resolves the module's `Depends: samba (= …)` and refuses
 # rather than leaving a half-configured package behind.
-DEBIAN_FRONTEND=noninteractive apt-get install -y "$DEB"
+DEBIAN_FRONTEND=noninteractive apt-get install -y "${install_opts[@]}" "$DEB"
 
 installed_samba="$(dpkg-query -W -f='${Version}' samba)"
 [ "$installed_samba" = "$module_requires" ] ||
