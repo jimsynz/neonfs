@@ -12,10 +12,11 @@ name: Nightly end-to-end
 # `canary`, and a failure here is a signal to investigate rather than a
 # merge blocker.
 #
-# What this job proves today: the toolchain the CSI end-to-end test needs
-# exists, at the pinned versions, and a real cluster accepts the chart. The
-# conformance run itself (csi-sanity against a deployed driver) is the
-# remaining piece.
+# What these jobs prove today: the toolchain each end-to-end test needs
+# exists — for CSI, at the pinned versions with a real cluster accepting the
+# chart; for CIFS, an `smbd` running the VFS module built against its own
+# Samba. The tests themselves (csi-sanity against a deployed driver, and an
+# SMB round trip through the bridge) are the remaining pieces.
 
 on:
   schedule:
@@ -23,6 +24,25 @@ on:
   workflow_dispatch:
 
 jobs:
+  # The versioned toolchain image the Samba build needs. Same shape as the
+  # cache-warm workflow: a container image cannot be computed inside the job
+  # that runs in it.
+  setup:
+    runs-on: docker
+    timeout-minutes: 10
+    container:
+      image: harton.dev/james/workflows/ci-base:latest
+    outputs:
+      elixir_rust_image: ${{ steps.parse.outputs.elixir_rust_image }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: parse
+        run: |
+          ELIXIR=$(awk '/^elixir/ {print $2}' .tool-versions)
+          ERLANG=$(awk '/^erlang/ {print $2}' .tool-versions)
+          RUST=$(awk '/^rust/ {print $2}' .tool-versions)
+          echo "elixir_rust_image=harton.dev/james/workflows/elixir-rust:${ELIXIR}-erlang-${ERLANG}-rust-${RUST}" >> "$GITHUB_OUTPUT"
+
   csi_tooling:
     runs-on: amd64
     timeout-minutes: 60
@@ -115,3 +135,42 @@ jobs:
         env:
           DOCKER_HOST: unix:///var/run/docker.sock
         run: kind delete cluster --name neonfs-e2e || true
+
+  # =======================================================================
+  # The Samba side of the same problem. The VFS module cannot be built
+  # out-of-tree: it must ABI-match the smbd that loads it and carry the
+  # distro's private-symbol version node, or smbd refuses it and a client
+  # sees a bare connection error. So the sidecar is not a separate image
+  # with its own Samba — it is this job's own container, which is where the
+  # module was just built, and the module package's exact-version
+  # `Depends: samba (= …)` makes apt enforce that rather than the comment.
+  # =======================================================================
+  cifs_smbd:
+    needs: setup
+    runs-on: amd64
+    # The module builds inside the distro's Samba source. A warm
+    # `.samba-build` cache relinks in minutes; a cold one pays the full
+    # Samba build, which is what the vfs_neonfs job's own 120 minutes are
+    # for.
+    timeout-minutes: 150
+    container:
+      # The same image the vfs_neonfs job builds in: build-vfs-deb.sh links
+      # the module against this Erlang's `ei`, and the deb it produces
+      # pins the Samba this image's archive offers.
+      image: ${{ needs.setup.outputs.elixir_rust_image }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Restore Samba build cache
+        uses: actions/cache@v6
+        with:
+          path: .samba-build
+          # The same key the vfs_neonfs job and the cache-warm workflow use,
+          # so this shares their tree instead of building a third copy.
+          key: v4-vfs_neonfs-samba-deb-${{ runner.arch }}
+
+      - name: Build samba-vfs-neonfs.deb
+        run: OUT_DIR="$PWD/dist" bash packaging/build-vfs-deb.sh
+
+      - name: Verify an smbd loads the module
+        run: bash packaging/verify-smbd-sidecar.sh
