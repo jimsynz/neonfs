@@ -219,22 +219,27 @@ jobs:
       # source with Go). When it's on PATH the neonfs_csi test suite
       # picks up the `:requires_csi_sanity` conformance test; otherwise
       # that test is excluded. Cache the built binary across runs.
+      #
+      # The version lives in `ci-install-k8s-tools` and is read back out for
+      # the cache key, so the pin and the key cannot drift apart.
+      - name: Resolve csi-sanity version
+        if: steps.meta.outputs.csi_sanity == 'true'
+        id: csi-sanity-version
+        run: |
+          version=$(resources/scripts/ci-install-k8s-tools --print-version csi-sanity)
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
       - name: Cache csi-sanity
         if: steps.meta.outputs.csi_sanity == 'true'
         id: cache-csi-sanity
         uses: actions/cache@v6
         with:
           path: /usr/local/bin/csi-sanity
-          key: csi-sanity-v5.4.0-${{ runner.arch }}
+          key: csi-sanity-v${{ steps.csi-sanity-version.outputs.version }}-${{ runner.arch }}
 
       - name: Build csi-sanity
         if: steps.meta.outputs.csi_sanity == 'true' && steps.cache-csi-sanity.outputs.cache-hit != 'true'
-        run: |
-          GO_VERSION=1.23.6
-          ARCH=$(dpkg --print-architecture)
-          curl -sL "https://go.dev/dl/go${GO_VERSION}.linux-${ARCH}.tar.gz" | tar -C /usr/local -xz
-          GOBIN=/usr/local/bin /usr/local/go/bin/go install \
-            github.com/kubernetes-csi/csi-test/v5/cmd/csi-sanity@v5.4.0
+        run: resources/scripts/ci-install-k8s-tools csi-sanity
 
       - name: Start Docker daemon (dind for the VolumeDriver e2e test, #312)
         if: steps.meta.outputs.dind == 'true'
