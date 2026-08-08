@@ -18,6 +18,10 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
 
   @op_timeout op_timeout()
 
+  # How long a fixture write may keep missing its Ra deadline before the
+  # cluster counts as broken rather than loaded.
+  @fixture_timeout 10_000
+
   setup_all %{cluster: cluster} do
     :ok = cluster_init_idempotent(cluster, :node1, "test")
 
@@ -74,13 +78,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
   describe "lookup operation" do
     test "looks up existing file", %{handler: handler, volume_id: volume_id, cluster: cluster} do
       # Create test file on core node
-      {:ok, _} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.Core.WriteOperation, :write_file_at, [
-          volume_id,
-          "/test.txt",
-          0,
-          "hello"
-        ])
+      write_fixture!(cluster, volume_id, "/test.txt", "hello")
 
       send(handler, {:fuse_op, 1, {"lookup", %{"parent" => 1, "name" => "test.txt"}}})
       assert_receive {:fuse_op_complete, 1, {"lookup_ok", _}}, @op_timeout
@@ -298,13 +296,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
   describe "unlink and rmdir operations" do
     test "deletes a file", %{handler: handler, volume_id: volume_id, cluster: cluster} do
       # Create file on core
-      {:ok, _} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.Core.WriteOperation, :write_file_at, [
-          volume_id,
-          "/delete_me.txt",
-          0,
-          "content"
-        ])
+      write_fixture!(cluster, volume_id, "/delete_me.txt", "content")
 
       {:ok, _inode} = InodeTable.allocate_inode(volume_id, "/delete_me.txt")
 
@@ -318,11 +310,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
       # Create the directory the canonical way — a `dir:` record with a
       # `:dir` dirent. This used to write a file with `S_IFDIR` in its mode,
       # which is the shape no interface could remove.
-      {:ok, _} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.Core.FileIndex, :mkdir, [
-          volume_id,
-          "/empty_dir"
-        ])
+      mkdir_fixture!(cluster, volume_id, "/empty_dir")
 
       {:ok, _inode} = InodeTable.allocate_inode(volume_id, "/empty_dir")
 
@@ -336,13 +324,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
   describe "rename operation" do
     test "renames a file", %{handler: handler, volume_id: volume_id, cluster: cluster} do
       # Create file on core
-      {:ok, _} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.Core.WriteOperation, :write_file_at, [
-          volume_id,
-          "/old_name.txt",
-          0,
-          "content"
-        ])
+      write_fixture!(cluster, volume_id, "/old_name.txt", "content")
 
       {:ok, _inode} = InodeTable.allocate_inode(volume_id, "/old_name.txt")
 
@@ -680,13 +662,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
       cluster: cluster
     } do
       # Create file via RPC so we can capture its initial changed_at
-      {:ok, _} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.Core.WriteOperation, :write_file_at, [
-          volume_id,
-          "/ctime_file.txt",
-          0,
-          "content"
-        ])
+      write_fixture!(cluster, volume_id, "/ctime_file.txt", "content")
 
       {:ok, file_before} =
         PeerCluster.rpc(cluster, :node1, NeonFS.Core.FileIndex, :get_by_path, [
@@ -724,13 +700,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
       cluster: cluster
     } do
       # Create file owned by root (uid 0) via RPC
-      {:ok, _} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.Core.WriteOperation, :write_file_at, [
-          volume_id,
-          "/root_chmod.txt",
-          0,
-          "content"
-        ])
+      write_fixture!(cluster, volume_id, "/root_chmod.txt", "content")
 
       # Start a non-root handler (uid 1000)
       non_root_handler =
@@ -753,13 +723,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
       volume_id: volume_id,
       cluster: cluster
     } do
-      {:ok, _} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.Core.WriteOperation, :write_file_at, [
-          volume_id,
-          "/root_chown.txt",
-          0,
-          "content"
-        ])
+      write_fixture!(cluster, volume_id, "/root_chown.txt", "content")
 
       non_root_handler =
         start_supervised!({Handler, volume: volume_id, test_notify: self(), uid: 1000},
@@ -795,13 +759,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
       name = "xattr-#{System.unique_integer([:positive])}.txt"
       path = "/" <> name
 
-      {:ok, _} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.Core.WriteOperation, :write_file_at, [
-          volume_id,
-          path,
-          0,
-          "x"
-        ])
+      write_fixture!(cluster, volume_id, path, "x")
 
       send(handler, {:fuse_op, 1, {"lookup", %{"parent" => 1, "name" => name}}})
       assert_receive {:fuse_op_complete, 1, {"lookup_ok", _}}, @op_timeout
@@ -986,13 +944,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
       name = "flock-#{System.unique_integer([:positive])}.txt"
       path = "/" <> name
 
-      {:ok, _} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.Core.WriteOperation, :write_file_at, [
-          volume_id,
-          path,
-          0,
-          "x"
-        ])
+      write_fixture!(cluster, volume_id, path, "x")
 
       send(handler, {:fuse_op, 1, {"lookup", %{"parent" => 1, "name" => name}}})
       assert_receive {:fuse_op_complete, 1, {"lookup_ok", _}}, @op_timeout
@@ -1211,13 +1163,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
       name = "fcntl-#{System.unique_integer([:positive])}.txt"
       path = "/" <> name
 
-      {:ok, _} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.Core.WriteOperation, :write_file_at, [
-          volume_id,
-          path,
-          0,
-          "x"
-        ])
+      write_fixture!(cluster, volume_id, path, "x")
 
       send(handler, {:fuse_op, 1, {"lookup", %{"parent" => 1, "name" => name}}})
       assert_receive {:fuse_op_complete, 1, {"lookup_ok", _}}, @op_timeout
@@ -1552,4 +1498,67 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
                      @op_timeout
     end
   end
+
+  # A fixture write goes through Ra, and a round trip that misses the 500ms
+  # write deadline is reported as failed even when Ra commits it moments
+  # later — retryable by design, and on a loaded runner it happens. A hard
+  # `{:ok, _} =` on that turned a documented transient into a `MatchError`
+  # in whichever test drew the fixture, which is how the `xattr operations`
+  # setup failed on a diff that changed no Elixir at all.
+  #
+  # Only the transient outcomes are retried: anything else is a real failure
+  # and should be reported as itself, immediately.
+  defp write_fixture!(cluster, volume_id, path, contents) do
+    fixture!(cluster, "write #{path}", NeonFS.Core.WriteOperation, :write_file_at, [
+      volume_id,
+      path,
+      0,
+      contents
+    ])
+  end
+
+  defp mkdir_fixture!(cluster, volume_id, path) do
+    fixture!(cluster, "mkdir #{path}", NeonFS.Core.FileIndex, :mkdir, [volume_id, path])
+  end
+
+  defp fixture!(cluster, what, module, function, args) do
+    deadline_at = System.monotonic_time(:millisecond) + @fixture_timeout
+    do_fixture!(cluster, what, module, function, args, deadline_at, 25)
+  end
+
+  # The backoff is a retry interval, not a synchronisation sleep: the write
+  # being retried already exceeded its own deadline, so there is no event to
+  # wait on and spinning would only add load to what is already slow. Same
+  # shape as `NeonFS.TestCase.register_service!/1`.
+  defp do_fixture!(cluster, what, module, function, args, deadline_at, interval) do
+    case PeerCluster.rpc(cluster, :node1, module, function, args) do
+      {:ok, result} ->
+        result
+
+      {:error, reason} = error ->
+        if transient?(reason) and System.monotonic_time(:millisecond) < deadline_at do
+          Process.sleep(interval)
+
+          do_fixture!(
+            cluster,
+            what,
+            module,
+            function,
+            args,
+            deadline_at,
+            min(interval * 2, 250)
+          )
+        else
+          flunk("fixture #{what} failed: #{inspect(error)}")
+        end
+
+      other ->
+        flunk("fixture #{what} answered #{inspect(other)}")
+    end
+  end
+
+  defp transient?(%NeonFS.Error.Unavailable{}), do: true
+  defp transient?(:timeout), do: true
+  defp transient?({:timeout, _}), do: true
+  defp transient?(_reason), do: false
 end
