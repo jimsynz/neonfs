@@ -115,47 +115,22 @@ mapfile -t built_debs < <(find "$WORKDIR" -maxdepth 1 -name "*${build_version}*.
 log "installing ${#built_debs[@]} packages from the build"
 DEBIAN_FRONTEND=noninteractive apt-get install -y "${built_debs[@]}"
 
-# Registering the module with `--with-shared-modules` puts `neonfs.so` in the
-# `samba` package's own file list as well as in `samba-vfs-neonfs`, so the two
-# co-built packages claim the same path and dpkg refuses the second. That
-# never bites the release path, where the module is installed against the
-# archive's samba, which has no such file.
-#
-# Overwriting is only safe because both copies come from this one build, so
-# assert that rather than assume it: identical bytes, then force.
+# `neonfs.so` must arrive only in `samba-vfs-neonfs`. It used to ship in the
+# co-built `samba` package too, because `debian/samba.install` claims
+# `samba/vfs/*.so` wholesale, and the two then could not be installed
+# together; the build now removes it from the samba staging tree the way
+# Debian does for its own split-out modules. Assert that rather than trust
+# it — a regression here is invisible until an install fails.
 module_path="$(dpkg-deb -c "$DEB" | awk '$NF ~ /\/neonfs\.so$/ {print $NF}' | sed 's|^\.||')"
 [ -n "$module_path" ] || die "the module deb contains no neonfs.so"
 
-extract_dir="$(mktemp -d)"
-dpkg-deb -x "$DEB" "${extract_dir}/module"
-
-# Compare build IDs, not bytes: `dh_strip` splits debug symbols per binary
-# package, so one build's two copies of the same object differ on disk while
-# still being the same compilation. The build ID survives stripping and is
-# what actually identifies it.
-build_id() {
-  readelf -n "$1" 2>/dev/null | sed -nE 's/.*Build ID: ([0-9a-f]+).*/\1/p' | head -1
-}
-
-install_opts=()
 if [ -e "${module_path}" ]; then
-  installed_id="$(build_id "${module_path}")"
-  package_id="$(build_id "${extract_dir}/module${module_path}")"
-
-  [ -n "$installed_id" ] && [ -n "$package_id" ] ||
-    die "cannot read a build ID from ${module_path} — refusing to overwrite blind"
-
-  [ "$installed_id" = "$package_id" ] ||
-    die "${module_path} is already installed with build ID ${installed_id}, but $(basename "$DEB") carries ${package_id} — these are not from the same build"
-
-  log "the co-built samba ships the same module (build ID ${package_id}); overwriting it"
-  install_opts+=(-o Dpkg::Options::=--force-overwrite)
+  die "${module_path} is already installed, so a package other than samba-vfs-neonfs is shipping it: $(dpkg-query -S "${module_path}" 2>/dev/null || echo "owner unknown")"
 fi
-rm -rf "$extract_dir"
 
 # Not `dpkg -i`: apt resolves the module's `Depends: samba (= …)` and refuses
 # rather than leaving a half-configured package behind.
-DEBIAN_FRONTEND=noninteractive apt-get install -y "${install_opts[@]}" "$DEB"
+DEBIAN_FRONTEND=noninteractive apt-get install -y "$DEB"
 
 installed_samba="$(dpkg-query -W -f='${Version}' samba)"
 [ "$installed_samba" = "$module_requires" ] ||

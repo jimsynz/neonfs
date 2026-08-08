@@ -180,6 +180,37 @@ s = s.replace(needle, needle + ",vfs_neonfs", 1)
 open(rules, "w").write(s)
 PY
 
+# --- keep the module out of the samba package (idempotent) ---
+#
+# `debian/samba.install` claims `samba/vfs/*.so` wholesale, so without this
+# `neonfs.so` ships in both `samba` and `samba-vfs-neonfs` and the two cannot
+# be installed together. Debian solves it for its own split-out modules by
+# deleting them from the samba staging tree after dh_install — join that list
+# rather than inventing a mechanism.
+python3 - "${SRC}/debian/rules" <<'RULES'
+import sys
+
+rules = sys.argv[1]
+s = open(rules).read()
+
+# Drop any line this script added to a previously cached tree.
+s = "".join(l for l in s.splitlines(keepends=True) if "samba/vfs/neonfs.so" not in l)
+
+needle = "execute_after_dh_install-arch:"
+i = s.find(needle)
+if i == -1:
+    raise SystemExit("execute_after_dh_install-arch not found in debian/rules")
+
+marker = "rm -f \\\n"
+j = s.find(marker, i)
+if j == -1:
+    raise SystemExit("no `rm -f` module removal after execute_after_dh_install-arch")
+
+j += len(marker)
+line = "\t    debian/samba/usr/lib/${DEB_HOST_MULTIARCH}/samba/vfs/neonfs.so \\\n"
+open(rules, "w").write(s[:j] + line + s[j:])
+RULES
+
 # --- new binary package (mirrors samba-vfs-ceph) ---
 if ! grep -q '^Package: samba-vfs-neonfs' "${SRC}/debian/control"; then
 cat >> "${SRC}/debian/control" <<'CTL'
