@@ -39,6 +39,23 @@ COMPRESSION="${COMPRESSION:-zstd}"
 ENCRYPTION="${ENCRYPTION:-none}"
 INITIAL_TIER="${INITIAL_TIER:-}"
 
+# --- docker-storage scenario ----------------------------------------------
+# Image blobs live in NeonFS via the containerd content proxy; unpacked layers
+# and container rootfs stay on local disk. Putting docker's whole `data-root`
+# on a FUSE mount was abandoned: dockerd's boltdb volume store needs
+# `MAP_SHARED` mmap, which the FUSE mount refuses because it sets
+# `FOPEN_DIRECT_IO` for cross-interface coherence.
+CONTAINERD_SOCK="${CONTAINERD_SOCK:-/run/neonfs/containerd.sock}"
+DOCKER_SOCK="${DOCKER_SOCK:-/run/neonfs/docker.sock}"
+# The volume the containerd content plugin stores blobs in — matches
+# :neonfs_containerd, :volume, whose default is "containerd".
+CONTAINERD_VOL="${CONTAINERD_VOL:-containerd}"
+DOCKER_STORAGE_VOL="${DOCKER_STORAGE_VOL:-rig_docker_shared}"
+# Pulled through the proxy, so it must be small and multi-layer-free enough to
+# stay quick, but a *real* image — the point is exercising manifest, config and
+# layer blobs, which a synthetic blob ingest does not.
+DOCKER_STORAGE_IMAGE="${DOCKER_STORAGE_IMAGE:-docker.io/library/busybox:latest}"
+
 VERSION="$(grep -m1 '@version "' "${REPO_ROOT}/neonfs_omnibus/mix.exs" | sed -E 's/.*"([^"]+)".*/\1/')"
 
 # --- logging ---------------------------------------------------------------
@@ -474,6 +491,188 @@ wait_init_restart() {
     sleep 1
   done
   wait_daemon "$i"
+}
+
+# --- docker-storage scenario -----------------------------------------------
+
+# Docker image/layer storage on NeonFS, in the shape that actually works:
+# content-addressed blobs through the containerd content proxy, unpacked
+# layers and rootfs on local disk, plus a NeonFS docker volume shared across
+# nodes. Needs NODES>=2 — the shared-volume half is about cross-node
+# visibility, which a single node cannot demonstrate.
+docker_storage_scenario() {
+  local nodes; nodes="$(discovered_nodes | wc -l)"
+  [ "${nodes}" -ge 2 ] \
+    || die "docker-storage needs a NODES>=2 cluster (found ${nodes}); try: NODES=2 ./neonfs-rig up"
+
+  docker_image_storage_step
+  docker_shared_volume_step
+
+  log "docker-storage scenario passed"
+}
+
+# Pull and run a real image through a throwaway containerd whose content store
+# is the NeonFS proxy, then prove the blobs are in the volume rather than on
+# local disk.
+#
+# The containerd config mirrors `acceptance.sh`'s `s_containerd_content`:
+# `io.containerd.content.v1.content` disabled so the proxy is the *only*
+# content store, and the CRI plugin disabled because we drive it with `ctr`.
+# It differs in keeping the default overlayfs snapshotter — layers unpack
+# locally, which is the whole point of this shape.
+docker_image_storage_step() {
+  log "image blobs through the containerd content proxy"
+
+  node_ssh 1 "command -v containerd >/dev/null 2>&1 && command -v ctr >/dev/null 2>&1" \
+    || die "containerd/ctr not installed on node 1"
+  node_ssh 1 "sudo test -S ${CONTAINERD_SOCK}" \
+    || die "containerd proxy socket ${CONTAINERD_SOCK} absent — the omnibus content plugin is not running"
+
+  node_cli 1 "volume show ${CONTAINERD_VOL}" >/dev/null 2>&1 \
+    || node_cli 1 "volume create ${CONTAINERD_VOL} --replicas 1" >/dev/null \
+    || die "could not create the ${CONTAINERD_VOL} content-store volume"
+
+  local before after
+  before="$(docker_storage_chunk_count)"
+
+  node_ssh 1 "sudo bash -s ${CONTAINERD_SOCK} ${DOCKER_STORAGE_IMAGE}" <<'REMOTE' 2>&1 | sed 's/^/  /' >&2
+set -e
+PROXY_SOCK="$1"; IMAGE="$2"
+TMP="$(mktemp -d /tmp/neonfs-ctrd.XXXXXX)"
+trap 'kill "${CTRD_PID:-0}" 2>/dev/null || true; rm -rf "${TMP}"' EXIT
+mkdir -p "${TMP}/root" "${TMP}/state"
+GRPC="${TMP}/containerd.sock"
+
+# No `io.containerd.snapshotter.v1.overlayfs` in disabled_plugins: layers must
+# unpack to local disk. Only the content store is remote.
+cat > "${TMP}/config.toml" <<CFG
+version = 2
+root = "${TMP}/root"
+state = "${TMP}/state"
+disabled_plugins = ["io.containerd.grpc.v1.cri", "io.containerd.content.v1.content"]
+imports = []
+
+[grpc]
+address = "${GRPC}"
+
+[ttrpc]
+address = "${GRPC}.ttrpc"
+
+[proxy_plugins]
+  [proxy_plugins.neonfs]
+  type = "content"
+  address = "${PROXY_SOCK}"
+CFG
+
+containerd --config "${TMP}/config.toml" --log-level info > "${TMP}/containerd.log" 2>&1 &
+CTRD_PID=$!
+for _ in $(seq 1 50); do [ -S "${GRPC}" ] && break; sleep 0.2; done
+[ -S "${GRPC}" ] || { echo "containerd grpc socket never came up"; tail -20 "${TMP}/containerd.log"; exit 1; }
+
+CTR="ctr --address ${GRPC} --namespace rig"
+
+${CTR} image pull "${IMAGE}" \
+  || { echo "ctr image pull failed"; tail -40 "${TMP}/containerd.log"; exit 1; }
+
+# The manifest, config and layer blobs all had to travel through the proxy to
+# get here, so a populated content ls is the proxy having served the pull.
+BLOBS="$(${CTR} content ls -q | wc -l)"
+[ "${BLOBS}" -gt 0 ] || { echo "content store empty after pulling ${IMAGE}"; exit 1; }
+echo "content store holds ${BLOBS} blob(s) after the pull"
+
+MARKER="neonfs-rig-container-ran"
+OUT="$(${CTR} run --rm --snapshotter overlayfs "${IMAGE}" rig_probe echo "${MARKER}" 2>&1)" \
+  || { echo "ctr run failed: ${OUT}"; tail -40 "${TMP}/containerd.log"; exit 1; }
+echo "${OUT}" | grep -q "${MARKER}" \
+  || { echo "container ran but did not print its marker: ${OUT}"; exit 1; }
+echo "container ran from locally-unpacked layers"
+REMOTE
+
+  # The blobs are content-addressed files in the volume, so the volume's own
+  # accounting is the check that they are really in NeonFS and not merely
+  # cached by containerd — `ctr content ls` alone would pass against a store
+  # that never persisted anything.
+  after="$(docker_storage_chunk_count)"
+  log "content-store volume chunks: ${before} → ${after}"
+  [ "${after}" -gt "${before}" ] \
+    || die "pulling ${DOCKER_STORAGE_IMAGE} added no chunks to ${CONTAINERD_VOL} — blobs did not reach NeonFS"
+
+  log "OK: image blobs landed in ${CONTAINERD_VOL} and the container ran"
+}
+
+# Chunk count for the content-store volume, or 0 before it exists.
+docker_storage_chunk_count() {
+  node_cli 1 "volume show ${CONTAINERD_VOL}" 2>/dev/null \
+    | grep -iE 'chunks' | grep -oE '[0-9]+' | head -1 || true
+}
+
+# A NeonFS docker volume attached on both nodes: a write through node 1's
+# container must be visible to a container on node 2. This is the half that
+# needs the multi-node cluster.
+docker_shared_volume_step() {
+  log "shared NeonFS docker volume across nodes"
+
+  local i
+  for i in 1 2; do
+    node_ssh "$i" "command -v docker >/dev/null 2>&1" \
+      || die "docker not installed on node ${i}"
+    node_ssh "$i" "sudo systemctl is-active --quiet docker || sudo systemctl start docker"
+    node_ssh "$i" "test -f /etc/docker/plugins/neonfs.spec" \
+      || die "/etc/docker/plugins/neonfs.spec missing on node ${i} — docker cannot discover the driver"
+    node_ssh "$i" "sudo test -S ${DOCKER_SOCK}" \
+      || die "neonfs docker plugin socket ${DOCKER_SOCK} absent on node ${i}"
+    node_ssh "$i" "sudo docker pull busybox:latest >/dev/null 2>&1" \
+      || die "could not pull busybox on node ${i}"
+  done
+
+  node_ssh 1 "sudo docker volume rm ${DOCKER_STORAGE_VOL} >/dev/null 2>&1 || true
+    sudo docker volume create -d neonfs ${DOCKER_STORAGE_VOL}" 2>&1 | sed 's/^/  /' >&2
+  node_ssh 1 "sudo docker volume ls --format '{{.Driver}} {{.Name}}' | grep -qx 'neonfs ${DOCKER_STORAGE_VOL}'" \
+    || die "docker volume create -d neonfs failed on node 1"
+
+  local marker="shared-${RANDOM}"
+  node_ssh 1 "sudo docker run --rm -v ${DOCKER_STORAGE_VOL}:/data busybox \
+    sh -c 'echo ${marker} > /data/shared.txt && sync'" 2>&1 | sed 's/^/  /' >&2 \
+    || die "writing to the shared volume from node 1 failed"
+
+  docker_volume_read_expect 2 "${marker}"
+
+  # And back the other way, so the volume is not merely readable but writable
+  # from either side.
+  local reply="reply-${RANDOM}"
+  node_ssh 2 "sudo docker run --rm -v ${DOCKER_STORAGE_VOL}:/data busybox \
+    sh -c 'echo ${reply} > /data/reply.txt && sync'" 2>&1 | sed 's/^/  /' >&2 \
+    || die "writing to the shared volume from node 2 failed"
+
+  docker_volume_read_expect 1 "${reply}" reply.txt
+
+  log "OK: shared volume ${DOCKER_STORAGE_VOL} carries mutations both ways"
+}
+
+# Poll a container on node <i> until it reads <expected> from the shared
+# volume. Polls rather than reads once: the write on the other node commits
+# through quorum, and the read side is a fresh mount each time.
+docker_volume_read_expect() {
+  local i="$1" expected="$2" file="${3:-shared.txt}"
+  local deadline=$(( SECONDS + 60 )) got=""
+
+  while [ "${SECONDS}" -lt "${deadline}" ]; do
+    got="$(node_ssh "$i" "sudo docker run --rm -v ${DOCKER_STORAGE_VOL}:/data busybox \
+      cat /data/${file} 2>/dev/null" 2>/dev/null | tr -d '\r\n')"
+    [ "${got}" = "${expected}" ] && { log "OK: node ${i} sees ${file} = ${expected}"; return 0; }
+    sleep 3
+  done
+
+  die "node ${i} never saw ${file} = '${expected}' (last read: '${got}')"
+}
+
+docker_storage_cleanup() {
+  log "cleaning up docker-storage scenario state"
+  local i
+  for i in 1 2; do
+    node_ssh "$i" "command -v docker >/dev/null 2>&1 && \
+      sudo docker volume rm ${DOCKER_STORAGE_VOL} >/dev/null 2>&1" >/dev/null 2>&1 || true
+  done
 }
 
 # --- teardown --------------------------------------------------------------

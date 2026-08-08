@@ -21,13 +21,11 @@ CIFS_READY=0
 S3_HOST="127.0.0.1:8080"
 DAV_BASE="http://127.0.0.1:8081"
 
-# Container runtime integrations: the omnibus daemon owns these Unix sockets.
-DOCKER_SOCK="${DOCKER_SOCK:-/run/neonfs/docker.sock}"
-CONTAINERD_SOCK="${CONTAINERD_SOCK:-/run/neonfs/containerd.sock}"
+# Container runtime integrations. `DOCKER_SOCK`, `CONTAINERD_SOCK` and
+# `CONTAINERD_VOL` come from lib/rig.sh, which the docker-storage scenario also
+# needs and which is always sourced before this file. Defining them in both
+# places is how two copies of one default drift apart.
 DOCKER_VOL="${DOCKER_VOL:-accept_docker}"
-# Volume the containerd content-store plugin stores blobs in
-# (:neonfs_containerd, :volume — default "containerd").
-CONTAINERD_VOL="${CONTAINERD_VOL:-containerd}"
 
 # CIFS/SMB: the omnibus daemon ships the Samba VFS module (neonfs.so) and runs
 # the CIFS bridge in-process, exposing the ETF socket below. smbd and smbclient
