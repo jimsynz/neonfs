@@ -215,9 +215,15 @@ smbd --foreground --no-process-group --debug-stdout --configfile="$conf" \
   >"${LOG_DIR}/smbd.stdout" 2>&1 &
 smbd_pid=$!
 
+# Stopping the daemon has to be explicit, and has to leave the script's exit
+# status alone: a trap whose last command is `wait` on a process just killed
+# hands the shell that process's 143, so a fully passing run reports SIGTERM.
 cleanup() {
+  [ -n "${smbd_pid:-}" ] || return 0
   kill "$smbd_pid" 2>/dev/null || true
   wait "$smbd_pid" 2>/dev/null || true
+  smbd_pid=""
+  return 0
 }
 trap cleanup EXIT
 
@@ -253,4 +259,7 @@ grep -rqi "vfs_neonfs\|neonfs" "${LOG_DIR}/smbd.stdout" ||
   log "note: the daemon log names no neonfs activity; the tree connect may not have reached the module"
 
 log "smbd loaded the module without complaint"
+
+cleanup
 log "sidecar verified: samba ${installed_samba}, module from $(basename "$DEB")"
+exit 0
