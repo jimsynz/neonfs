@@ -45,7 +45,7 @@ jobs:
 
   csi_tooling:
     runs-on: amd64
-    timeout-minutes: 60
+    timeout-minutes: 90
     container:
       image: harton.dev/james/workflows/ci-base:latest
       # The cluster's node is a container started by the daemon this job
@@ -91,9 +91,12 @@ jobs:
         env:
           DOCKER_HOST: unix:///var/run/docker.sock
         run: |
+          # Unlike the package job's dind — which only has to run one
+          # `alpine` container and so switches networking off — a Kubernetes
+          # node needs the bridge, iptables and masquerading. Without them
+          # the k3s server starts and never becomes ready.
           dockerd --host=unix:///var/run/docker.sock \
             --storage-driver=vfs \
-            --iptables=false --ip-masq=false --bridge=none \
             >/tmp/dockerd.log 2>&1 &
           # `/_ping` over the socket rather than `docker info`, which
           # inherits ambient config and can hang for its full API timeout.
@@ -119,7 +122,16 @@ jobs:
         env:
           DOCKER_HOST: unix:///var/run/docker.sock
         run: |
-          k3d cluster create neonfs-e2e --wait --timeout 5m
+          # Traefik and the metrics server are startup work this job has no
+          # use for — it needs an API server that admits the chart.
+          k3d cluster create neonfs-e2e --wait --timeout 10m \
+            --k3s-arg "--disable=traefik@server:0" \
+            --k3s-arg "--disable=metrics-server@server:0" ||
+            {
+              echo "k3s server log:"
+              docker logs k3d-neonfs-e2e-server-0 2>&1 | tail -60
+              exit 1
+            }
           kubectl cluster-info
           kubectl get nodes -o wide
 
