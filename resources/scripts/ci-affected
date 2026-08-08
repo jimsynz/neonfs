@@ -104,6 +104,7 @@ classify() {
         integration
       ;;
 
+    neonfs_block/*) mark neonfs_block ;;
     neonfs_fuse/*) mark neonfs_fuse neonfs_docker neonfs_omnibus ;;
     neonfs_docker/*) mark neonfs_docker neonfs_omnibus ;;
     neonfs_nfs/*) mark neonfs_nfs neonfs_omnibus ;;

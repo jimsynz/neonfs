@@ -7,7 +7,7 @@ defmodule NeonFS.Client.ServiceTypeTest do
   describe "all/0" do
     test "returns all service types in alphabetical order" do
       assert ServiceType.all() ==
-               [:cifs, :containerd, :core, :csi, :docker, :fuse, :nfs, :s3, :webdav]
+               [:block, :cifs, :containerd, :core, :csi, :docker, :fuse, :nfs, :s3, :webdav]
     end
   end
 
@@ -17,7 +17,7 @@ defmodule NeonFS.Client.ServiceTypeTest do
     end
 
     test "returns false for non-core types" do
-      for type <- [:fuse, :nfs, :s3, :webdav, :docker, :csi, :cifs, :containerd] do
+      for type <- [:block, :fuse, :nfs, :s3, :webdav, :docker, :csi, :cifs, :containerd] do
         assert ServiceType.core?(type) == false
       end
     end
