@@ -1194,6 +1194,74 @@ defmodule NeonFS.TestSupport.ClusterCase do
     :ok
   end
 
+  @doc """
+  Waits until a restarted cluster can be asserted against again.
+
+  What a node has to have done before a post-restart assertion means
+  anything is one decision, not one per test: it has to be back in the mesh,
+  have a Ra server answering, have a rebuilt quorum ring, and have
+  re-registered its drive. The last one is the easiest to leave out and the
+  most consequential — a read issued while a node's drive is missing is
+  served by the replica that never went down, which passes the assertion
+  while proving nothing about the node under test.
+  """
+  @spec stabilise_after_restart(map()) :: :ok
+  def stabilise_after_restart(cluster) do
+    wait_for_full_mesh(cluster)
+    wait_for_ra_quorum(cluster)
+    rebuild_quorum_rings(cluster)
+    wait_for_drive_registration(cluster)
+  end
+
+  @doc """
+  Waits until every node's Ra server answers, i.e. the cluster has re-formed
+  around a leader.
+
+  Calls `RaSupervisor.get_state/0` by name rather than passing a function:
+  a fun defined in a test module is not loadable on a peer and crashes the
+  Ra leader with `:undef`.
+  """
+  @spec wait_for_ra_quorum(map()) :: :ok
+  def wait_for_ra_quorum(cluster) do
+    for node_info <- cluster.nodes do
+      :ok =
+        wait_until(
+          fn ->
+            match?(
+              {:ok, _state},
+              PeerCluster.rpc(cluster, node_info.name, NeonFS.Core.RaSupervisor, :get_state, [])
+            )
+          end,
+          timeout: 30_000
+        )
+    end
+
+    :ok
+  end
+
+  @doc """
+  Waits until every node has re-registered its own drive, so it can store and
+  serve chunks again.
+  """
+  @spec wait_for_drive_registration(map()) :: :ok
+  def wait_for_drive_registration(cluster) do
+    for node_info <- cluster.nodes do
+      node = PeerCluster.get_node!(cluster, node_info.name).node
+
+      :ok =
+        wait_until(
+          fn ->
+            cluster
+            |> PeerCluster.rpc(node_info.name, NeonFS.Core.DriveRegistry, :list_drives, [])
+            |> Enum.any?(&(&1.node == node))
+          end,
+          timeout: 60_000
+        )
+    end
+
+    :ok
+  end
+
   # ─── Partition helpers ────────────────────────────────────────────
 
   defp group_isolated?(cluster, group_names, forbidden_atoms) do

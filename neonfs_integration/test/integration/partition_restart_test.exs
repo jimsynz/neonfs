@@ -122,38 +122,6 @@ defmodule NeonFS.Integration.PartitionRestartTest do
     cluster
   end
 
-  defp stabilise_after_restart(cluster) do
-    wait_for_full_mesh(cluster)
-    wait_for_ra_quorum(cluster)
-    rebuild_quorum_rings(cluster)
-  end
-
-  defp wait_for_ra_quorum(cluster) do
-    # Use get_state (defined in RaSupervisor, loaded on all peers) instead
-    # of passing an anonymous function — funs defined in the test module
-    # aren't loadable on peer nodes and would crash the Ra leader with :undef.
-    for node_info <- cluster.nodes do
-      :ok =
-        wait_until(
-          fn ->
-            match?(
-              {:ok, _},
-              PeerCluster.rpc(
-                cluster,
-                node_info.name,
-                NeonFS.Core.RaSupervisor,
-                :get_state,
-                []
-              )
-            )
-          end,
-          timeout: 30_000
-        )
-    end
-
-    :ok
-  end
-
   # Anti-entropy is per-volume, dispatched via the
   # `Job.Runners.VolumeAntiEntropy` runner. The old global
   # `AntiEntropy.sync_now` is gone. We pick one node and dispatch

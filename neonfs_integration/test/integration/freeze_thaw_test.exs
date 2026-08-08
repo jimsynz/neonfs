@@ -182,12 +182,6 @@ defmodule NeonFS.Integration.FreezeThawTest do
     end
   end
 
-  defp stabilise_after_restart(cluster) do
-    wait_for_full_mesh(cluster)
-    wait_for_ra_quorum(cluster)
-    rebuild_quorum_rings(cluster)
-  end
-
   # After a full cold restart, wait until every node's read path is back:
   # the volume resolves (metadata) and ChunkIndex is alive (the process
   # anti-entropy writes reconciled locations into). Guards against nudging
@@ -208,23 +202,6 @@ defmodule NeonFS.Integration.FreezeThawTest do
               )
           end,
           timeout: 60_000
-        )
-    end
-
-    :ok
-  end
-
-  defp wait_for_ra_quorum(cluster) do
-    for node_info <- cluster.nodes do
-      :ok =
-        wait_until(
-          fn ->
-            match?(
-              {:ok, _},
-              PeerCluster.rpc(cluster, node_info.name, NeonFS.Core.RaSupervisor, :get_state, [])
-            )
-          end,
-          timeout: 30_000
         )
     end
 
