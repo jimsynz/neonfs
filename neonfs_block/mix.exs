@@ -59,6 +59,7 @@ defmodule NeonFS.Block.MixProject do
   defp deps do
     [
       {:neonfs_client, path: "../neonfs_client"},
+      {:logger_json, "~> 7.0"},
       {:thousand_island, "~> 1.0"},
       {:telemetry, "~> 1.2"},
 

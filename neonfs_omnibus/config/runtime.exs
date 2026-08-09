@@ -144,4 +144,16 @@ if config_env() == :prod do
     core_node: core_node,
     node_name: node_name,
     socket_path: cifs_socket
+
+  # Block (NBD) configuration. Loopback by default like every other
+  # interface: NBD has no authentication of its own, so anything that reaches
+  # the port can attach any export this node resolves.
+  block_bind = System.get_env("NEONFS_BLOCK_BIND", "127.0.0.1")
+  block_port = String.to_integer(System.get_env("NEONFS_BLOCK_PORT", "10809"))
+
+  config :neonfs_block,
+    bind: block_bind,
+    core_node: core_node,
+    node_name: node_name,
+    port: block_port
 end

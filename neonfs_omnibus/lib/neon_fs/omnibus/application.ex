@@ -30,7 +30,9 @@ defmodule NeonFS.Omnibus.Application do
          {:ok, _} <- Application.ensure_all_started(:neonfs_containerd),
          :ok <- Logger.info("NeonFS containerd started"),
          {:ok, _} <- Application.ensure_all_started(:neonfs_cifs),
-         :ok <- Logger.info("NeonFS CIFS started") do
+         :ok <- Logger.info("NeonFS CIFS started"),
+         {:ok, _} <- Application.ensure_all_started(:neonfs_block),
+         :ok <- Logger.info("NeonFS block started") do
       NeonFS.Systemd.notify_ready()
       {:ok, pid}
     end

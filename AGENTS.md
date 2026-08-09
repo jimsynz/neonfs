@@ -72,6 +72,7 @@ git -c commit.gpgsign=false commit -m "commit message"
 | `neonfs_docker/` | Docker/Podman VolumeDriver plugin (HTTP over Unix socket, FUSE-backed mounts). |
 | `neonfs_containerd/` | containerd content-store gRPC plugin (Unix socket). |
 | `neonfs_csi/` | Kubernetes CSI driver (gRPC over Unix socket; Helm chart in `deploy/charts/neonfs-csi/`). |
+| `neonfs_block/` | Block device target — NBD server (`Protocol` codec, `Listener`, `ConnectionHandler`, `DeviceRegistry`) over `NeonFS.Core.BlockBacking`. |
 | `neonfs_cifs/` | Samba VFS module backend (ETF over Unix socket) — in progress. `vfs_neonfs.so` C shim + Elixir bridge built and CI-tested (#383, #384); packaging (#385) and end-to-end `smbd` test (#386) outstanding. |
 | `neonfs_iam/` | IAM Ash domain — scaffold, resources land via #288/#290/#291/#292. |
 | `neonfs_omnibus/` | Single release bundling core + all shipped interfaces. |
@@ -349,10 +350,12 @@ Before spending a full suite re-run on a job that looks stuck, check `fj-run-job
 
 ## Container Building
 
-Build containers for local testing (single-arch, loaded locally). Targets live in `containers/bake.hcl` (`base`, `core`, `fuse`, `nfs`, `s3`, `webdav`, `docker`, `csi`, `containerd`, `cifs`, `omnibus`, `cli`):
+Build containers for local testing (single-arch, loaded locally). Targets live in `containers/bake.hcl` (`base`, `core`, `fuse`, `nfs`, `s3`, `webdav`, `docker`, `csi`, `containerd`, `cifs`, `block`, `omnibus`, `cli`):
 ```bash
-PLATFORMS='linux/amd64' docker buildx bake -f containers/bake.hcl --load core fuse nfs cli
+PLATFORMS='linux/amd64' containers/bake.sh --load core fuse nfs cli
 ```
+
+Go through `bake.sh` rather than calling `docker buildx bake` directly: every target descends from `base`, whose image reference is built from `ELIXIR_VERSION`, `ERLANG_VERSION` and `RUST_VERSION`, and only the wrapper reads those out of `.tool-versions`. Without them the build fails parsing a stage name with the versions missing, which reads as a malformed Containerfile rather than a missing variable.
 
 The `--load` flag is required to load images into the local Docker daemon. Without it, images are only pushed to the registry. Multi-platform builds don't support `--load`, so override PLATFORMS for local testing.
 
@@ -391,8 +394,9 @@ Interface listeners bind **`127.0.0.1` (loopback)** by default — private-by-de
 | WebDAV    | `:neonfs_webdav` `:webdav_bind` / `:webdav_port` | `127.0.0.1` / `8081` | plain HTTP |
 | NFSv3     | `:neonfs_nfs` `:bind_address` / `:port`        | `127.0.0.1` / `2049` | TCP        |
 | NLM       | `:neonfs_nfs` `:nlm_bind` / `:nlm_port`        | `127.0.0.1` / `4045` | TCP        |
+| Block/NBD | `:neonfs_block` `:bind` / `:port`              | `127.0.0.1` / `10809` | TCP       |
 
-Override the bind env (`NEONFS_S3_BIND`, `NEONFS_WEBDAV_BIND`, `NEONFS_NFS_BIND`, `NEONFS_NLM_BIND`) to `0.0.0.0` (or a specific address) for multi-host access. The shipped **container images set `0.0.0.0`** so published images serve externally out of the box (`containers/Containerfile.{s3,webdav,nfs,omnibus}`); the systemd package ships commented loopback defaults (`packaging/systemd/neonfs.conf`). When widening: front the HTTP interfaces (S3, WebDAV) with a TLS-terminating reverse proxy or confine them to a trusted network, and firewall the NFS/NLM ports. (Metrics endpoints `:*_metrics_bind` still default to `0.0.0.0` — observability scrape targets, gated by the metrics-enabled flag.)
+Override the bind env (`NEONFS_S3_BIND`, `NEONFS_WEBDAV_BIND`, `NEONFS_NFS_BIND`, `NEONFS_NLM_BIND`, `NEONFS_BLOCK_BIND`) to `0.0.0.0` (or a specific address) for multi-host access. The shipped **container images set `0.0.0.0`** so published images serve externally out of the box (`containers/Containerfile.{s3,webdav,nfs,omnibus}`); the systemd package ships commented loopback defaults (`packaging/systemd/neonfs.conf`). NBD deserves particular care: it has no authentication of its own, so anything that can reach the port can attach any export the node resolves — widening `NEONFS_BLOCK_BIND` means confining the port to a trusted network. When widening: front the HTTP interfaces (S3, WebDAV) with a TLS-terminating reverse proxy or confine them to a trusted network, and firewall the NFS/NLM ports. (Metrics endpoints `:*_metrics_bind` still default to `0.0.0.0` — observability scrape targets, gated by the metrics-enabled flag.)
 
 ### Service Discovery
 
