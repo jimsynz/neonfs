@@ -231,16 +231,35 @@ fi
 echo 'usr/lib/${DEB_HOST_MULTIARCH}/samba/vfs/neonfs.so' > "${SRC}/debian/samba-vfs-neonfs.install"
 
 # --- build ---
+#
+# Build the whole Samba source package without debug info. Debian's default
+# `-g -O2` puts DWARF in every object of a 6600-step build and then has
+# `dh_strip` copy it back out into a `-dbgsym` deb per binary package, and
+# nothing here consumes any of it — the module ships stripped and the dbgsym
+# companions are discarded. Dropping it halves the peak footprint, measured
+# on a cold amd64 build: 1.6G of tree becomes 828M, `bin/default` 911M becomes
+# 365M, and 27 dbgsym debs stop being built at all. `-g0` wins over the
+# earlier `-g` from dpkg-buildflags; `noautodbgsym` handles dh_strip.
+export DEB_BUILD_OPTIONS="nocheck noautodbgsym"
+export DEB_CFLAGS_APPEND="-g0"
+export DEB_CXXFLAGS_APPEND="-g0"
+
 cd "${SRC}"
 if [ "${fresh}" = 1 ]; then
   log "==> dpkg-buildpackage (clean build — first run)"
-  DEB_BUILD_OPTIONS=nocheck dpkg-buildpackage -b -uc -us
+  dpkg-buildpackage -b -uc -us
 else
   # Cached tree: reconfigure for the current versioned Erlang image, force the
   # module to relink, and skip the clean step so compiled Samba objects remain.
+  #
+  # `debian/files` has to go with them. It is the previous build's manifest,
+  # `-nc` skips the `dh_clean` that would remove it, and this run deletes the
+  # debs it names — so every entry that the run does not regenerate dangles and
+  # `dpkg-genbuildinfo` fails trying to stat it. Nothing regenerates the
+  # `-dbgsym` entries now that `noautodbgsym` is set.
   log "==> dpkg-buildpackage -nc (incremental — cached tree)"
-  rm -f bin/configured.stamp bin/built.stamp
-  DEB_BUILD_OPTIONS=nocheck dpkg-buildpackage -b -nc -uc -us
+  rm -f bin/configured.stamp bin/built.stamp debian/files
+  dpkg-buildpackage -b -nc -uc -us
 fi
 
 # Ship only the module package, not its -dbgsym companion (nothing else in the
