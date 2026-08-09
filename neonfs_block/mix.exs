@@ -36,7 +36,8 @@ defmodule NeonFS.Block.MixProject do
 
   def application do
     [
-      extra_applications: [:logger]
+      extra_applications: [:logger],
+      mod: {NeonFS.Block.Application, []}
     ]
   end
 
@@ -58,6 +59,8 @@ defmodule NeonFS.Block.MixProject do
   defp deps do
     [
       {:neonfs_client, path: "../neonfs_client"},
+      {:thousand_island, "~> 1.0"},
+      {:telemetry, "~> 1.2"},
 
       # dev/test
       {:credo, "~> 1.6", only: [:dev, :test], runtime: false},
