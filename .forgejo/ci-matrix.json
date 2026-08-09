@@ -66,7 +66,7 @@
   },
   {
     "name": "neonfs_omnibus",
-    "cache_paths": "neonfs_client/deps\nneonfs_client/_build\nneonfs_client/native/neonfs_chunker/target\nneonfs_client/priv/native\nneonfs_core/target\nneonfs_core/priv/native\nneonfs_omnibus/deps\nneonfs_omnibus/_build",
-    "lockfiles": "neonfs_omnibus/mix.lock neonfs_core/Cargo.lock neonfs_client/native/neonfs_chunker/Cargo.lock"
+    "cache_paths": "neonfs_client/deps\nneonfs_client/_build\nneonfs_client/native/neonfs_chunker/target\nneonfs_client/priv/native\nneonfs_core/target\nneonfs_core/priv/native\nneonfs_block/deps\nneonfs_block/_build\nneonfs_omnibus/deps\nneonfs_omnibus/_build",
+    "lockfiles": "neonfs_omnibus/mix.lock neonfs_block/mix.lock neonfs_core/Cargo.lock neonfs_client/native/neonfs_chunker/Cargo.lock"
   }
 ]

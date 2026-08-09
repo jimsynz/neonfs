@@ -118,7 +118,7 @@ cargo build --release
 # heavy, root/apt-requiring in-tree Samba build, which callers like the
 # test-rig's `ensure_debs` neither need nor can run unprivileged. The release
 # pipeline builds it via its own path.
-for component in neonfs_core neonfs_fuse neonfs_nfs neonfs_s3 neonfs_webdav neonfs_docker neonfs_containerd neonfs_omnibus ${NEONFS_BUILD_CIFS:+neonfs_cifs}; do
+for component in neonfs_core neonfs_fuse neonfs_nfs neonfs_s3 neonfs_webdav neonfs_docker neonfs_containerd neonfs_block neonfs_omnibus ${NEONFS_BUILD_CIFS:+neonfs_cifs}; do
     echo "==> Building ${component} release..."
     cd "${REPO_ROOT}/${component}"
     MIX_ENV=prod mix deps.get --only prod
@@ -153,7 +153,7 @@ cleanup_generated_configs() {
 }
 trap cleanup_generated_configs EXIT
 
-for config in neonfs-cli neonfs-common neonfs-core neonfs-fuse neonfs-nfs neonfs-s3 neonfs-webdav neonfs-docker neonfs-containerd neonfs-omnibus ${NEONFS_BUILD_CIFS:+neonfs-cifs}; do
+for config in neonfs-cli neonfs-common neonfs-core neonfs-fuse neonfs-nfs neonfs-s3 neonfs-webdav neonfs-docker neonfs-containerd neonfs-block neonfs-omnibus ${NEONFS_BUILD_CIFS:+neonfs-cifs}; do
     echo "    ${config}..."
     envsubst < "${config}.yaml" > ".generated-${config}.yaml"
     nfpm package \

@@ -51,7 +51,8 @@ defmodule NeonFS.Omnibus.MixProject do
           neonfs_webdav: :load,
           neonfs_docker: :load,
           neonfs_containerd: :load,
-          neonfs_cifs: :load
+          neonfs_cifs: :load,
+          neonfs_block: :load
         ]
       ]
     ]
@@ -73,6 +74,7 @@ defmodule NeonFS.Omnibus.MixProject do
       {:neonfs_docker, path: "../neonfs_docker", runtime: false},
       {:neonfs_containerd, path: "../neonfs_containerd", runtime: false},
       {:neonfs_cifs, path: "../neonfs_cifs", runtime: false},
+      {:neonfs_block, path: "../neonfs_block", runtime: false},
 
       # dev/test
       {:credo, "~> 1.6", only: [:dev, :test], runtime: false},

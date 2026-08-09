@@ -1,0 +1,44 @@
+name: neonfs-block
+arch: "${ARCH}"
+platform: linux
+version: "${VERSION}"
+section: net
+priority: optional
+maintainer: "James Harton <james@harton.dev>"
+vendor: "harton.dev"
+homepage: "https://harton.dev/project-neon/neonfs"
+license: "Apache-2.0"
+description: "NeonFS block device (NBD) server daemon"
+
+depends:
+  - neonfs-common (= ${VERSION})
+  - neonfs-cli (= ${VERSION})
+  - libstdc++6
+  - openssl
+  - libssl3t64
+  - libncurses6
+  - ca-certificates
+
+conflicts:
+  - neonfs-omnibus
+
+contents:
+  - src: "${BUILD_DIR}/neonfs_block/_build/prod/rel/neonfs_block/"
+    dst: /usr/lib/neonfs/block/
+    type: tree
+
+  - src: ../systemd/neonfs-block.service
+    dst: /usr/lib/systemd/system/neonfs-block.service
+
+  - src: ../systemd/neonfs-block-daemon
+    dst: /usr/bin/neonfs-block-daemon
+    file_info:
+      mode: 0755
+
+  - src: ../systemd/neonfs-block.conf
+    dst: /etc/neonfs/block.conf
+    type: config|noreplace
+
+scripts:
+  postinstall: ../scripts/post-install.sh
+  preremove: ../scripts/pre-remove.sh
