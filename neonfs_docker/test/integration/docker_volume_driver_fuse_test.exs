@@ -17,7 +17,11 @@ defmodule NeonFS.Docker.RealFuseIntegrationTest do
   @moduletag timeout: 180_000
   @moduletag nodes: 1
   @moduletag cluster_mode: :shared
+  # Needs a real FUSE mount *and* a real docker daemon it can announce a
+  # plugin to, so it carries both gates — tagging only `:fuse` left it running
+  # on hosts that have no daemon, or no root to install the plugin spec.
   @moduletag :fuse
+  @moduletag :docker
 
   alias NeonFS.Client.{Connection, CostFunction, Discovery}
   alias NeonFS.Events.Relay
