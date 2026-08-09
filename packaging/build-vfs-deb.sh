@@ -231,16 +231,29 @@ fi
 echo 'usr/lib/${DEB_HOST_MULTIARCH}/samba/vfs/neonfs.so' > "${SRC}/debian/samba-vfs-neonfs.install"
 
 # --- build ---
+#
+# Build the whole Samba source package without debug info. Debian's default
+# `-g -O2` puts DWARF in every object of a 6600-step build and then has
+# `dh_strip` copy it back out into a `-dbgsym` deb per binary package — and
+# nothing here consumes any of it, since the module ships stripped. On a cold
+# cache that debug info is the difference between a build that fits on the
+# runner and one that dies partway through with `No space left on device`
+# while writing `.debug_str`. `-g0` wins over the earlier `-g` from
+# dpkg-buildflags; `noautodbgsym` stops dh_strip producing the companions.
+export DEB_BUILD_OPTIONS="nocheck noautodbgsym"
+export DEB_CFLAGS_APPEND="-g0"
+export DEB_CXXFLAGS_APPEND="-g0"
+
 cd "${SRC}"
 if [ "${fresh}" = 1 ]; then
   log "==> dpkg-buildpackage (clean build — first run)"
-  DEB_BUILD_OPTIONS=nocheck dpkg-buildpackage -b -uc -us
+  dpkg-buildpackage -b -uc -us
 else
   # Cached tree: reconfigure for the current versioned Erlang image, force the
   # module to relink, and skip the clean step so compiled Samba objects remain.
   log "==> dpkg-buildpackage -nc (incremental — cached tree)"
   rm -f bin/configured.stamp bin/built.stamp
-  DEB_BUILD_OPTIONS=nocheck dpkg-buildpackage -b -nc -uc -us
+  dpkg-buildpackage -b -nc -uc -us
 fi
 
 # Ship only the module package, not its -dbgsym companion (nothing else in the
