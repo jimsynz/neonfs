@@ -57,6 +57,45 @@ defmodule NeonFS.TestSupport.ClusterCaseTest do
         ClusterCase.handle_join_result({:badrpc, :nodedown}, :node3)
       end
     end
+
+    test "still raises once the CA retries are exhausted" do
+      # The retry lives in `join_cluster_idempotent/4`; if every attempt loses
+      # the race the rejection must surface rather than be swallowed.
+      exhausted =
+        {:error,
+         {:join_rejected, {:cert_signing_failed, %{file_path: "/tls/ca.crt", class: :not_found}}}}
+
+      assert_raise RuntimeError, ~r/join_cluster_rpc on node2 failed/, fn ->
+        ClusterCase.handle_join_result(exhausted, :node2)
+      end
+    end
+  end
+
+  describe "ca_not_yet_readable?/1" do
+    test "classifies a join rejected because the CA is not readable yet" do
+      rejection =
+        {:error,
+         {:join_rejected, {:cert_signing_failed, %{file_path: "/tls/ca.crt", class: :not_found}}}}
+
+      assert ClusterCase.ca_not_yet_readable?(rejection)
+    end
+
+    test "does not classify other cert-signing rejections" do
+      # Retrying these turns a clear failure into a slow one.
+      refute ClusterCase.ca_not_yet_readable?(
+               {:error, {:join_rejected, {:cert_signing_failed, :invalid_csr}}}
+             )
+
+      refute ClusterCase.ca_not_yet_readable?(
+               {:error, {:join_rejected, {:cert_signing_failed, %{file_path: "/tls/serial"}}}}
+             )
+    end
+
+    test "does not classify unrelated results" do
+      refute ClusterCase.ca_not_yet_readable?({:ok, %{cluster_name: "test"}})
+      refute ClusterCase.ca_not_yet_readable?({:error, :already_in_cluster})
+      refute ClusterCase.ca_not_yet_readable?({:badrpc, :nodedown})
+    end
   end
 
   describe "raise_incomplete_registration/4" do

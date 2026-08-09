@@ -44,6 +44,8 @@ defmodule NeonFS.TestSupport.ClusterCase do
 
   use ExUnit.CaseTemplate
 
+  require Logger
+
   alias NeonFS.Core.RaSupervisor
   alias NeonFS.TestSupport.PeerCluster
 
@@ -1109,12 +1111,65 @@ defmodule NeonFS.TestSupport.ClusterCase do
     raise "cluster_init on #{node_name} failed: #{inspect(other)}"
   end
 
+  # A join reaching certificate signing before the cluster CA is readable from
+  # `_system` is rejected outright rather than made to wait. `rpc_until_ready/6`
+  # cannot absorb it: that retries `{:badrpc, _}` transport failures, and this
+  # arrives as a successful RPC carrying an application-level rejection. The
+  # window is small but real on a loaded runner, and one join losing the race
+  # takes down a whole `setup_all` — a clustering race then reads as a suite of
+  # broken tests in whichever package happened to be running.
+  @join_ca_attempts 5
+  @join_ca_backoff_ms 250
+  @join_ca_max_backoff_ms 2_000
+
   @doc false
   @spec join_cluster_idempotent(map(), atom(), [term()]) :: :ok
   def join_cluster_idempotent(cluster, node_name, args) do
-    cluster
-    |> PeerCluster.rpc_until_ready(node_name, NeonFS.Cluster.Join, :join_cluster_rpc, args)
-    |> handle_join_result(node_name)
+    join_cluster_idempotent(cluster, node_name, args, @join_ca_attempts)
+  end
+
+  defp join_cluster_idempotent(cluster, node_name, args, attempts_left) do
+    result =
+      PeerCluster.rpc_until_ready(
+        cluster,
+        node_name,
+        NeonFS.Cluster.Join,
+        :join_cluster_rpc,
+        args
+      )
+
+    if ca_not_yet_readable?(result) and attempts_left > 1 do
+      Logger.warning(
+        "join_cluster_rpc on #{node_name} was rejected because the cluster CA is not " <>
+          "readable yet, retrying (#{attempts_left - 1} attempt(s) left)"
+      )
+
+      Process.sleep(join_ca_backoff_ms(attempts_left))
+      join_cluster_idempotent(cluster, node_name, args, attempts_left - 1)
+    else
+      handle_join_result(result, node_name)
+    end
+  end
+
+  @doc false
+  # Matched structurally rather than on `NeonFS.Error.FileNotFound`: the
+  # `neonfs_core` dependency is `runtime: false`, so the struct's module is not
+  # guaranteed to be loaded in a test node that only runs an interface app.
+  #
+  # Deliberately narrow. Any other `:cert_signing_failed` cause — an invalid
+  # CSR, a CA that exists but will not sign — is a real rejection that retrying
+  # only turns into a slower failure with a less useful message.
+  @spec ca_not_yet_readable?(term()) :: boolean()
+  def ca_not_yet_readable?(
+        {:error, {:join_rejected, {:cert_signing_failed, %{file_path: "/tls/ca.crt"}}}}
+      ),
+      do: true
+
+  def ca_not_yet_readable?(_result), do: false
+
+  defp join_ca_backoff_ms(attempts_left) do
+    retries_used = @join_ca_attempts - attempts_left
+    min(@join_ca_backoff_ms * Integer.pow(2, retries_used), @join_ca_max_backoff_ms)
   end
 
   @doc false
