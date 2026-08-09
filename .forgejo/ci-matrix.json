@@ -10,6 +10,11 @@
     "lockfiles": "neonfs_core/mix.lock neonfs_core/Cargo.lock neonfs_client/mix.lock neonfs_client/native/neonfs_chunker/Cargo.lock"
   },
   {
+    "name": "neonfs_block",
+    "cache_paths": "neonfs_client/deps\nneonfs_client/_build\nneonfs_client/native/neonfs_chunker/target\nneonfs_client/priv/native\nneonfs_block/deps\nneonfs_block/_build",
+    "lockfiles": "neonfs_block/mix.lock neonfs_client/native/neonfs_chunker/Cargo.lock"
+  },
+  {
     "name": "neonfs_fuse",
     "apt": "libfuse3-dev fuse3",
     "cache_paths": "neonfs_client/deps\nneonfs_client/_build\nneonfs_client/native/neonfs_chunker/target\nneonfs_client/priv/native\nneonfs_core/target\nneonfs_core/priv/native\nneonfs_fuse/deps\nneonfs_fuse/_build",

@@ -8,9 +8,29 @@ defmodule NeonFS.Client.ServiceType do
   """
 
   @type t ::
-          :core | :fuse | :nfs | :s3 | :webdav | :docker | :csi | :cifs | :containerd
+          :block
+          | :cifs
+          | :containerd
+          | :core
+          | :csi
+          | :docker
+          | :fuse
+          | :nfs
+          | :s3
+          | :webdav
 
-  @service_types [:cifs, :containerd, :core, :csi, :docker, :fuse, :nfs, :s3, :webdav]
+  @service_types [
+    :block,
+    :cifs,
+    :containerd,
+    :core,
+    :csi,
+    :docker,
+    :fuse,
+    :nfs,
+    :s3,
+    :webdav
+  ]
 
   @doc """
   Guard that checks if a value is a valid service type.
