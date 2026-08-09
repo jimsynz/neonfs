@@ -12,6 +12,9 @@ config :git_ops,
   changelog_file: Path.join(repo_root, "CHANGELOG.md"),
   github_handle_lookup?: false,
   repository_url: "https://harton.dev/project-neon/neonfs",
+  # git_ops defaults this to the cwd and runs `git init` on it, which would
+  # create a second, empty repository here rather than reinitialising ours.
+  repository_path: repo_root,
   version_tag_prefix: "v",
   managed_files:
     repo_root
