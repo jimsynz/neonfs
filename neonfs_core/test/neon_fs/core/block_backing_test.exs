@@ -224,6 +224,75 @@ defmodule NeonFS.Core.BlockBackingTest do
       assert data == :binary.copy(<<0>>, 2 * @block)
     end
 
+    # 24 chunks is three of the 1 MiB batches the previous implementation
+    # zeroed in, so a single commit here is the property under test rather
+    # than an artefact of the range fitting one batch.
+    test "a range spanning many chunks costs one metadata commit", %{volume_name: volume_name} do
+      {:ok, big} = BlockBacking.create_device(volume_name, "/big.img", 24 * @chunk)
+      :ok = BlockBacking.write(volume_name, big.file_id, 0, :binary.copy(<<0xEF>>, 24 * @chunk))
+
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [[:neonfs, :write_operation, :stop]])
+
+      assert :ok = BlockBacking.write_zeroes(volume_name, big.file_id, 0, 24 * @chunk)
+
+      assert_receive {[:neonfs, :write_operation, :stop], ^ref, _measurements, _meta}, 5_000
+      refute_receive {[:neonfs, :write_operation, :stop], ^ref, _measurements, _meta}, 200
+
+      :telemetry.detach(ref)
+
+      {:ok, meta} = NeonFS.Core.get_file_meta_by_id(volume_name, big.file_id)
+      assert meta.chunks == List.duplicate(hd(meta.chunks), 24)
+      assert meta.size == 24 * @chunk
+    end
+
+    test "zeroing a range costs no commit when nothing under it changes", %{
+      volume_name: volume_name,
+      device: device
+    } do
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [[:neonfs, :write_operation, :stop]])
+
+      assert :ok = BlockBacking.write_zeroes(volume_name, device.file_id, 0, 4 * @chunk)
+
+      assert_receive {[:neonfs, :write_operation, :stop], ^ref, _measurements, _meta}, 1_000
+
+      :telemetry.detach(ref)
+    end
+
+    test "a partial chunk at each end is read-modify-written, the middle replaced", %{
+      volume_name: volume_name,
+      device: device,
+      zero_hash: zero_hash
+    } do
+      :ok =
+        BlockBacking.write(volume_name, device.file_id, 0, :binary.copy(<<0xEF>>, 4 * @chunk))
+
+      # Straddles chunk 0's tail and chunk 3's head, covering 1 and 2 whole.
+      offset = @chunk - @block
+      length = 2 * @chunk + 2 * @block
+
+      assert :ok = BlockBacking.write_zeroes(volume_name, device.file_id, offset, length)
+
+      {:ok, meta} = NeonFS.Core.get_file_meta_by_id(volume_name, device.file_id)
+      assert length(meta.chunks) == 4
+      assert meta.size == 4 * @chunk
+      assert Enum.slice(meta.chunks, 1, 2) == [zero_hash, zero_hash]
+      refute Enum.at(meta.chunks, 0) == zero_hash
+      refute Enum.at(meta.chunks, 3) == zero_hash
+
+      assert {:ok, zeroed} = BlockBacking.read(volume_name, device.file_id, offset, length)
+      assert zeroed == :binary.copy(<<0>>, length)
+
+      assert {:ok, kept_head} = BlockBacking.read(volume_name, device.file_id, 0, @block)
+      assert kept_head == :binary.copy(<<0xEF>>, @block)
+
+      assert {:ok, kept_tail} =
+               BlockBacking.read(volume_name, device.file_id, offset + length, @block)
+
+      assert kept_tail == :binary.copy(<<0xEF>>, @block)
+    end
+
     test "a sub-chunk discard zero-fills without disturbing its neighbours", %{
       volume_name: volume_name,
       device: device

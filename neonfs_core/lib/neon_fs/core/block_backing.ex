@@ -71,10 +71,6 @@ defmodule NeonFS.Core.BlockBacking do
   # request.
   @max_request_bytes 32 * 1024 * 1024
 
-  # Zeroing a range writes it in batches so neither the working set nor a
-  # single metadata commit scales with the length being zeroed.
-  @zero_batch_bytes 8 * @chunk_bytes
-
   @type device :: %{
           volume: String.t(),
           file_id: binary(),
@@ -236,17 +232,21 @@ defmodule NeonFS.Core.BlockBacking do
   @doc """
   Zero-fills `length` bytes at `offset` — the device's WRITE ZEROES.
 
-  Written in bounded batches, so neither memory nor a single metadata
-  commit scales with `length`. Whole zeroed chunks dedup to one stored
-  blob; see the module doc for why this cannot drop the extent instead.
+  One metadata commit for the whole range, however long: whole covered
+  chunks are replaced by the canonical zero chunk rather than rewritten,
+  and only the partial chunks at either end cost a read-modify-write. A
+  full-device TRIM is therefore one commit, not one per megabyte. Memory
+  stays bounded at a single chunk. See the module doc for why this cannot
+  drop the extent instead.
   """
   @spec write_zeroes(String.t(), binary(), non_neg_integer(), pos_integer()) ::
           :ok | {:error, term()}
   def write_zeroes(volume, file_id, offset, length) do
     with :ok <- validate_alignment(offset, length),
          {:ok, device} <- device_info(volume, file_id),
-         :ok <- validate_range(device, offset, length) do
-      write_zero_batches(volume, file_id, zero_batches(offset, length))
+         :ok <- validate_range(device, offset, length),
+         {:ok, _meta} <- Core.write_zeroes_by_id(volume, file_id, offset, length) do
+      :ok
     end
   end
 
@@ -280,15 +280,6 @@ defmodule NeonFS.Core.BlockBacking do
     )
 
     result
-  end
-
-  defp write_zero_batches(volume, file_id, batches) do
-    Enum.reduce_while(batches, :ok, fn {offset, length}, :ok ->
-      case write(volume, file_id, offset, zeroes(length)) do
-        :ok -> {:cont, :ok}
-        {:error, _reason} = error -> {:halt, error}
-      end
-    end)
   end
 
   defp device_from_meta(volume, meta) do
@@ -367,17 +358,6 @@ defmodule NeonFS.Core.BlockBacking do
       end)
 
     {last - first + 1, chunk_bytes}
-  end
-
-  defp zero_batches(offset, length) do
-    Stream.unfold({offset, length}, fn
-      {_offset, 0} ->
-        nil
-
-      {batch_offset, remaining} ->
-        batch = min(remaining, @zero_batch_bytes)
-        {{batch_offset, batch}, {batch_offset + batch, remaining - batch}}
-    end)
   end
 
   defp zero_stream(size) do
