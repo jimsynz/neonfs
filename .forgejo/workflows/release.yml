@@ -7,8 +7,8 @@ on:
 
 jobs:
   # =========================================================================
-  # Resolve tool versions from .tool-versions so all jobs use the same
-  # workflows CI images (same pattern as .forgejo/workflows/ci.yml).
+  # Resolve tool and release versions once so every artifact uses the same
+  # package version and workflows CI images.
   # =========================================================================
   resolve-versions:
     runs-on: docker
@@ -20,6 +20,7 @@ jobs:
       erlang: ${{ steps.parse.outputs.erlang }}
       rust: ${{ steps.parse.outputs.rust }}
       elixir_rust_image: ${{ steps.parse.outputs.elixir_rust_image }}
+      release_version: ${{ steps.parse.outputs.release_version }}
     steps:
       - uses: actions/checkout@v7
       - id: parse
@@ -27,12 +28,31 @@ jobs:
           ELIXIR=$(awk '/^elixir/ {print $2}' .tool-versions)
           ERLANG=$(awk '/^erlang/ {print $2}' .tool-versions)
           RUST=$(awk '/^rust/ {print $2}' .tool-versions)
+          RELEASE_VERSION=$(awk -F'"' '/@version/ {print $2; exit}' resources/release/mix.exs)
+
+          if [ -z "$RELEASE_VERSION" ]; then
+            echo "could not resolve the release version" >&2
+            exit 1
+          fi
+
+          case "$GITHUB_REF" in
+            refs/tags/v*)
+              REF_VERSION=${GITHUB_REF_NAME#v}
+              if [ "$REF_VERSION" != "$RELEASE_VERSION" ]; then
+                echo "tag version ${REF_VERSION} does not match package version ${RELEASE_VERSION}" >&2
+                exit 1
+              fi
+              ;;
+          esac
+
           echo "elixir=${ELIXIR}" >> "$GITHUB_OUTPUT"
           echo "erlang=${ERLANG}" >> "$GITHUB_OUTPUT"
           echo "rust=${RUST}" >> "$GITHUB_OUTPUT"
           echo "elixir_rust_image=harton.dev/james/workflows/elixir-rust:${ELIXIR}-erlang-${ERLANG}-rust-${RUST}" >> "$GITHUB_OUTPUT"
+          echo "release_version=${RELEASE_VERSION}" >> "$GITHUB_OUTPUT"
 
   containers:
+    needs: resolve-versions
     runs-on: ${{ matrix.arch }}
     timeout-minutes: 120
     strategy:
@@ -73,12 +93,12 @@ jobs:
 
       - name: Build target
         run: |
-          TAG=${GITHUB_REF_NAME#v}-${{ matrix.arch }}
+          TAG=${{ needs.resolve-versions.outputs.release_version }}-${{ matrix.arch }}
           PLATFORMS=linux/${{ matrix.arch }} TAG=$TAG ./containers/bake.sh --pull --load "${{ matrix.target }}"
 
       - name: Push target
         run: |
-          TAG=${GITHUB_REF_NAME#v}-${{ matrix.arch }}
+          TAG=${{ needs.resolve-versions.outputs.release_version }}-${{ matrix.arch }}
           if [ "${{ matrix.target }}" != base ]; then
             docker push "forgejo.dmz/project-neon/neonfs/${{ matrix.target }}:${TAG}"
             docker push "ghcr.io/jimsynz/neonfs/${{ matrix.target }}:${TAG}"
@@ -87,7 +107,7 @@ jobs:
   containers-manifest:
     runs-on: amd64
     timeout-minutes: 60
-    needs: containers
+    needs: [resolve-versions, containers]
     container:
       image: docker:29-dind
       options: --privileged
@@ -116,7 +136,7 @@ jobs:
 
       - name: Create multi-arch manifests
         run: |
-          VERSION=${GITHUB_REF_NAME#v}
+          VERSION=${{ needs.resolve-versions.outputs.release_version }}
           IMAGES="core fuse nfs s3 webdav docker csi containerd cifs block omnibus cli"
 
           for image in $IMAGES; do
@@ -242,7 +262,7 @@ jobs:
 
       - name: Package .deb files
         run: |
-          VERSION=${GITHUB_REF_NAME#v}
+          VERSION=${{ needs.resolve-versions.outputs.release_version }}
           export VERSION ARCH=amd64 BUILD_DIR="$FORGEJO_WORKSPACE"
           mkdir -p dist
 
@@ -361,7 +381,7 @@ jobs:
 
       - name: Package .deb files
         run: |
-          VERSION=${GITHUB_REF_NAME#v}
+          VERSION=${{ needs.resolve-versions.outputs.release_version }}
           export VERSION ARCH=arm64 BUILD_DIR="$FORGEJO_WORKSPACE"
           mkdir -p dist
 
@@ -434,7 +454,7 @@ jobs:
   forgejo-release:
     runs-on: docker
     timeout-minutes: 60
-    needs: [containers-manifest, debs-upload]
+    needs: [resolve-versions, containers-manifest, debs-upload]
     container:
       image: harton.dev/james/workflows/ci-base:latest
 
@@ -455,7 +475,8 @@ jobs:
 
       - name: Extract changelog and create release
         run: |
-          VERSION=${GITHUB_REF_NAME#v}
+          VERSION=${{ needs.resolve-versions.outputs.release_version }}
+          RELEASE_TAG=v${VERSION}
 
           CHANGELOG=$(awk '/^## \['"$VERSION"'\]/{found=1; next} /^## \[/{if(found) exit} found{print}' CHANGELOG.md)
 
@@ -465,8 +486,8 @@ jobs:
             -H "Authorization: token ${{ secrets.FORGEJO_TOKEN }}" \
             -H "Content-Type: application/json" \
             -d "$(jq -n \
-              --arg tag "${{ github.ref_name }}" \
-              --arg name "${{ github.ref_name }}" \
+              --arg tag "$RELEASE_TAG" \
+              --arg name "$RELEASE_TAG" \
               --arg body "$CHANGELOG" \
               '{tag_name: $tag, name: $name, body: $body, draft: false, prerelease: false}'
             )" | jq -r '.id')
