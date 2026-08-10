@@ -405,13 +405,31 @@ jobs:
 
       - name: Upload to Forgejo Debian repository
         run: |
+          response=$(mktemp)
           for deb in dist/*.deb; do
             echo "Uploading $(basename "$deb")..."
-            curl -sf \
+            status=$(curl -sS -o "$response" -w '%{http_code}' \
               -H "Authorization: token ${{ secrets.REGISTRY_TOKEN }}" \
               --upload-file "$deb" \
-              "https://harton.dev/api/packages/project-neon/debian/pool/trixie/main/upload"
+              "https://harton.dev/api/packages/project-neon/debian/pool/trixie/main/upload")
+
+            case "$status" in
+              2??) ;;
+              409)
+                if grep -qx 'package file already exists' "$response"; then
+                  echo "$(basename "$deb") is already published; skipping."
+                else
+                  cat "$response" >&2
+                  exit 1
+                fi
+                ;;
+              *)
+                cat "$response" >&2
+                exit 1
+                ;;
+            esac
           done
+          rm -f "$response"
 
   forgejo-release:
     runs-on: docker
