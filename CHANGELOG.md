@@ -5,6 +5,185 @@ See [Conventional Commits](Https://conventionalcommits.org) for commit guideline
 
 <!-- changelog -->
 
+## [v0.6.0](https://harton.dev/project-neon/neonfs/compare/v0.5.1...v0.6.0) (2026-08-10)
+
+
+
+
+### Features:
+
+* block,packaging: ship the block target â container, omnibus, systemd and CI (#1835) by James Harton
+
+* block: NBD server, export lifecycle and the IO path onto BlockBacking (#1834) by James Harton
+
+* block,client: neonfs_block package with the NBD protocol codec (#1826) by James Harton
+
+* core: file-backed block device backing with forced fixed chunking (#1808) by James Harton
+
+### Bug Fixes:
+
+* docker: gate the docker tests on installing a plugin spec, not just on a daemon (#1836) by James Harton
+
+* test-support: retry a join that races the cluster CA (#1833) by James Harton
+
+* ci: build Samba without the debug info that fills the runner disk (#1828) by James Harton
+
+* ci: put the samba version in the build cache key (#1820) by James Harton
+
+* packaging: ship neonfs.so in samba-vfs-neonfs only (#1819) by James Harton
+
+* fuse: let a fixture write ride out a Ra deadline instead of raising (#1818) by James Harton
+
+* core: count the poll's Ra writes, not every write since the registry booted (#1810) by James Harton
+
+* core: run a chunk-metadata put in the caller, not the index GenServer (#1798) by James Harton
+
+* core: decrement physical_size and chunk_count, and reconcile them (#1797) by James Harton
+
+* core: free an erasure-coded file's chunks on delete (#1790) by James Harton
+
+* core: read the committed record when decrementing a pin (#1789) by James Harton
+
+* core: account an erasure offset write against the volume (#1788) by James Harton
+
+* core: rebuild the region an erasure offset write touches (#1784) by James Harton
+
+* core: pad an offset write by the hole, not the whole offset (#1778) by James Harton
+
+* core,client: read a file's sparse tail as zeros instead of stopping short (#1770) by James Harton
+
+* cifs: resolve attribute ops against directory handles (#1760) by James Harton
+
+* core: persist a directory's POSIX timestamps (#1759) by James Harton
+
+* core: let a directory's POSIX attributes be changed (#1756) by James Harton
+
+* fuse: create and remove directories in the canonical representation (#1755) by James Harton
+
+* fuse: map mkdir's errors instead of collapsing them to EIO (#1743) by James Harton
+
+* core: refuse a mkdir onto a name that is already taken (#1742) by James Harton
+
+* core: refuse a create that would replace an existing dirent (#1739) by James Harton
+
+* core: release a conflict lease in the entry that publishes its write (#1737) by James Harton
+
+* core: isolate post-commit effects so one failure cannot strand a batch (#1730) by James Harton
+
+* test-rig: skip a Samba VFS deb built for a different Samba (#1727) by James Harton
+
+* core: write each chunk replica under the codec its metadata records (#1726) by James Harton
+
+* test-support: assign peer ports without binding, below the ephemeral range (#1717) by James Harton
+
+* ci: match the integration shard count to the runner count (#1715) by James Harton
+
+* cli: let `--system-replicas` express being omitted (#1710) by James Harton
+
+* core: re-submit an ambiguous root-set publication instead of failing it (#1704) by James Harton
+
+* core: survive an unavailable ChunkIndex during tier migration (#1694) by James Harton
+
+* nfs: log the cause behind a `:serverfault` and a COMMIT `NFS3ERR_IO` (#1681) by James Harton
+
+* nfs,s3,webdav,fuse: drop the redundant `:default_handler` formatter (#1678) by James Harton
+
+* core: re-register a core node whose entry a peer deregistered (#1676) by James Harton
+
+* core: retry a core node self-registration until its Ra write commits (#1675) by James Harton
+
+* fuse: build the default handler formatter with `Logger.Formatter.new/1` (#1672) by James Harton
+
+* core: propagate a failed service registration to its caller (#1668) by James Harton
+
+* test-support: gate mixed-role setup on service registrations committing (#1662) by James Harton
+
+* test-support: boot peers over standard I/O, not a TCP control channel (#1660) by James Harton
+
+* core: register a volume's shard set in one command (#1654) by James Harton
+
+* core: restore a snapshot's shard roots atomically (#1650) by James Harton
+
+* core: publish a cross-shard metadata batch atomically (#1648) by James Harton
+
+* test-support: size the peer-boot retry budget from measured boot time (#1645) by James Harton
+
+* ci: give neonfs_integration headroom over its observed runtime (#1644) by James Harton
+
+* ci: keep the package matrix non-empty so canary can resolve (#1642) by James Harton
+
+* core: stop FileIndex abandoning commits it is still waiting on (#1638) by James Harton
+
+* core: fail closed when the conflict lease cannot be acquired (#1637) by James Harton
+
+* core: verify a drained drive is unreferenced before deregistering it (#1635) by James Harton
+
+* core: tolerate a stopped `:ra` application during Ra teardown (#1614) by James Harton
+
+* core,test-support: harden peer startup and key rotation reads (#1604) by James Harton
+
+* cifs: mkdir and file I/O through the VFS bridge (#1555) (#1587) by James Harton
+
+* core: cache the evacuation tracked-chunk scan across batches (#1583) by James Harton
+
+* core: discover job runners for `--type` filter instead of a hand-maintained list (#1582) by James Harton
+
+* core: classify evacuation blobs from authoritative metadata (#1579) by James Harton
+
+* fuse,cli: expose allow_other / allow_root mount flags (#1577) by James Harton
+
+### Improvements:
+
+* core: one metadata commit per zeroed range, not one per batch (#1830) by James Harton
+
+* core: fill the trailing partial stripe on an erasure append (#1792) by James Harton
+
+* core: record why a join continues past a failed service registration (#1767) by James Harton
+
+* fuse: answer getattr and setattr from the open handle (#1752) by James Harton
+
+* fuse: unlink through the pin-aware facade, fd I/O by identity (#1751) by James Harton
+
+* core: pick the `_system` factor from the drives `cluster init` was given (#1683) by James Harton
+
+* core: stop a lock test waiting out the production TTL sweep (#1712) by James Harton
+
+* ci: shard the neonfs_integration suite across four jobs (#1707) by James Harton
+
+* cifs: node-wide handle registry keyed by file identity (#1703) by James Harton
+
+* core: publish a combined move-and-rename as one path transition (#1702) by James Harton
+
+* core: poll for the data-plane endpoint indefinitely instead of giving up (#1698) by James Harton
+
+* nfs: depend on the tahr hex package instead of the nfs_server git repo (#1696) by James Harton
+
+* core,cli: give an operator a way out of a draining drive (#1695) by James Harton
+
+* client,core: carry the reason behind a failed data-plane call (#1689) by James Harton
+
+* core: run the replica audit periodically so its telemetry has a series (#1686) by James Harton
+
+* core: stripe-level replica accounting for erasure-coded volumes (#1685) by James Harton
+
+* fuse: fail an open whose pin cannot be taken (#1682) by James Harton
+
+* webdav: log the cause behind a generic backend error, and return 500 (#1680) by James Harton
+
+* core,cli: pre-flight replica guard on drive evacuate/remove (#1629) by James Harton
+
+* monorepo middle path â CI matrix, path filtering, nfs_server extraction (#1622) by James Harton
+
+* core: scale `_system` redundancy with drive count (#1619) by James Harton
+
+* client: by-ID reads through the data plane (#1616) by James Harton
+
+* core,client: by-ID metadata facade for open handles (#1615) by James Harton
+
+* core,fuse: key `:pinned` claims by file identity, not path (#1613) by James Harton
+
+* cli,core: add --wait to job-starting commands and job show (#1581) by James Harton
+
 ## [v0.5.1](https://harton.dev/project-neon/neonfs/compare/v0.5.0...v0.5.1) (2026-07-21)
 
 

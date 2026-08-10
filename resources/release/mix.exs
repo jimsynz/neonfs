@@ -5,7 +5,7 @@ defmodule NeonFS.Release.MixProject do
   # Hosts git_ops for cutting workspace releases — run via
   # `resources/scripts/neonfs-release`. Every package's version is kept in
   # lockstep with this one by the managed_files glob in config/config.exs.
-  @version "0.5.1"
+  @version "0.6.0"
 
   def project,
     do: [

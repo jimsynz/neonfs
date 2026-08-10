@@ -11,7 +11,7 @@ defmodule NeonFS.Containerd.MixProject do
   Provides the content-store service: streaming Read / Write plus the
   metadata Info / List / Update / Delete RPCs.
   """
-  @version "0.5.1"
+  @version "0.6.0"
 
   def project do
     [

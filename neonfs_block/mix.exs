@@ -7,7 +7,7 @@ defmodule NeonFS.Block.MixProject do
   Serves NeonFS volumes as Linux block devices, speaking the Network Block
   Device protocol.
   """
-  @version "0.5.1"
+  @version "0.6.0"
 
   def project do
     [
