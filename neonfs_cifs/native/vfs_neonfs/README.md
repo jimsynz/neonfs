@@ -28,7 +28,8 @@ registers `erl_interface` (`ei`) as a link dependency, adds `vfs_neonfs` to
 `debian/rules`:
 
 ```sh
-OUT_DIR=./dist bash packaging/build-vfs-deb.sh   # → dist/samba-vfs-neonfs_<samba-ver>_<arch>.deb
+VERSION=0.6.0 OUT_DIR=./dist bash packaging/build-vfs-deb.sh
+# → dist/samba-vfs-neonfs_<samba-ver>+neonfs0.6.0_<arch>.deb
 ```
 
 For a non-root local invocation the script runs the build in the versioned

@@ -31,6 +31,7 @@ NATIVE="${NATIVE:-${REPO_ROOT}/neonfs_cifs/native/vfs_neonfs}"
 OUT_DIR="${OUT_DIR:-${REPO_ROOT}/dist}"
 WORKDIR="${WORKDIR:-${REPO_ROOT}/.samba-build}"
 ERL="${ERL:-erl}"
+VERSION="${VERSION:-dev}"
 
 log() { echo "$@" >&2; }
 
@@ -65,6 +66,7 @@ run_in_build_container() {
     -e WORKDIR=/workspaces/neonfs/.samba-build \
     -e HOST_UID="${host_uid}" \
     -e HOST_GID="${host_gid}" \
+    -e VERSION="${VERSION}" \
     "${image}" \
     bash -c 'status=0; bash /workspaces/neonfs/packaging/build-vfs-deb.sh || status=$?; chown -R "${HOST_UID}:${HOST_GID}" /out /workspaces/neonfs/.samba-build; exit "${status}"'
 }
@@ -283,6 +285,41 @@ if [ -z "${deb}" ]; then
   find "${WORKDIR}" -maxdepth 1 -name 'samba-vfs-neonfs_*.deb' -printf '  %f\n' >&2 || true
   exit 1
 fi
-cp -f "${deb}" "${OUT_DIR}/"
-log "==> built $(basename "${deb}") -> ${OUT_DIR}"
-printf '%s\n' "${OUT_DIR}/$(basename "${deb}")"
+
+# The distro Samba version does not change with each NeonFS release. Re-version
+# only the module package so Forgejo accepts each release as distinct while its
+# exact dependency on the unmodified distro Samba remains installable.
+module_version="${tree_version}+neonfs${VERSION}"
+module_file_version="${file_version}+neonfs${VERSION}"
+dpkg --validate-version "${module_version}"
+
+arch="$(dpkg-deb -f "${deb}" Architecture)"
+repack_dir="$(mktemp -d)"
+dpkg-deb --raw-extract "${deb}" "${repack_dir}"
+python3 - "${repack_dir}/DEBIAN/control" "${module_version}" "${tree_version}" <<'PY'
+import sys
+
+control, version, source_version = sys.argv[1:]
+lines = open(control).readlines()
+source_found = False
+version_found = False
+for index, line in enumerate(lines):
+    if line.startswith("Version: "):
+        lines[index] = f"Version: {version}\n"
+        version_found = True
+    elif line.startswith("Source: "):
+        lines[index] = f"Source: samba ({source_version})\n"
+        source_found = True
+if not source_found:
+    raise SystemExit("module deb has no Source control field")
+if not version_found:
+    raise SystemExit("module deb has no Version control field")
+open(control, "w").writelines(lines)
+PY
+
+output_deb="${OUT_DIR}/samba-vfs-neonfs_${module_file_version}_${arch}.deb"
+dpkg-deb --build "${repack_dir}" "${output_deb}"
+rm -rf "${repack_dir}"
+
+log "==> built $(basename "${output_deb}") -> ${OUT_DIR}"
+printf '%s\n' "${output_deb}"

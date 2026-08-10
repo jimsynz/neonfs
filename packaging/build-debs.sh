@@ -138,7 +138,7 @@ done
 # NEONFS_BUILD_CIFS note above.
 if [ -n "${NEONFS_BUILD_CIFS:-}" ]; then
     echo "==> Building samba-vfs-neonfs.deb..."
-    OUT_DIR="${OUT_DIR}" bash "${REPO_ROOT}/packaging/build-vfs-deb.sh" >/dev/null
+    OUT_DIR="${OUT_DIR}" VERSION="${VERSION}" bash "${REPO_ROOT}/packaging/build-vfs-deb.sh" >/dev/null
 fi
 
 # Step 3: Package with nfpm
