@@ -3,6 +3,7 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
 
 jobs:
   # =========================================================================
@@ -31,9 +32,14 @@ jobs:
           echo "rust=${RUST}" >> "$GITHUB_OUTPUT"
           echo "elixir_rust_image=harton.dev/james/workflows/elixir-rust:${ELIXIR}-erlang-${ERLANG}-rust-${RUST}" >> "$GITHUB_OUTPUT"
 
-  containers-amd64:
-    runs-on: amd64
+  containers:
+    runs-on: ${{ matrix.arch }}
     timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+        target: [base, cli, core, fuse, nfs, s3, webdav, docker, csi, containerd, cifs, block, omnibus]
     container:
       image: docker:29-dind
       options: --privileged
@@ -65,74 +71,23 @@ jobs:
           docker buildx create --name builder --config /tmp/buildkitd.toml --driver-opt network=host
           docker buildx use builder
 
-      - name: Build all targets
+      - name: Build target
         run: |
-          TAG=${GITHUB_REF_NAME#v}-amd64
-          for target in base cli core fuse nfs s3 webdav docker csi containerd cifs omnibus; do
-            PLATFORMS=linux/amd64 TAG=$TAG ./containers/bake.sh --pull --load "$target"
-          done
+          TAG=${GITHUB_REF_NAME#v}-${{ matrix.arch }}
+          PLATFORMS=linux/${{ matrix.arch }} TAG=$TAG ./containers/bake.sh --pull --load "${{ matrix.target }}"
 
-      - name: Push all targets
+      - name: Push target
         run: |
-          TAG=${GITHUB_REF_NAME#v}-amd64
-          for image in core fuse nfs s3 webdav docker csi containerd cifs omnibus cli; do
-            docker push "forgejo.dmz/project-neon/neonfs/${image}:${TAG}"
-            docker push "ghcr.io/jimsynz/neonfs/${image}:${TAG}"
-          done
-
-  containers-arm64:
-    runs-on: arm64
-    timeout-minutes: 120
-    container:
-      image: docker:29-dind
-      options: --privileged
-
-    steps:
-      - name: Install checkout dependencies
-        run: apk add --no-cache nodejs git
-
-      - uses: actions/checkout@v7
-
-      - name: Start Docker daemon
-        run: |
-          dockerd --host=unix:///var/run/docker.sock --insecure-registry=forgejo.dmz &
-          timeout 60 sh -c 'until docker info >/dev/null 2>&1; do sleep 1; done'
-
-      - name: Login to Forgejo Registry
-        run: echo "${{ secrets.REGISTRY_TOKEN }}" | docker login --username=james --password-stdin forgejo.dmz
-
-      - name: Login to GitHub Container Registry
-        run: echo "${{ secrets.GHCR_TOKEN }}" | docker login --username=jimsynz --password-stdin ghcr.io
-
-      - name: Set up Docker Buildx
-        run: |
-          cat > /tmp/buildkitd.toml << 'TOML'
-          [registry."forgejo.dmz"]
-            http = true
-            insecure = true
-          TOML
-          docker buildx create --name builder --config /tmp/buildkitd.toml --driver-opt network=host
-          docker buildx use builder
-
-      - name: Build all targets
-        run: |
-          TAG=${GITHUB_REF_NAME#v}-arm64
-          for target in base cli core fuse nfs s3 webdav docker csi containerd cifs omnibus; do
-            PLATFORMS=linux/arm64 TAG=$TAG ./containers/bake.sh --pull --load "$target"
-          done
-
-      - name: Push all targets
-        run: |
-          TAG=${GITHUB_REF_NAME#v}-arm64
-          for image in core fuse nfs s3 webdav docker csi containerd cifs omnibus cli; do
-            docker push "forgejo.dmz/project-neon/neonfs/${image}:${TAG}"
-            docker push "ghcr.io/jimsynz/neonfs/${image}:${TAG}"
-          done
+          TAG=${GITHUB_REF_NAME#v}-${{ matrix.arch }}
+          if [ "${{ matrix.target }}" != base ]; then
+            docker push "forgejo.dmz/project-neon/neonfs/${{ matrix.target }}:${TAG}"
+            docker push "ghcr.io/jimsynz/neonfs/${{ matrix.target }}:${TAG}"
+          fi
 
   containers-manifest:
     runs-on: amd64
     timeout-minutes: 60
-    needs: [containers-amd64, containers-arm64]
+    needs: containers
     container:
       image: docker:29-dind
       options: --privileged
@@ -162,7 +117,7 @@ jobs:
       - name: Create multi-arch manifests
         run: |
           VERSION=${GITHUB_REF_NAME#v}
-          IMAGES="core fuse nfs s3 webdav docker csi containerd cifs omnibus cli"
+          IMAGES="core fuse nfs s3 webdav docker csi containerd cifs block omnibus cli"
 
           for image in $IMAGES; do
             docker buildx imagetools create \
