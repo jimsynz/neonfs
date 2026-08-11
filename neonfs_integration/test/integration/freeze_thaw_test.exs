@@ -141,11 +141,45 @@ defmodule NeonFS.Integration.FreezeThawTest do
 
     # 8. The recovering lifecycle completes: a clean cycle has no dirty
     #    drives, so the monitor returns the cluster to :normal on its own.
-    :ok =
-      wait_until(
-        fn -> PeerCluster.rpc(cluster, :node1, NeonFS.Core.ClusterMode, :mode, []) == :normal end,
-        timeout: 120_000
-      )
+    #
+    #    The monitor exits `:recovering` only once every Ra member is online
+    #    *and* no drive is `:unverified`, so a bare timeout here says nothing
+    #    about which of those it was still waiting on. Report both.
+    assert_returned_to_normal(cluster)
+  end
+
+  defp assert_returned_to_normal(cluster) do
+    case wait_until(
+           fn ->
+             PeerCluster.rpc(cluster, :node1, NeonFS.Core.ClusterMode, :mode, []) == :normal
+           end,
+           timeout: 120_000
+         ) do
+      :ok ->
+        :ok
+
+      other ->
+        flunk("""
+        cluster did not return to :normal (#{inspect(other)}).
+
+        #{recovery_state(cluster)}
+        """)
+    end
+  end
+
+  defp recovery_state(cluster) do
+    Enum.map_join([:node1, :node2, :node3], "\n", fn node_name ->
+      node = PeerCluster.get_node!(cluster, node_name).node
+
+      mode = PeerCluster.rpc(cluster, node_name, NeonFS.Core.ClusterMode, :mode, [])
+      entry = PeerCluster.rpc(cluster, node_name, NeonFS.Core.ClusterMode, :entry, [])
+      unverified = PeerCluster.rpc(cluster, node_name, NeonFS.Core.DriveTrust, :unverified, [])
+      members = PeerCluster.rpc(cluster, node_name, :ra, :members, [{:neonfs_meta, node}, 5_000])
+
+      "  #{node_name}: mode=#{inspect(mode)} unverified=#{inspect(unverified)}\n" <>
+        "    entry=#{inspect(entry)}\n" <>
+        "    members=#{inspect(members)}"
+    end)
   end
 
   # ─── Setup helpers (mirrors partition_restart_test.exs) ──────────────
