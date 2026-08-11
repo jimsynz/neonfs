@@ -2,6 +2,15 @@ defmodule NeonFS.Core.VolumeTest do
   use ExUnit.Case, async: true
 
   alias NeonFS.Core.Volume
+  alias NeonFS.Core.VolumeEncryption
+
+  defp block_volume do
+    Volume.new("blk",
+      type: :block,
+      max_size: 1024 * 1024,
+      compression: %{algorithm: :none, level: 3, min_size: 0}
+    )
+  end
 
   describe "new/2" do
     test "creates volume with name and defaults" do
@@ -460,6 +469,67 @@ defmodule NeonFS.Core.VolumeTest do
     test "rejects unknown durability type" do
       vol = %{Volume.new("x") | durability: %{type: :unknown}}
       assert {:error, "invalid durability" <> _} = Volume.validate(vol)
+    end
+
+    test "rejects an unknown volume type" do
+      vol = %{Volume.new("x") | type: :object}
+      assert {:error, "type must be :fs or :block"} = Volume.validate(vol)
+    end
+
+    test "accepts a block volume that is replicated, uncompressed and sized" do
+      assert :ok = Volume.validate(block_volume())
+    end
+
+    test "rejects an erasure-coded block volume" do
+      vol = %{block_volume() | durability: %{type: :erasure, data_chunks: 10, parity_chunks: 4}}
+
+      assert {:error, "block volumes require replicated durability"} = Volume.validate(vol)
+    end
+
+    test "rejects a compressed block volume" do
+      vol = %{block_volume() | compression: Volume.default_compression()}
+
+      assert {:error, "block volumes require compression: :none"} = Volume.validate(vol)
+    end
+
+    test "rejects a cluster-side encrypted block volume" do
+      vol = %{
+        block_volume()
+        | encryption: VolumeEncryption.new(mode: :server_side, current_key_version: 1)
+      }
+
+      assert {:error, "block volumes are not encrypted cluster-side" <> _} = Volume.validate(vol)
+    end
+
+    test "rejects a block volume with no size" do
+      vol = %{block_volume() | max_size: nil}
+
+      assert {:error, "block volumes require max_size" <> _} = Volume.validate(vol)
+    end
+
+    test "leaves fs volumes free of the block constraints" do
+      vol = %{
+        Volume.new("x")
+        | durability: %{type: :erasure, data_chunks: 10, parity_chunks: 4},
+          max_size: nil
+      }
+
+      assert :ok = Volume.validate(vol)
+    end
+  end
+
+  describe "new/2 with a type" do
+    test "defaults to :fs" do
+      assert Volume.new("x").type == :fs
+    end
+
+    test "takes the requested type" do
+      assert Volume.new("x", type: :block).type == :block
+    end
+
+    test "update/2 cannot change the type" do
+      vol = Volume.new("x", type: :block)
+      assert Volume.update(vol, type: :fs).type == :block
     end
   end
 

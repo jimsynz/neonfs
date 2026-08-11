@@ -15,8 +15,8 @@ defmodule NeonFS.CSI.ControllerServer do
       `CREATE_DELETE_VOLUME`, `LIST_VOLUMES`, `GET_CAPACITY`,
       `GET_VOLUME`, snapshot, and clone capabilities.
     * `CreateVolume` — maps to `NeonFS.Core.create_volume/2`.
-      Honours `parameters` (`replication_factor`, `tier`) and the
-      requested `capacity_range`.
+      Honours `parameters` (`replication_factor`, `tier`, `type`) and
+      the requested `capacity_range`.
     * `DeleteVolume` — maps to `NeonFS.Core.delete_volume/1` with
       idempotent `:ok` on `:not_found`.
     * `ValidateVolumeCapabilities` — confirms requested access
@@ -108,8 +108,9 @@ defmodule NeonFS.CSI.ControllerServer do
   @doc """
   CSI `Controller.CreateVolume` — provisions a NeonFS volume from the
   Kubernetes PVC. Maps the CSI request name into the volume name and
-  forwards user-supplied `parameters` (`replication_factor`, `tier`)
-  to `NeonFS.Core.create_volume/2`.
+  forwards user-supplied `parameters` (`replication_factor`, `tier`,
+  `type`) to `NeonFS.Core.create_volume/2`. A `type` of `block` needs a
+  `capacity_range` — a block volume's size is the device's size.
   """
   @spec create_volume(CreateVolumeRequest.t(), term()) :: CreateVolumeResponse.t()
   def create_volume(
@@ -733,6 +734,10 @@ defmodule NeonFS.CSI.ControllerServer do
 
   defp parse_create_opt({"tier", value}) when value in ["hot", "warm", "cold"] do
     [tier: String.to_atom(value)]
+  end
+
+  defp parse_create_opt({"type", value}) when value in ["fs", "block"] do
+    [type: String.to_atom(value)]
   end
 
   defp parse_create_opt(_), do: []

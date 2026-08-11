@@ -545,6 +545,9 @@ impl CordonReason {
 pub struct VolumeInfo {
     pub id: String,
     pub name: String,
+    /// `fs` or `block`. Absent from an older daemon's reply, which only
+    /// ever served filesystem volumes.
+    pub volume_type: String,
     pub logical_size: u64,
     pub physical_size: u64,
     pub chunk_count: u64,
@@ -614,6 +617,11 @@ impl VolumeInfo {
                 .unwrap_or(0),
             // Quotas are omitted from the term when unlimited (nil), so an
             // absent key decodes as `None` = no limit.
+            volume_type: map
+                .get("type")
+                .map(term_to_string)
+                .transpose()?
+                .unwrap_or_else(|| "fs".to_string()),
             max_size: map.get("max_size").map(term_to_u64).transpose()?,
             max_files: map.get("max_files").map(term_to_u64).transpose()?,
             durability_type: term_to_string(durability.get("type").ok_or_else(|| {
@@ -1335,6 +1343,7 @@ mod tests {
         let volume = VolumeInfo {
             id: "test-id".to_string(),
             name: "test".to_string(),
+            volume_type: "fs".to_string(),
             logical_size: 0,
             physical_size: 0,
             chunk_count: 0,

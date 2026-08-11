@@ -129,6 +129,37 @@ defmodule NeonFS.CSI.ControllerServerTest do
       end
     end
 
+    test "a type parameter asks core for a block volume" do
+      put_core(fn NeonFS.Core, :create_volume, [_name, opts] ->
+        assert opts == [type: :block, max_size: 4096]
+        {:ok, sample_volume("pvc-blk", %{max_size: 4096})}
+      end)
+
+      req = %CreateVolumeRequest{
+        name: "pvc-blk",
+        capacity_range: %CapacityRange{required_bytes: 4096, limit_bytes: 0},
+        parameters: %{"type" => "block"},
+        volume_capabilities: caps()
+      }
+
+      assert ControllerServer.create_volume(req, nil).volume.volume_id == "pvc-blk"
+    end
+
+    test "an unknown type parameter is dropped rather than guessed at" do
+      put_core(fn NeonFS.Core, :create_volume, [_name, opts] ->
+        assert opts == []
+        {:ok, sample_volume("pvc-weird")}
+      end)
+
+      req = %CreateVolumeRequest{
+        name: "pvc-weird",
+        parameters: %{"type" => "object"},
+        volume_capabilities: caps()
+      }
+
+      ControllerServer.create_volume(req, nil)
+    end
+
     test "drops unknown parameters silently" do
       put_core(fn NeonFS.Core, :create_volume, [_, opts] ->
         # `replication_factor` is honoured, `garbage` is dropped.
