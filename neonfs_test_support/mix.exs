@@ -9,7 +9,7 @@ defmodule NeonFS.TestSupport.MixProject do
 
   Shared peer-cluster test scaffolding.
   """
-  @version "0.6.0"
+  @version "0.6.1"
 
   def project do
     [

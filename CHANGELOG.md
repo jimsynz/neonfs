@@ -5,6 +5,11 @@ See [Conventional Commits](Https://conventionalcommits.org) for commit guideline
 
 <!-- changelog -->
 
+## [v0.6.1](https://harton.dev/project-neon/neonfs/compare/v0.6.0...v0.6.1) (2026-08-11)
+
+
+
+
 ## [v0.6.0](https://harton.dev/project-neon/neonfs/compare/v0.5.1...v0.6.0) (2026-08-10)
 
 
