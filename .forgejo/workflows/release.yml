@@ -20,7 +20,12 @@ jobs:
       erlang: ${{ steps.parse.outputs.erlang }}
       rust: ${{ steps.parse.outputs.rust }}
       elixir_rust_image: ${{ steps.parse.outputs.elixir_rust_image }}
+      image_version: ${{ steps.parse.outputs.image_version }}
+      package_version: ${{ steps.parse.outputs.package_version }}
+      prerelease: ${{ steps.parse.outputs.prerelease }}
+      release_tag: ${{ steps.parse.outputs.release_tag }}
       release_version: ${{ steps.parse.outputs.release_version }}
+      tagged: ${{ steps.parse.outputs.tagged }}
     steps:
       - uses: actions/checkout@v7
       - id: parse
@@ -42,6 +47,19 @@ jobs:
                 echo "tag version ${REF_VERSION} does not match package version ${RELEASE_VERSION}" >&2
                 exit 1
               fi
+              IMAGE_VERSION=$RELEASE_VERSION
+              PACKAGE_VERSION=$RELEASE_VERSION
+              PRERELEASE=false
+              RELEASE_TAG=v${RELEASE_VERSION}
+              TAGGED=true
+              ;;
+            *)
+              SHORT_SHA=$(git rev-parse --short=8 HEAD)
+              IMAGE_VERSION=${RELEASE_VERSION}-git.${SHORT_SHA}
+              PACKAGE_VERSION=${RELEASE_VERSION}+git.${SHORT_SHA}
+              PRERELEASE=true
+              RELEASE_TAG=v${IMAGE_VERSION}
+              TAGGED=false
               ;;
           esac
 
@@ -49,7 +67,12 @@ jobs:
           echo "erlang=${ERLANG}" >> "$GITHUB_OUTPUT"
           echo "rust=${RUST}" >> "$GITHUB_OUTPUT"
           echo "elixir_rust_image=harton.dev/james/workflows/elixir-rust:${ELIXIR}-erlang-${ERLANG}-rust-${RUST}" >> "$GITHUB_OUTPUT"
+          echo "image_version=${IMAGE_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "package_version=${PACKAGE_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "prerelease=${PRERELEASE}" >> "$GITHUB_OUTPUT"
+          echo "release_tag=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
           echo "release_version=${RELEASE_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tagged=${TAGGED}" >> "$GITHUB_OUTPUT"
 
   containers:
     needs: resolve-versions
@@ -93,12 +116,12 @@ jobs:
 
       - name: Build target
         run: |
-          TAG=${{ needs.resolve-versions.outputs.release_version }}-${{ matrix.arch }}
+          TAG=${{ needs.resolve-versions.outputs.image_version }}-${{ matrix.arch }}
           PLATFORMS=linux/${{ matrix.arch }} TAG=$TAG ./containers/bake.sh --pull --load "${{ matrix.target }}"
 
       - name: Push target
         run: |
-          TAG=${{ needs.resolve-versions.outputs.release_version }}-${{ matrix.arch }}
+          TAG=${{ needs.resolve-versions.outputs.image_version }}-${{ matrix.arch }}
           if [ "${{ matrix.target }}" != base ]; then
             docker push "forgejo.dmz/project-neon/neonfs/${{ matrix.target }}:${TAG}"
             docker push "ghcr.io/jimsynz/neonfs/${{ matrix.target }}:${TAG}"
@@ -136,7 +159,7 @@ jobs:
 
       - name: Create multi-arch manifests
         run: |
-          VERSION=${{ needs.resolve-versions.outputs.release_version }}
+          VERSION=${{ needs.resolve-versions.outputs.image_version }}
           IMAGES="core fuse nfs s3 webdav docker csi containerd cifs block omnibus cli"
 
           for image in $IMAGES; do
@@ -150,15 +173,17 @@ jobs:
               ghcr.io/jimsynz/neonfs/${image}:${VERSION}-amd64 \
               ghcr.io/jimsynz/neonfs/${image}:${VERSION}-arm64
 
-            docker buildx imagetools create \
-              -t forgejo.dmz/project-neon/neonfs/${image}:latest \
-              forgejo.dmz/project-neon/neonfs/${image}:${VERSION}-amd64 \
-              forgejo.dmz/project-neon/neonfs/${image}:${VERSION}-arm64
+            if [ "${{ needs.resolve-versions.outputs.tagged }}" = true ]; then
+              docker buildx imagetools create \
+                -t forgejo.dmz/project-neon/neonfs/${image}:latest \
+                forgejo.dmz/project-neon/neonfs/${image}:${VERSION}-amd64 \
+                forgejo.dmz/project-neon/neonfs/${image}:${VERSION}-arm64
 
-            docker buildx imagetools create \
-              -t ghcr.io/jimsynz/neonfs/${image}:latest \
-              ghcr.io/jimsynz/neonfs/${image}:${VERSION}-amd64 \
-              ghcr.io/jimsynz/neonfs/${image}:${VERSION}-arm64
+              docker buildx imagetools create \
+                -t ghcr.io/jimsynz/neonfs/${image}:latest \
+                ghcr.io/jimsynz/neonfs/${image}:${VERSION}-amd64 \
+                ghcr.io/jimsynz/neonfs/${image}:${VERSION}-arm64
+            fi
           done
 
   # =========================================================================
@@ -262,7 +287,7 @@ jobs:
 
       - name: Package .deb files
         run: |
-          VERSION=${{ needs.resolve-versions.outputs.release_version }}
+          VERSION=${{ needs.resolve-versions.outputs.package_version }}
           export VERSION ARCH=amd64 BUILD_DIR="$FORGEJO_WORKSPACE"
           mkdir -p dist
 
@@ -381,7 +406,7 @@ jobs:
 
       - name: Package .deb files
         run: |
-          VERSION=${{ needs.resolve-versions.outputs.release_version }}
+          VERSION=${{ needs.resolve-versions.outputs.package_version }}
           export VERSION ARCH=arm64 BUILD_DIR="$FORGEJO_WORKSPACE"
           mkdir -p dist
 
@@ -406,24 +431,31 @@ jobs:
   debs-upload:
     runs-on: docker
     timeout-minutes: 60
-    needs: [debs-amd64, debs-arm64]
+    needs: [resolve-versions, debs-amd64, debs-arm64]
     container:
       image: harton.dev/james/workflows/ci-base:latest
 
     steps:
+      - name: Keep snapshot packages out of the stable repository
+        if: needs.resolve-versions.outputs.tagged != 'true'
+        run: echo "Snapshot packages will be attached to the prerelease only."
+
       - name: Download amd64 .deb artifacts
+        if: needs.resolve-versions.outputs.tagged == 'true'
         uses: actions/download-artifact@v7
         with:
           name: debs-amd64
           path: dist/
 
       - name: Download arm64 .deb artifacts
+        if: needs.resolve-versions.outputs.tagged == 'true'
         uses: actions/download-artifact@v7
         with:
           name: debs-arm64
           path: dist/
 
       - name: Upload to Forgejo Debian repository
+        if: needs.resolve-versions.outputs.tagged == 'true'
         run: |
           response=$(mktemp)
           for deb in dist/*.deb; do
@@ -476,7 +508,8 @@ jobs:
       - name: Extract changelog and create release
         run: |
           VERSION=${{ needs.resolve-versions.outputs.release_version }}
-          RELEASE_TAG=v${VERSION}
+          RELEASE_TAG=${{ needs.resolve-versions.outputs.release_tag }}
+          PRERELEASE=${{ needs.resolve-versions.outputs.prerelease }}
 
           CHANGELOG=$(awk '/^## \['"$VERSION"'\]/{found=1; next} /^## \[/{if(found) exit} found{print}' CHANGELOG.md)
 
@@ -489,7 +522,9 @@ jobs:
               --arg tag "$RELEASE_TAG" \
               --arg name "$RELEASE_TAG" \
               --arg body "$CHANGELOG" \
-              '{tag_name: $tag, name: $name, body: $body, draft: false, prerelease: false}'
+              --arg target "${{ github.sha }}" \
+              --argjson prerelease "$PRERELEASE" \
+              '{tag_name: $tag, target_commitish: $target, name: $name, body: $body, draft: false, prerelease: $prerelease}'
             )" | jq -r '.id')
 
           # Attach .deb files as release assets
