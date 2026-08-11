@@ -1,5 +1,6 @@
 defmodule NeonFS.FUSE.MountManagerTest do
   use ExUnit.Case, async: false
+  use Mimic
 
   alias NeonFS.FUSE.{MountInfo, MountManager}
 
@@ -124,6 +125,24 @@ defmodule NeonFS.FUSE.MountManagerTest do
       assert {:error, message} = MountManager.mount("vol-a", file_path)
       assert message =~ "is not a directory"
       assert message =~ "on FUSE node #{Node.self()}"
+    end
+  end
+
+  describe "mount/3 refuses a block volume" do
+    # The stub is read by the `MountManager` process, not this one.
+    setup :set_mimic_global
+
+    setup do
+      start_supervised!(MountManager)
+      :ok
+    end
+
+    test "a block volume has no filesystem to present", %{tmp_dir: tmp_dir} do
+      stub(NeonFS.Client, :core_call, fn NeonFS.Core.VolumeRegistry, :get_by_name, ["blk"] ->
+        {:ok, %{id: "vol-blk", name: "blk", type: :block}}
+      end)
+
+      assert {:error, :not_a_filesystem_volume} = MountManager.mount("blk", tmp_dir)
     end
   end
 

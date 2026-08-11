@@ -634,6 +634,53 @@ defmodule NeonFS.CLI.HandlerTest do
       assert {:ok, volume} = Handler.create_volume(vol_name, %{})
       assert is_map(volume)
     end
+
+    test "defaults to a filesystem volume" do
+      vol_name = "fs-vol-#{:rand.uniform(999_999)}"
+      assert {:ok, volume} = Handler.create_volume(vol_name, %{})
+      assert volume.type == :fs
+    end
+
+    test "creates a block volume from the string type the CLI sends" do
+      vol_name = "blk-vol-#{:rand.uniform(999_999)}"
+
+      assert {:ok, volume} =
+               Handler.create_volume(vol_name, %{"type" => "block", "max_size" => 1024 * 1024})
+
+      assert volume.type == :block
+      assert volume.max_size == 1024 * 1024
+      assert volume.compression.algorithm == :none
+
+      assert {:ok, stored} = VolumeRegistry.get_by_name(vol_name)
+      assert stored.type == :block
+    end
+
+    test "refuses a block volume with no size" do
+      vol_name = "blk-nosize-#{:rand.uniform(999_999)}"
+
+      assert {:error, error} = Handler.create_volume(vol_name, %{"type" => "block"})
+      assert Exception.message(error) =~ "max_size"
+    end
+
+    test "refuses a block volume that asks to compress" do
+      vol_name = "blk-zstd-#{:rand.uniform(999_999)}"
+
+      config = %{
+        "type" => "block",
+        "max_size" => 1024 * 1024,
+        "compression" => %{algorithm: :zstd, level: 3, min_size: 4096}
+      }
+
+      assert {:error, error} = Handler.create_volume(vol_name, config)
+      assert Exception.message(error) =~ "compression"
+    end
+
+    test "refuses an unknown volume type" do
+      vol_name = "weird-vol-#{:rand.uniform(999_999)}"
+
+      assert {:error, error} = Handler.create_volume(vol_name, %{"type" => "object"})
+      assert Exception.message(error) =~ "type"
+    end
   end
 
   describe "get_volume/1" do

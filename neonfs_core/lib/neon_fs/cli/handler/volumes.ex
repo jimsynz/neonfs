@@ -98,7 +98,8 @@ defmodule NeonFS.CLI.Handler.Volumes do
       owner_uid = Keyword.get(opts, :owner_uid, 0)
       owner_gid = Keyword.get(opts, :owner_gid, 0)
 
-      with {:ok, parsed_opts} <- parse_durability_opt(opts),
+      with {:ok, typed_opts} <- parse_type_opt(opts),
+           {:ok, parsed_opts} <- parse_durability_opt(typed_opts),
            {:ok, enc_opts} <- parse_encryption_opt(parsed_opts),
            final_opts = merge_verification_defaults(enc_opts),
            :ok <- check_durability_fits_cluster(name, final_opts),
@@ -331,6 +332,7 @@ defmodule NeonFS.CLI.Handler.Volumes do
       id: volume.id,
       name: volume.name,
       owner: volume.owner,
+      type: volume.type,
       atime_mode: volume.atime_mode,
       durability: volume.durability,
       durability_display: format_durability(volume.durability),
@@ -407,6 +409,22 @@ defmodule NeonFS.CLI.Handler.Volumes do
 
       config when is_map(config) ->
         Keyword.put(opts, :verification, Map.merge(Volume.default_verification(), config))
+    end
+  end
+
+  defp parse_type_opt(opts) do
+    case Keyword.get(opts, :type) do
+      nil ->
+        {:ok, opts}
+
+      type when type in [:fs, "fs"] ->
+        {:ok, Keyword.put(opts, :type, :fs)}
+
+      type when type in [:block, "block"] ->
+        {:ok, Keyword.put(opts, :type, :block)}
+
+      other ->
+        {:error, InvalidConfig.exception(field: :type, reason: "unknown type #{inspect(other)}")}
     end
   end
 

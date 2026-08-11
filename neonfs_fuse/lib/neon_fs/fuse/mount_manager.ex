@@ -137,6 +137,7 @@ defmodule NeonFS.FUSE.MountManager do
     with :ok <- validate_mount_point(mount_point),
          :ok <- check_not_mounted(mount_point, state),
          {:ok, volume} <- get_volume(volume_name),
+         :ok <- check_mountable(volume),
          :ok <- check_mount_permission(volume, opts) do
       mount_filesystem(volume_name, volume.id, mount_point, opts, state)
     else
@@ -284,6 +285,11 @@ defmodule NeonFS.FUSE.MountManager do
       {:error, reason} -> {:error, reason}
     end
   end
+
+  # A block volume holds one device rather than a namespace of files, so
+  # there is nothing for FUSE to present. `neonfs_block` serves it.
+  defp check_mountable(%{type: :block}), do: {:error, :not_a_filesystem_volume}
+  defp check_mountable(_volume), do: :ok
 
   defp check_mount_permission(volume, opts) do
     uid = Keyword.get(opts, :uid, 0)

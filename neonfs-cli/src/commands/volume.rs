@@ -8,7 +8,7 @@ use crate::term::{
     extract_error, term_to_list, term_to_map, term_to_string, term_to_u64, unwrap_ok_tuple,
 };
 use clap::Subcommand;
-use eetf::{Atom, Binary, FixInteger, Map, Term};
+use eetf::{Atom, BigInteger, Binary, FixInteger, Map, Term};
 use std::collections::HashMap;
 
 /// Volume management subcommands
@@ -23,9 +23,21 @@ pub enum VolumeCommand {
         #[arg(long, default_value = "3")]
         replicas: u32,
 
-        /// Compression algorithm
-        #[arg(long, default_value = "zstd")]
-        compression: String,
+        /// What the volume holds: `fs` for a filesystem namespace, `block`
+        /// for a single fixed-size device served over NBD.
+        #[arg(long = "type", default_value = "fs")]
+        volume_type: String,
+
+        /// Size in bytes, with an optional K/M/G/T suffix. Required for
+        /// `--type block`, where it is the device size; a size quota on a
+        /// filesystem volume.
+        #[arg(long)]
+        size: Option<String>,
+
+        /// Compression algorithm. Defaults to `zstd` for filesystem volumes
+        /// and `none` for block volumes, which cannot compress.
+        #[arg(long)]
+        compression: Option<String>,
 
         /// Encryption mode (none or server-side)
         #[arg(long, default_value = "none")]
@@ -411,6 +423,8 @@ impl VolumeCommand {
             VolumeCommand::Create {
                 name,
                 replicas,
+                volume_type,
+                size,
                 compression,
                 encryption,
                 durability,
@@ -420,7 +434,9 @@ impl VolumeCommand {
             } => self.create(
                 name,
                 *replicas,
-                compression,
+                volume_type,
+                size.as_deref(),
+                compression.as_deref(),
                 encryption,
                 durability.as_deref(),
                 *scrub_interval,
@@ -908,6 +924,40 @@ impl VolumeCommand {
         )
     }
 
+    /// Parse a byte count with an optional K/M/G/T suffix, binary units.
+    /// `4096`, `512M` and `10G` are all accepted; `10GB` and `10g` are too.
+    fn parse_size(spec: &str) -> Result<u64> {
+        let spec = spec.trim();
+        let digits_end = spec
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(spec.len());
+        let (digits, suffix) = spec.split_at(digits_end);
+
+        let size_err = || {
+            crate::error::CliError::InvalidArgument(format!(
+                "Invalid size '{}'; use a byte count with an optional K/M/G/T suffix",
+                spec
+            ))
+        };
+
+        let value: u64 = digits.parse().map_err(|_| size_err())?;
+
+        let multiplier: u64 = match suffix
+            .trim_end_matches(['B', 'b'])
+            .to_ascii_uppercase()
+            .as_str()
+        {
+            "" => 1,
+            "K" => 1024,
+            "M" => 1024 * 1024,
+            "G" => 1024 * 1024 * 1024,
+            "T" => 1024 * 1024 * 1024 * 1024,
+            _ => return Err(size_err()),
+        };
+
+        value.checked_mul(multiplier).ok_or_else(size_err)
+    }
+
     /// Default replicate durability map derived from `--replicas`.
     fn replicate_map(replicas: u32) -> Term {
         Term::Map(Map {
@@ -980,7 +1030,9 @@ impl VolumeCommand {
         &self,
         name: &str,
         replicas: u32,
-        compression: &str,
+        volume_type: &str,
+        size: Option<&str>,
+        compression: Option<&str>,
         encryption: &str,
         durability: Option<&str>,
         scrub_interval: Option<u64>,
@@ -988,6 +1040,30 @@ impl VolumeCommand {
         allow_under_replicated: bool,
         format: OutputFormat,
     ) -> Result<()> {
+        if volume_type != "fs" && volume_type != "block" {
+            return Err(crate::error::CliError::InvalidArgument(format!(
+                "Invalid volume type '{}'. Valid: fs, block",
+                volume_type
+            )));
+        }
+
+        let max_size = size.map(Self::parse_size).transpose()?;
+
+        if volume_type == "block" && max_size.is_none() {
+            return Err(crate::error::CliError::InvalidArgument(
+                "--size is required for --type block; it is the device size".to_string(),
+            ));
+        }
+
+        // A block volume cannot compress — the daemon rejects one that asks
+        // to. Only the *default* bends to the type, so `--compression zstd
+        // --type block` is still refused rather than quietly ignored.
+        let compression = compression.unwrap_or(if volume_type == "block" {
+            "none"
+        } else {
+            "zstd"
+        });
+
         // Validate encryption mode
         let encryption_mode = match encryption {
             "none" => "none",
@@ -1036,10 +1112,21 @@ impl VolumeCommand {
         });
 
         let mut config_entries = vec![
+            (
+                Term::Atom(Atom::from("type")),
+                Term::Atom(Atom::from(volume_type)),
+            ),
             (Term::Atom(Atom::from("durability")), durability_map),
             (Term::Atom(Atom::from("compression")), compression_map),
             (Term::Atom(Atom::from("encryption")), encryption_map),
         ];
+
+        if let Some(bytes) = max_size {
+            config_entries.push((
+                Term::Atom(Atom::from("max_size")),
+                Term::BigInteger(BigInteger::from(bytes)),
+            ));
+        }
 
         if let Some(interval) = scrub_interval {
             let verification_map = Term::Map(Map {
@@ -1740,6 +1827,7 @@ impl VolumeCommand {
                 let mut tbl = table::Table::new(vec!["Property".to_string(), "Value".to_string()]);
                 tbl.add_row(vec!["Name".to_string(), volume.name.clone()]);
                 tbl.add_row(vec!["ID".to_string(), volume.id.clone()]);
+                tbl.add_row(vec!["Type".to_string(), volume.volume_type.clone()]);
                 tbl.add_row(vec![
                     "Logical Size".to_string(),
                     VolumeInfo::format_size(volume.logical_size),
@@ -2374,6 +2462,79 @@ mod tests {
         assert!(
             TestCli::try_parse_from(["test", "create", "v", "--durability", "replicate:3"]).is_ok()
         );
+    }
+
+    #[test]
+    fn parse_size_units() {
+        assert_eq!(VolumeCommand::parse_size("4096").unwrap(), 4096);
+        assert_eq!(VolumeCommand::parse_size("512K").unwrap(), 512 * 1024);
+        assert_eq!(VolumeCommand::parse_size("8M").unwrap(), 8 * 1024 * 1024);
+        assert_eq!(
+            VolumeCommand::parse_size("10G").unwrap(),
+            10 * 1024 * 1024 * 1024
+        );
+        assert_eq!(
+            VolumeCommand::parse_size("2T").unwrap(),
+            2 * 1024_u64.pow(4)
+        );
+    }
+
+    #[test]
+    fn parse_size_accepts_common_spellings() {
+        assert_eq!(
+            VolumeCommand::parse_size("10g").unwrap(),
+            10 * 1024 * 1024 * 1024
+        );
+        assert_eq!(
+            VolumeCommand::parse_size("10GB").unwrap(),
+            10 * 1024 * 1024 * 1024
+        );
+        assert_eq!(
+            VolumeCommand::parse_size(" 10G ").unwrap(),
+            10 * 1024 * 1024 * 1024
+        );
+    }
+
+    #[test]
+    fn parse_size_rejects_garbage() {
+        for bad in ["", "G", "10X", "ten", "10 G", "-1"] {
+            assert!(
+                VolumeCommand::parse_size(bad).is_err(),
+                "expected {bad:?} to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn create_accepts_type_and_size_flags() {
+        use clap::Parser;
+
+        #[derive(Parser)]
+        struct TestCli {
+            #[command(subcommand)]
+            command: VolumeCommand,
+        }
+
+        let parsed =
+            TestCli::try_parse_from(["test", "create", "v", "--type", "block", "--size", "10G"])
+                .expect("--type block --size 10G should parse");
+
+        assert!(matches!(
+            parsed.command,
+            VolumeCommand::Create {
+                ref volume_type,
+                size: Some(ref size),
+                compression: None,
+                ..
+            } if volume_type == "block" && size == "10G"
+        ));
+
+        let default = TestCli::try_parse_from(["test", "create", "v"]).expect("bare create parses");
+
+        assert!(matches!(
+            default.command,
+            VolumeCommand::Create { ref volume_type, size: None, .. } if volume_type == "fs"
+        ));
     }
 
     #[test]

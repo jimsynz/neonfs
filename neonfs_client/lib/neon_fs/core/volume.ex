@@ -56,12 +56,22 @@ defmodule NeonFS.Core.Volume do
 
   @type tier :: :hot | :warm | :cold
 
+  @typedoc """
+  What the volume holds.
+
+  A `:fs` volume is a filesystem namespace of arbitrarily many files. A
+  `:block` volume is one fixed-size device, served by `neonfs_block` and
+  not enumerable through the filesystem interfaces.
+  """
+  @type type :: :fs | :block
+
   @type atime_mode :: :noatime | :relatime
 
   @type t :: %__MODULE__{
           id: binary(),
           name: String.t(),
           owner: String.t() | :system | nil,
+          type: type(),
           atime_mode: atime_mode(),
           durability: durability_config(),
           write_ack: write_ack(),
@@ -107,6 +117,7 @@ defmodule NeonFS.Core.Volume do
     :file_count,
     :created_at,
     :updated_at,
+    type: :fs,
     atime_mode: :noatime,
     nfs_export: false,
     nfs_allowed_ips: [],
@@ -131,18 +142,20 @@ defmodule NeonFS.Core.Volume do
   def new(name, opts \\ []) do
     now = DateTime.utc_now()
     id = UUIDv7.generate()
+    type = Keyword.get(opts, :type, :fs)
 
     %Volume{
       id: id,
       name: name,
       owner: Keyword.get(opts, :owner),
+      type: type,
       atime_mode: Keyword.get(opts, :atime_mode, :noatime),
       durability: Keyword.get(opts, :durability, default_durability()),
       write_ack: Keyword.get(opts, :write_ack, :local),
       tiering: Keyword.get(opts, :tiering, default_tiering()),
       caching: Keyword.get(opts, :caching, default_caching()),
       io_weight: Keyword.get(opts, :io_weight, 100),
-      compression: Keyword.get(opts, :compression, default_compression()),
+      compression: Keyword.get(opts, :compression, default_compression(type)),
       verification: Keyword.get(opts, :verification, default_verification()),
       encryption: Keyword.get(opts, :encryption, default_encryption()),
       metadata_consistency: Keyword.get(opts, :metadata_consistency),
@@ -205,14 +218,17 @@ defmodule NeonFS.Core.Volume do
   end
 
   @doc """
-  Returns the default compression configuration.
+  Returns the default compression configuration for a volume type.
 
-  Zstd level 3, compress chunks >= 4KB.
+  Zstd level 3, compress chunks >= 4KB. A block volume defaults to no
+  compression, which `validate/1` also requires of it — the default bends
+  to the type so that creating one does not mean restating the constraint.
   """
-  @spec default_compression() :: compression_config()
-  def default_compression do
-    %{algorithm: :zstd, level: 3, min_size: 4096}
-  end
+  @spec default_compression(type()) :: compression_config()
+  def default_compression(type \\ :fs)
+
+  def default_compression(:block), do: %{algorithm: :none, level: 3, min_size: 0}
+  def default_compression(_type), do: %{algorithm: :zstd, level: 3, min_size: 4096}
 
   @doc """
   Returns the default verification configuration.
@@ -340,6 +356,8 @@ defmodule NeonFS.Core.Volume do
   def validate(%Volume{} = volume) do
     with :ok <- validate_system_field(volume),
          :ok <- validate_name(volume.name),
+         :ok <- validate_type(volume.type),
+         :ok <- validate_block_volume(volume),
          :ok <- validate_atime_mode(volume.atime_mode),
          :ok <- validate_durability(volume.durability),
          :ok <- validate_write_ack(volume.write_ack),
@@ -361,6 +379,31 @@ defmodule NeonFS.Core.Volume do
   defp validate_max_size(nil), do: :ok
   defp validate_max_size(bytes) when is_integer(bytes) and bytes > 0, do: :ok
   defp validate_max_size(_), do: {:error, "max_size must be nil or a positive integer"}
+
+  defp validate_type(type) when type in [:fs, :block], do: :ok
+  defp validate_type(_), do: {:error, "type must be :fs or :block"}
+
+  # A block volume is one device, so the constraints are on the whole volume
+  # rather than on any file in it: erasure coding has no block read path yet,
+  # compression cannot help below chunk granularity while costing the direct
+  # data-plane read, and the device needs a size to advertise to the guest.
+  defp validate_block_volume(%Volume{type: :block} = volume) do
+    cond do
+      volume.durability[:type] != :replicate ->
+        {:error, "block volumes require replicated durability"}
+
+      volume.compression[:algorithm] != :none ->
+        {:error, "block volumes require compression: :none"}
+
+      is_nil(volume.max_size) ->
+        {:error, "block volumes require max_size — it is the device size"}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp validate_block_volume(%Volume{}), do: :ok
 
   defp validate_max_files(nil), do: :ok
   defp validate_max_files(count) when is_integer(count) and count > 0, do: :ok
