@@ -387,6 +387,13 @@ defmodule NeonFS.Core.Volume do
   # rather than on any file in it: erasure coding has no block read path yet,
   # compression cannot help below chunk granularity while costing the direct
   # data-plane read, and the device needs a size to advertise to the guest.
+  #
+  # Encryption is refused rather than unimplemented. Encrypting cluster-side
+  # would make the block target the decryption endpoint, putting plaintext in
+  # its memory and the host page cache on every attach node. A guest holding
+  # its own LUKS key keeps plaintext to itself and hands the cluster
+  # ciphertext, which is what a block consumer — a whole OS — can do and an
+  # S3 or NFS client cannot.
   defp validate_block_volume(%Volume{type: :block} = volume) do
     cond do
       volume.durability[:type] != :replicate ->
@@ -394,6 +401,9 @@ defmodule NeonFS.Core.Volume do
 
       volume.compression[:algorithm] != :none ->
         {:error, "block volumes require compression: :none"}
+
+      VolumeEncryption.active?(volume.encryption) ->
+        {:error, "block volumes are not encrypted cluster-side — encrypt in the guest (LUKS)"}
 
       is_nil(volume.max_size) ->
         {:error, "block volumes require max_size — it is the device size"}

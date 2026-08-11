@@ -491,6 +491,15 @@ defmodule NeonFS.Core.VolumeTest do
       assert {:error, "block volumes require compression: :none"} = Volume.validate(vol)
     end
 
+    test "rejects a cluster-side encrypted block volume" do
+      vol = %{
+        block_volume()
+        | encryption: NeonFS.Core.VolumeEncryption.new(mode: :server_side, current_key_version: 1)
+      }
+
+      assert {:error, "block volumes are not encrypted cluster-side" <> _} = Volume.validate(vol)
+    end
+
     test "rejects a block volume with no size" do
       vol = %{block_volume() | max_size: nil}
 
