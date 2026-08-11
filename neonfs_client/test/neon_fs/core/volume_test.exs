@@ -2,6 +2,7 @@ defmodule NeonFS.Core.VolumeTest do
   use ExUnit.Case, async: true
 
   alias NeonFS.Core.Volume
+  alias NeonFS.Core.VolumeEncryption
 
   defp block_volume do
     Volume.new("blk",
@@ -494,7 +495,7 @@ defmodule NeonFS.Core.VolumeTest do
     test "rejects a cluster-side encrypted block volume" do
       vol = %{
         block_volume()
-        | encryption: NeonFS.Core.VolumeEncryption.new(mode: :server_side, current_key_version: 1)
+        | encryption: VolumeEncryption.new(mode: :server_side, current_key_version: 1)
       }
 
       assert {:error, "block volumes are not encrypted cluster-side" <> _} = Volume.validate(vol)
