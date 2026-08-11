@@ -194,35 +194,54 @@ defmodule NeonFS.Core.DriveManager do
   verify it at high priority; on a clean clear it returns to `:trusted`.
   `:clean` and `:fresh` drives need nothing.
 
+  The scrub is queued whether or not the mark reported success, and that
+  is the point. A mark is a Ra command, and a command whose reply is lost
+  during a cold reform has still been committed — so a reported failure
+  covers both "the drive is not marked" and "the drive is marked and
+  nobody here knows it". Skipping the scrub in the second case leaves the
+  drive `:unverified` with nothing that will ever clear it, and an
+  unverified drive holds the whole cluster in `:recovering` until the
+  recovery timeout. Running it resolves both: a clean drive-scoped scrub
+  ends in `mark_trusted`, which clears a mark that landed and is a no-op
+  for one that did not.
+
+  Returns `{:error, reason}` when the mark did not report success, so a
+  caller can tell that the drive spent its verification window still
+  counting toward `min_copies`.
+
   The `:mark_fn` and `:scrub_fn` deps are injectable for tests; they
   default to `DriveTrust.mark_unverified/2` and a drive-scoped
   `JobTracker` scrub.
   """
-  @spec recover_drive(drive_id :: String.t(), :clean | :dirty | :fresh | nil, keyword()) :: :ok
+  @spec recover_drive(drive_id :: String.t(), :clean | :dirty | :fresh | nil, keyword()) ::
+          :ok | {:error, term()}
   def recover_drive(drive_id, open_state, opts \\ [])
 
   def recover_drive(drive_id, :dirty, opts) do
     mark_fn = Keyword.get(opts, :mark_fn, &DriveTrust.mark_unverified/2)
     scrub_fn = Keyword.get(opts, :scrub_fn, &default_scrub/1)
 
-    case mark_fn.(Node.self(), drive_id) do
-      :ok ->
-        scrub_fn.(drive_id)
+    result = mark_fn.(Node.self(), drive_id)
+    scrub_fn.(drive_id)
 
+    case result do
+      :ok ->
         :telemetry.execute(
           [:neonfs, :drive_manager, :dirty_drive_recovered],
           %{},
           %{drive_id: drive_id}
         )
 
+        :ok
+
       {:error, reason} ->
-        Logger.warning("Could not mark dirty drive :unverified; leaving for retry",
+        Logger.warning("Could not mark dirty drive :unverified; its scrub still runs",
           drive_id: drive_id,
           reason: inspect(reason)
         )
-    end
 
-    :ok
+        {:error, reason}
+    end
   end
 
   def recover_drive(_drive_id, _open_state, _opts), do: :ok
@@ -245,6 +264,12 @@ defmodule NeonFS.Core.DriveManager do
   @impl true
   def handle_cast(:maybe_auto_uncordon, state) do
     attempt_auto_uncordon()
+    {:noreply, state}
+  end
+
+  @impl true
+  def handle_cast({:verify_drive, drive_id}, state) do
+    verify_drive(drive_id)
     {:noreply, state}
   end
 
@@ -785,10 +810,21 @@ defmodule NeonFS.Core.DriveManager do
 
   @auto_uncordon_handler_id "neonfs-drive-manager-auto-uncordon"
 
-  # React to a local drive clearing back to `:trusted` by
-  # re-checking whether this cordoned node can now resume. The
-  # captured pid makes a post-restart stale handler a harmless no-op (a
-  # cast to a dead pid is dropped); init re-attaches fresh.
+  # React to a local drive's trust changing: a clear back to `:trusted`
+  # re-checks whether this cordoned node can now resume, and a drive
+  # arriving at `:unverified` gets a scrub, because verification is the
+  # only thing that clears it again.
+  #
+  # Keying the scrub off the observed transition rather than off the
+  # write that caused it is what makes the boot path safe. A mark is a Ra
+  # command, and one whose reply is lost during a cold reform commits
+  # anyway — possibly *after* the scrub that was meant to clear it has
+  # already finished. Then the drive is `:unverified` with no scrub
+  # coming, and an unverified drive holds the whole cluster in
+  # `:recovering` until the recovery timeout.
+  #
+  # The captured pid makes a post-restart stale handler a harmless no-op
+  # (a cast to a dead pid is dropped); init re-attaches fresh.
   defp attach_trust_telemetry do
     pid = self()
     :telemetry.detach(@auto_uncordon_handler_id)
@@ -796,13 +832,40 @@ defmodule NeonFS.Core.DriveManager do
     :telemetry.attach(
       @auto_uncordon_handler_id,
       [:neonfs, :ra, :command, :set_drive_trust],
-      fn _event, _measurements, metadata, _config ->
-        if metadata[:to] == :trusted and metadata[:node] == node() do
-          GenServer.cast(pid, :maybe_auto_uncordon)
-        end
-      end,
+      fn _event, _measurements, metadata, _config -> react_to_trust_change(pid, metadata) end,
       nil
     )
+  end
+
+  defp react_to_trust_change(pid, %{node: drive_node, to: :trusted}) when drive_node == node() do
+    GenServer.cast(pid, :maybe_auto_uncordon)
+  end
+
+  defp react_to_trust_change(pid, %{node: drive_node, to: :unverified, drive_id: drive_id})
+       when drive_node == node() do
+    GenServer.cast(pid, {:verify_drive, drive_id})
+  end
+
+  defp react_to_trust_change(_pid, _metadata), do: :ok
+
+  # One scrub per drive at a time: a drive marked `:unverified` twice in
+  # quick succession needs one verification, not two.
+  defp verify_drive(drive_id) when is_binary(drive_id) do
+    if scrub_running?(drive_id) do
+      :ok
+    else
+      default_scrub(drive_id)
+    end
+  end
+
+  defp verify_drive(_drive_id), do: :ok
+
+  defp scrub_running?(drive_id) do
+    JobTracker.list(type: Scrub, status: :running)
+    |> Enum.any?(&(&1.params[:drive_id] == drive_id))
+  catch
+    # A JobTracker that isn't up yet can't be running a scrub either.
+    :exit, _ -> false
   end
 
   defp react_to_dirty_drives do

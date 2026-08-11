@@ -604,13 +604,20 @@ defmodule NeonFS.Core.DriveManagerTest do
       refute_received :scrubbed
     end
 
-    test "a failed mark skips the scrub (left for retry)" do
+    # A mark is a Ra command, so a failure reported here covers both "not
+    # marked" and "marked, reply lost". In the second case the scrub is the
+    # only thing that ever clears the drive back to `:trusted`, and skipping
+    # it strands the drive `:unverified` — which holds the whole cluster in
+    # `:recovering`.
+    test "a failed mark still queues the scrub, and reports itself" do
       test = self()
       mark_fn = fn _node, _drive_id -> {:error, :no_leader} end
-      scrub_fn = fn _drive_id -> send(test, :scrubbed) end
+      scrub_fn = fn drive_id -> send(test, {:scrubbed, drive_id}) end
 
-      assert :ok = DriveManager.recover_drive("d", :dirty, mark_fn: mark_fn, scrub_fn: scrub_fn)
-      refute_received :scrubbed
+      assert {:error, :no_leader} =
+               DriveManager.recover_drive("d", :dirty, mark_fn: mark_fn, scrub_fn: scrub_fn)
+
+      assert_received {:scrubbed, "d"}
     end
   end
 
