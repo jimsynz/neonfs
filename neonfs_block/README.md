@@ -9,11 +9,17 @@ lands on a predictable chunk boundary. Reads pull chunks over the TLS data
 plane; a guest flush or FUA maps onto the volume's durability barrier and is
 never acknowledged early.
 
-## Status
+## Encryption
 
-This package currently contains the protocol codec only —
-`NeonFS.Block.Protocol` encodes and decodes the NBD handshake and transmission
-frames. The server, the device lifecycle and the packaging land separately.
+Block volumes are **not** encrypted by NeonFS. `volume create --type block`
+refuses a volume with encryption configured, and the target reads and writes
+whatever bytes the guest gives it.
+
+Encrypt in the guest instead — LUKS/dm-crypt on the mapped device — so
+plaintext never reaches the target process or an attach node's page cache. See
+[Block Volume Encryption](https://harton.dev/project-neon/neonfs/wiki/Block-Volume-Encryption)
+for the setup, the discard-passthrough caveat, and what compression and dedup
+cost you.
 
 ## Protocol notes
 
