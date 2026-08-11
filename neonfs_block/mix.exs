@@ -62,6 +62,10 @@ defmodule NeonFS.Block.MixProject do
       {:logger_json, "~> 7.0"},
       {:thousand_island, "~> 1.0"},
       {:telemetry, "~> 1.2"},
+      {:telemetry_metrics, "~> 1.0"},
+      {:telemetry_metrics_prometheus_core, "~> 1.1"},
+      {:bandit, "~> 1.0"},
+      {:plug, "~> 1.16"},
 
       # dev/test
       {:credo, "~> 1.6", only: [:dev, :test], runtime: false},

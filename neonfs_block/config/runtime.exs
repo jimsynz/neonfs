@@ -9,6 +9,10 @@ if config_env() == :prod do
   block_bind = System.get_env("NEONFS_BLOCK_BIND", "127.0.0.1")
   block_port = String.to_integer(System.get_env("NEONFS_BLOCK_PORT", "10809"))
 
+  metrics_enabled = System.get_env("NEONFS_BLOCK_METRICS", "false") == "true"
+  metrics_bind = System.get_env("NEONFS_BLOCK_METRICS_BIND", "0.0.0.0")
+  metrics_port = String.to_integer(System.get_env("NEONFS_BLOCK_METRICS_PORT", "9573"))
+
   config :neonfs_client,
     bootstrap_nodes: [String.to_atom(core_node)]
 
@@ -18,6 +22,9 @@ if config_env() == :prod do
   config :neonfs_block,
     bind: block_bind,
     core_node: String.to_atom(core_node),
+    metrics_bind: metrics_bind,
+    metrics_enabled: metrics_enabled,
+    metrics_port: metrics_port,
     node_name: node_name,
     port: block_port
 end
