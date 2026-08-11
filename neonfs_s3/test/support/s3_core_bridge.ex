@@ -57,7 +57,7 @@ defmodule NeonFS.S3.IntegrationTest.CoreBridge do
 
     case :ets.whereis(:s3_integration_chunk_stash) do
       :undefined -> :ok
-      _ref -> :ets.delete(:s3_integration_chunk_stash)
+      _ref -> :ets.delete_all_objects(:s3_integration_chunk_stash)
     end
 
     :ok
@@ -136,13 +136,20 @@ defmodule NeonFS.S3.IntegrationTest.CoreBridge do
   defp body_to_binary(body) when is_list(body), do: IO.iodata_to_binary(body)
   defp body_to_binary(stream), do: stream |> Enum.to_list() |> IO.iodata_to_binary()
 
+  # `ship_chunks/3` runs in whichever process is serving the S3 request, so a
+  # table created there dies with that connection — a multipart upload's parts
+  # and its completing request arrive on different connections, and the stash
+  # has to outlive both. Park ownership in an unlinked Agent that lives for the
+  # whole suite, as `NeonFS.S3.Test.FakeKV` does. The Agent is named so that
+  # two requests racing here contend on name registration, which happens
+  # before `init` runs, rather than both reaching `:ets.new`.
   defp ensure_stash_table do
-    case :ets.whereis(:s3_integration_chunk_stash) do
-      :undefined ->
-        :ets.new(:s3_integration_chunk_stash, [:named_table, :public, :set])
-
-      _ref ->
-        :ok
+    case Agent.start(
+           fn -> :ets.new(:s3_integration_chunk_stash, [:named_table, :public, :set]) end,
+           name: :s3_integration_chunk_stash_owner
+         ) do
+      {:ok, _pid} -> :ok
+      {:error, {:already_started, _pid}} -> :ok
     end
   end
 
