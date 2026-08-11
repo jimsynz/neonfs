@@ -178,6 +178,9 @@ if Mix.env() == :test do
     ra_data_dir: "/tmp/neonfs_test/ra",
     snapshot_interval_ms: :infinity,
     enable_ra: true,
+    # A unit test with no Ra would otherwise spend the whole backoff
+    # budget failing to clear a drive-scoped scrub's trust mark.
+    scrub_trust_clear_backoff_ms: 0,
     # Don't auto-start children in tests - each test starts what it needs
     start_children?: false
 end

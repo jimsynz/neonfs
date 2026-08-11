@@ -38,6 +38,10 @@ defmodule NeonFS.Core.Job.Runners.Scrub do
   @default_batch_size 500
   @max_corrupted 1000
 
+  # ~60 s of cover for the cold-reform window a crash-recovery scrub runs in.
+  @trust_clear_attempts 20
+  @trust_clear_backoff_ms 3_000
+
   @impl NeonFS.Core.Job.Runner
   def label, do: "scrub"
 
@@ -298,22 +302,54 @@ defmodule NeonFS.Core.Job.Runners.Scrub do
   # later re-scrub.
   defp maybe_clear_drive_trust(%{params: %{drive_id: drive_id}}, 0, 0)
        when is_binary(drive_id) do
+    clear_drive_trust(drive_id, trust_clear_attempts())
+  end
+
+  defp maybe_clear_drive_trust(_job, _corruption_count, _key_unavailable_count), do: :ok
+
+  # This is the only thing that ever clears the drive, and nothing
+  # re-queues the scrub if it gives up — a drive left `:unverified` holds
+  # the whole cluster in `:recovering` until the recovery timeout. The
+  # scrub that follows a dirty restart runs while the cluster is still
+  # reassembling, which is exactly when a Ra command is most likely to
+  # find no leader, so one attempt is not enough. `mark_trusted/2` is
+  # idempotent, so retrying it costs nothing but the wait.
+  defp clear_drive_trust(drive_id, attempts_left) do
     case DriveTrust.mark_trusted(node(), drive_id) do
       :ok ->
         :telemetry.execute([:neonfs, :scrub, :drive_trusted], %{}, %{drive_id: drive_id})
+
+      {:error, reason} when attempts_left > 1 ->
+        Logger.info("Scrub clean but could not clear drive to :trusted yet; retrying",
+          drive_id: drive_id,
+          reason: inspect(reason)
+        )
+
+        Process.sleep(trust_clear_backoff_ms())
+        clear_drive_trust(drive_id, attempts_left - 1)
 
       {:error, reason} ->
         Logger.warning("Scrub clean but could not clear drive to :trusted",
           drive_id: drive_id,
           reason: inspect(reason)
         )
+
+        :telemetry.execute([:neonfs, :scrub, :drive_trust_clear_failed], %{}, %{
+          drive_id: drive_id
+        })
     end
   end
 
-  defp maybe_clear_drive_trust(_job, _corruption_count, _key_unavailable_count), do: :ok
-
   defp batch_size do
     Application.get_env(:neonfs_core, :scrub_batch_size, @default_batch_size)
+  end
+
+  defp trust_clear_attempts do
+    Application.get_env(:neonfs_core, :scrub_trust_clear_attempts, @trust_clear_attempts)
+  end
+
+  defp trust_clear_backoff_ms do
+    Application.get_env(:neonfs_core, :scrub_trust_clear_backoff_ms, @trust_clear_backoff_ms)
   end
 
   defp key_manager_mod do
