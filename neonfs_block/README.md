@@ -21,6 +21,31 @@ plaintext never reaches the target process or an attach node's page cache. See
 for the setup, the discard-passthrough caveat, and what compression and dedup
 cost you.
 
+## Metrics
+
+Telemetry on the IO path doubles as operational metrics and as test
+synchronisation:
+
+| Event | Measurements | Metadata |
+| --- | --- | --- |
+| `[:neonfs, :block, :command]` | `bytes`, `duration` | `export`, `command` (`:read`/`:write`/`:flush`/`:write_zeroes`), `status` |
+| `[:neonfs, :block, :attached]` | `holders` | `export` |
+| `[:neonfs, :block, :detached]` | — | `export` |
+
+`NeonFS.Block.Telemetry` maps those onto Prometheus metrics, served at
+`GET /metrics` on port 9573 when metrics are enabled:
+
+```
+NEONFS_BLOCK_METRICS=true
+NEONFS_BLOCK_METRICS_PORT=9573
+NEONFS_BLOCK_METRICS_BIND=0.0.0.0
+```
+
+Flush latency is the one to alert on. A flush is a durability barrier that
+returns only once the write has reached the volume's `min_copies`, so a guest
+filesystem's journal commits at exactly the rate flush returns — a slow flush
+is a slow guest, whatever the read and write rates say.
+
 ## Protocol notes
 
 - Fixed-newstyle handshake only. The oldstyle handshake is not implemented.

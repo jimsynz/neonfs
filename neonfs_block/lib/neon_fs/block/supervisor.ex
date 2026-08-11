@@ -12,7 +12,7 @@ defmodule NeonFS.Block.Supervisor do
 
   use Supervisor
 
-  alias NeonFS.Block.{DeviceRegistry, Listener}
+  alias NeonFS.Block.{DeviceRegistry, Listener, MetricsSupervisor}
   alias NeonFS.Client.Registrar
 
   @spec start_link(keyword()) :: Supervisor.on_start()
@@ -27,6 +27,7 @@ defmodule NeonFS.Block.Supervisor do
     children =
       [DeviceRegistry, Listener.child_spec(opts)]
       |> maybe_add_registrar(register?)
+      |> Kernel.++(metrics_children())
 
     Supervisor.init(children, strategy: :one_for_one)
   end
@@ -39,6 +40,10 @@ defmodule NeonFS.Block.Supervisor do
         {Registrar,
          metadata: registration_metadata(), type: :block, name: NeonFS.Client.Registrar.Block}
       ]
+  end
+
+  defp metrics_children do
+    if MetricsSupervisor.enabled?(), do: [MetricsSupervisor], else: []
   end
 
   defp registration_metadata do

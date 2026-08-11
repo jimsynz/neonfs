@@ -150,10 +150,16 @@ if config_env() == :prod do
   # the port can attach any export this node resolves.
   block_bind = System.get_env("NEONFS_BLOCK_BIND", "127.0.0.1")
   block_port = String.to_integer(System.get_env("NEONFS_BLOCK_PORT", "10809"))
+  block_metrics_enabled = System.get_env("NEONFS_BLOCK_METRICS", "false") == "true"
+  block_metrics_bind = System.get_env("NEONFS_BLOCK_METRICS_BIND", "0.0.0.0")
+  block_metrics_port = String.to_integer(System.get_env("NEONFS_BLOCK_METRICS_PORT", "9573"))
 
   config :neonfs_block,
     bind: block_bind,
     core_node: core_node,
+    metrics_bind: block_metrics_bind,
+    metrics_enabled: block_metrics_enabled,
+    metrics_port: block_metrics_port,
     node_name: node_name,
     port: block_port
 end
