@@ -220,7 +220,8 @@ defmodule NeonFS.Core.BlockBackingTest do
       {:ok, dirty} = NeonFS.Core.get_file_meta_by_id(volume_name, device.file_id)
       refute Enum.at(dirty.chunks, 0) == zero_hash
 
-      assert :ok = BlockBacking.write_zeroes(volume_name, device.file_id, 0, 2 * @chunk)
+      assert {:ok, _cost} =
+               BlockBacking.write_zeroes(volume_name, device.file_id, 0, 2 * @chunk)
 
       {:ok, clean} = NeonFS.Core.get_file_meta_by_id(volume_name, device.file_id)
       assert clean.chunks == List.duplicate(zero_hash, 4)
@@ -242,7 +243,8 @@ defmodule NeonFS.Core.BlockBackingTest do
       ref =
         :telemetry_test.attach_event_handlers(self(), [[:neonfs, :write_operation, :stop]])
 
-      assert :ok = BlockBacking.write_zeroes(volume_name, big.file_id, 0, 24 * @chunk)
+      assert {:ok, _cost} =
+               BlockBacking.write_zeroes(volume_name, big.file_id, 0, 24 * @chunk)
 
       assert_receive {[:neonfs, :write_operation, :stop], ^ref, _measurements, _meta}, 5_000
       refute_receive {[:neonfs, :write_operation, :stop], ^ref, _measurements, _meta}, 200
@@ -261,11 +263,65 @@ defmodule NeonFS.Core.BlockBackingTest do
       ref =
         :telemetry_test.attach_event_handlers(self(), [[:neonfs, :write_operation, :stop]])
 
-      assert :ok = BlockBacking.write_zeroes(volume_name, device.file_id, 0, 4 * @chunk)
+      assert {:ok, _cost} =
+               BlockBacking.write_zeroes(volume_name, device.file_id, 0, 4 * @chunk)
 
       assert_receive {[:neonfs, :write_operation, :stop], ^ref, _measurements, _meta}, 1_000
 
       :telemetry.detach(ref)
+    end
+
+    test "a whole-device zero-fill costs one stored chunk and an entry per chunk", %{
+      volume_name: volume_name,
+      device: device
+    } do
+      {:ok, _} =
+        BlockBacking.write(volume_name, device.file_id, 0, :binary.copy(<<0xEF>>, 4 * @chunk))
+
+      ref = :telemetry_test.attach_event_handlers(self(), [[:neonfs, :block, :write_zeroes]])
+
+      assert {:ok, cost} =
+               BlockBacking.write_zeroes(volume_name, device.file_id, 0, 4 * @chunk)
+
+      # The whole device is covered end to end, so nothing is read back and
+      # the four chunks all point at the one zero chunk that was stored.
+      assert cost == %{chunk_bytes: @chunk, chunks_rewritten: 0, chunks_replaced: 4}
+
+      assert_receive {[:neonfs, :block, :write_zeroes], ^ref, measurements, _meta}, 1_000
+      assert measurements.guest_bytes == 4 * @chunk
+      assert measurements.chunk_bytes == @chunk
+      assert measurements.chunks_replaced == 4
+
+      :telemetry.detach(ref)
+
+      {:ok, meta} = NeonFS.Core.get_file_meta_by_id(volume_name, device.file_id)
+      assert meta.chunks |> Enum.uniq() |> Enum.count() == 1
+      assert Enum.count(meta.chunks) == cost.chunks_replaced
+    end
+
+    # A device whose size is not a whole multiple of the chunk size ends in a
+    # short chunk, and a zero chunk of its size cannot be the one the full
+    # chunks share.
+    test "a short final chunk costs a second stored zero chunk", %{volume_name: volume_name} do
+      size = 2 * @chunk + @block
+      {:ok, ragged} = BlockBacking.create_device(volume_name, "/ragged.img", size)
+
+      {:ok, _} = BlockBacking.write(volume_name, ragged.file_id, 0, :binary.copy(<<0xEF>>, size))
+
+      assert {:ok, cost} = BlockBacking.write_zeroes(volume_name, ragged.file_id, 0, size)
+
+      assert cost == %{
+               chunk_bytes: @chunk + @block,
+               chunks_rewritten: 0,
+               chunks_replaced: 3
+             }
+
+      # The two sizes the arithmetic charged for are two hashes in the file.
+      {:ok, meta} = NeonFS.Core.get_file_meta_by_id(volume_name, ragged.file_id)
+      assert meta.chunks |> Enum.uniq() |> Enum.count() == 2
+
+      assert {:ok, data} = BlockBacking.read(volume_name, ragged.file_id, 0, @block)
+      assert data == :binary.copy(<<0>>, @block)
     end
 
     test "a partial chunk at each end is read-modify-written, the middle replaced", %{
@@ -280,7 +336,12 @@ defmodule NeonFS.Core.BlockBackingTest do
       offset = @chunk - @block
       length = 2 * @chunk + 2 * @block
 
-      assert :ok = BlockBacking.write_zeroes(volume_name, device.file_id, offset, length)
+      assert {:ok, cost} =
+               BlockBacking.write_zeroes(volume_name, device.file_id, offset, length)
+
+      # Both edges read back and rewritten in full, the two chunks between
+      # them replaced by the single zero chunk that was stored for them.
+      assert cost == %{chunk_bytes: 3 * @chunk, chunks_rewritten: 2, chunks_replaced: 2}
 
       {:ok, meta} = NeonFS.Core.get_file_meta_by_id(volume_name, device.file_id)
       assert length(meta.chunks) == 4
@@ -308,7 +369,11 @@ defmodule NeonFS.Core.BlockBackingTest do
       {:ok, _} =
         BlockBacking.write(volume_name, device.file_id, 0, :binary.copy(<<0xEF>>, @chunk))
 
-      assert :ok = BlockBacking.discard(volume_name, device.file_id, 0, @block)
+      assert {:ok, cost} = BlockBacking.discard(volume_name, device.file_id, 0, @block)
+
+      # A 4 KiB discard covers no chunk end to end, so it buys nothing the
+      # equivalent write would not have cost.
+      assert cost == %{chunk_bytes: @chunk, chunks_rewritten: 1, chunks_replaced: 0}
 
       assert {:ok, discarded} = BlockBacking.read(volume_name, device.file_id, 0, @block)
       assert discarded == :binary.copy(<<0>>, @block)

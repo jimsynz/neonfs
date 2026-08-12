@@ -41,6 +41,7 @@ defmodule NeonFS.Block.LiveServerTest do
         :open_device -> open_device_reply()
         :flush -> hold_flush(test)
         :write -> write_reply()
+        :write_zeroes -> write_zeroes_reply()
         _other -> :ok
       end
     end)
@@ -158,6 +159,28 @@ defmodule NeonFS.Block.LiveServerTest do
       # the chunk layer moved a whole chunk to store it.
       assert measurements.bytes == @block
       assert measurements.chunk_bytes == @chunk
+
+      :telemetry.detach(ref)
+    end
+
+    test "a zero-fill's command event carries what it replaced as well as what it wrote",
+         %{port: port} do
+      ref = :telemetry_test.attach_event_handlers(self(), [[:neonfs, :block, :command]])
+
+      socket = connect(port)
+      {:ok, _export} = handshake(socket, @export)
+
+      :ok = :gen_tcp.send(socket, request(@trim, 1, 0, @size))
+
+      assert_receive {[:neonfs, :block, :command], ^ref, measurements, %{command: :write_zeroes}},
+                     2_000
+
+      # The guest bytes and the chunk-layer bytes are unrelated for a
+      # zero-fill, and neither describes it alone — what it cost is the
+      # entries it replaced.
+      assert measurements.bytes == @size
+      assert measurements.chunk_bytes == @chunk
+      assert measurements.chunks_replaced == 3
 
       :telemetry.detach(ref)
     end
@@ -301,6 +324,7 @@ defmodule NeonFS.Block.LiveServerTest do
     case function do
       :open_device -> open_device_reply()
       :write -> write_reply()
+      :write_zeroes -> write_zeroes_reply()
       _other -> :ok
     end
   end
@@ -309,6 +333,11 @@ defmodule NeonFS.Block.LiveServerTest do
   # does that arithmetic on core and returns it, because the chunk geometry
   # is not known here.
   defp write_reply, do: {:ok, %{chunk_bytes: @chunk, chunks_rewritten: 1}}
+
+  # A zero-fill's two costs are unrelated numbers: the one chunk it clipped
+  # was rewritten, and the chunks it covered were replaced by hash.
+  defp write_zeroes_reply,
+    do: {:ok, %{chunk_bytes: @chunk, chunks_rewritten: 1, chunks_replaced: 3}}
 
   defp open_device_reply do
     {:ok,

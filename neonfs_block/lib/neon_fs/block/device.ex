@@ -29,8 +29,8 @@ defmodule NeonFS.Block.Device do
   ## Telemetry
 
     * `[:neonfs, :block, :command]` — Measurements: `bytes`, `duration`,
-      and on a write `chunk_bytes`. Metadata: `export`, `command`,
-      `status`.
+      `chunk_bytes` on a write or a zero-fill, and `chunks_replaced` on a
+      zero-fill. Metadata: `export`, `command`, `status`.
 
   `bytes` is what the guest asked for; `chunk_bytes` is what the chunk
   layer moved to serve it, so their ratio is the request's amplification.
@@ -41,6 +41,12 @@ defmodule NeonFS.Block.Device do
   so it arrives as that module's `chunk_fetched` events, tagged with this
   export through `:telemetry_metadata`. `NeonFS.Block.Telemetry` exports
   both.
+
+  A zero-fill answers with both numbers because neither describes it
+  alone: it rewrites only the chunks it clips, and replaces the ones it
+  covers by hash for the price of a metadata entry each. Reported as
+  `chunk_bytes` alone a full-device TRIM looks free; `chunks_replaced` is
+  what it actually cost.
   """
 
   alias NeonFS.Client
@@ -175,9 +181,12 @@ defmodule NeonFS.Block.Device do
     end
   end
 
-  # Only a write comes back carrying its chunk-layer cost; the others have
-  # no such quantity, and inventing a zero for them would read as "this
-  # write moved no chunks" on the same series.
+  # Only a write and a zero-fill come back carrying their chunk-layer cost;
+  # the others have no such quantity, and inventing a zero for them would
+  # read as "this write moved no chunks" on the same series.
+  defp chunk_measurements({:ok, %{chunk_bytes: bytes, chunks_replaced: replaced}}),
+    do: %{chunk_bytes: bytes, chunks_replaced: replaced}
+
   defp chunk_measurements({:ok, %{chunk_bytes: chunk_bytes}}), do: %{chunk_bytes: chunk_bytes}
   defp chunk_measurements(_result), do: %{}
 

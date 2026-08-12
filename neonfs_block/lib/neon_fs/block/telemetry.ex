@@ -9,9 +9,9 @@ defmodule NeonFS.Block.Telemetry do
   ## Events
 
     * `[:neonfs, :block, :command]` — one guest IO command. Measurements
-      `bytes` and `duration`, plus `chunk_bytes` on a write; metadata
-      `export`, `command` (`:read | :write | :flush | :write_zeroes`),
-      `status`.
+      `bytes` and `duration`, plus `chunk_bytes` on a write or a
+      zero-fill and `chunks_replaced` on a zero-fill; metadata `export`,
+      `command` (`:read | :write | :flush | :write_zeroes`), `status`.
     * `[:neonfs, :block, :attached]` / `[:neonfs, :block, :detached]` —
       a device gaining or losing a holder. Measurement `holders`;
       metadata `export`.
@@ -42,6 +42,16 @@ defmodule NeonFS.Block.Telemetry do
   from the request's own offset and length would give an upper bound
   rather than a measurement — a sparse device's unwritten region reads
   as zeroes with no chunk fetched at all.
+
+  A zero-fill is on the `chunk_bytes` numerator too, but its ratio is not
+  the number to watch: it rewrites only the chunks it clips, so a
+  full-device TRIM's amplification tends to zero however much it cost.
+  What it cost is the metadata:
+
+      neonfs_block_command_chunks_replaced{command="write_zeroes"}
+
+  one entry per chunk the range covered, against the single zero blob
+  they all now point at.
   """
 
   import Telemetry.Metrics
@@ -88,8 +98,15 @@ defmodule NeonFS.Block.Telemetry do
         event_name: [:neonfs, :block, :command],
         measurement: :chunk_bytes,
         tags: [:export, :command],
-        keep: &(&1.command == :write),
-        description: "Chunk-layer bytes rewritten to serve block writes"
+        keep: &(&1.command in [:write, :write_zeroes]),
+        description: "Chunk-layer bytes rewritten to serve block writes and zero-fills"
+      ),
+      sum("neonfs.block.command.chunks_replaced",
+        event_name: [:neonfs, :block, :command],
+        measurement: :chunks_replaced,
+        tags: [:export, :command],
+        keep: &(&1.command == :write_zeroes),
+        description: "Chunks a zero-fill replaced by hash rather than rewriting"
       ),
       sum("neonfs.block.read.chunk_bytes",
         event_name: [:neonfs, :client, :chunk_reader, :chunk_fetched],
