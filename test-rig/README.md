@@ -236,6 +236,30 @@ With the module present the share step `FAIL`s only on real runtime defects (the
 bridge socket missing, `smbd` failing to serve the share); the ops step `SKIP`s
 when the share never came up.
 
+The block-device steps attach a NeonFS block volume as a real kernel device.
+They live here rather than in ExUnit or a package CI job because a container
+cannot load the `nbd` module or attach a block device at all:
+
+- **block device attach** — `nbd-client` is apt-installed and `nbd` loaded, a
+  block volume is created (`volume create --type block --size N`, which
+  provisions the device itself), and `nbd-client -N <volume>` attaches it. The
+  kernel must then report the advertised size and 4 KiB logical and physical
+  blocks (`blockdev --getsize64/--getss/--getpbsz`).
+- **block device filesystem** — `mkfs.ext4`, mount, write a file, `umount`,
+  remount, and the file is still there. A filesystem surviving a remount is
+  the proof the device is coherent, superblock backups included.
+- **block device `fio --verify`** — a `crc32c`-verified random read/write
+  workload, plus a second run over the device's final MiB so an off-by-one at
+  the end of the device fails here rather than in production.
+- **block device detach** — detach, confirm the kernel no longer sizes the
+  device, then re-attach and confirm the filesystem and its contents survived.
+  The backing file is a file in a volume and outlives any attachment of it.
+
+The steps `SKIP` where `nbd-client` or `fio` cannot be installed or the `nbd`
+module will not load. The device is sized by `BLOCK_GIB` (default 1): creating
+it writes the whole device as zeroes, one metadata entry per 128 KiB, so a rig
+device is sized in gigabytes rather than hundreds of them.
+
 ```bash
 ./neonfs-rig up            # bring a single-node cluster up first
 ./acceptance single
