@@ -34,6 +34,11 @@ jobs:
       image: harton.dev/james/workflows/ci-base:latest
     outputs:
       elixir_rust_image: ${{ steps.parse.outputs.elixir_rust_image }}
+      # The bare versions as well as the image name: the `cifs_smbd` job's
+      # build cache key has to match the one `ci.yml`'s `neonfs_integration`
+      # job writes, and that key is built from these rather than the image.
+      elixir: ${{ steps.parse.outputs.elixir }}
+      rust: ${{ steps.parse.outputs.rust }}
     steps:
       - uses: actions/checkout@v7
       - id: parse
@@ -42,6 +47,8 @@ jobs:
           ERLANG=$(awk '/^erlang/ {print $2}' .tool-versions)
           RUST=$(awk '/^rust/ {print $2}' .tool-versions)
           echo "elixir_rust_image=harton.dev/james/workflows/elixir-rust:${ELIXIR}-erlang-${ERLANG}-rust-${RUST}" >> "$GITHUB_OUTPUT"
+          echo "elixir=${ELIXIR}" >> "$GITHUB_OUTPUT"
+          echo "rust=${RUST}" >> "$GITHUB_OUTPUT"
 
   csi_tooling:
     runs-on: amd64
@@ -158,3 +165,44 @@ jobs:
 
       - name: Verify an smbd loads the module
         run: bash packaging/verify-smbd-sidecar.sh
+
+      # The sidecar check leaves Samba and the module installed together,
+      # which is exactly what the end-to-end test's capability gate looks
+      # for — so this step needs no Samba setup of its own, only Elixir.
+      - name: Restore build cache
+        uses: actions/cache@v6
+        with:
+          path: |
+            neonfs_client/deps
+            neonfs_client/_build
+            neonfs_client/native/neonfs_chunker/target
+            neonfs_client/priv/native
+            neonfs_integration/deps
+            neonfs_integration/_build
+            neonfs_core/target
+            neonfs_core/priv/native
+            neonfs-cli/target
+          # The same key the `neonfs_integration` job writes, so this
+          # restores that build rather than paying for a third one. The
+          # nightly job only ever reads it — `actions/cache` will not
+          # overwrite an existing entry anyway.
+          key: v7-build-neonfs_integration-${{ runner.arch }}-${{ needs.setup.outputs.elixir }}-${{ needs.setup.outputs.rust }}-${{ hashFiles('neonfs_integration/mix.lock', 'neonfs_core/Cargo.lock', 'neonfs_client/native/neonfs_chunker/Cargo.lock', 'neonfs-cli/Cargo.lock') }}
+          restore-keys: v7-build-neonfs_integration-${{ runner.arch }}-
+
+      - name: Build the integration suite
+        working-directory: neonfs_integration
+        run: |
+          bash ../resources/scripts/ci-scrub-path-deps
+          mix local.hex --force && mix local.rebar --force
+          for attempt in 1 2 3; do
+            mix deps.get && break
+            [ "$attempt" = 3 ] && exit 1
+            echo "mix deps.get failed (attempt ${attempt}); retrying in $((attempt * 10))s"
+            sleep $((attempt * 10))
+          done
+          mix deps.compile
+          mix compile
+
+      - name: SMB end-to-end round trip
+        working-directory: neonfs_integration
+        run: mix test --include requires_smbd test/integration/cifs_smbd_test.exs

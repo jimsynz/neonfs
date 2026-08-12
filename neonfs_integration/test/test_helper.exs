@@ -74,11 +74,24 @@ test_registry_excludes =
       [:requires_test_registry]
   end
 
+# Exclude the Samba end-to-end tests unless an `smbd` with the NeonFS VFS
+# module installed alongside it is available. Samba being on PATH is not
+# enough: the module has to have been built inside the same Samba source
+# package to ABI- and symbol-version-match, which is what
+# `packaging/build-vfs-deb.sh` and the nightly `cifs_smbd` job do. An
+# archive Samba with no matching module looks fine until a tree connect.
+smbd_excludes =
+  if NeonFS.TestSupport.Smbd.available?() do
+    []
+  else
+    [:requires_smbd]
+  end
+
 excludes =
   loopback_excludes ++
     root_excludes ++
     containerd_excludes ++
-    test_registry_excludes ++ [:profile, :benchmark]
+    test_registry_excludes ++ smbd_excludes ++ [:profile, :benchmark]
 
 # PeerClusterTelemetry accumulates per-phase timings across every
 # `PeerCluster.start_cluster!` call. We print the summary from an

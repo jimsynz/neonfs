@@ -880,6 +880,7 @@ defmodule NeonFS.TestSupport.ClusterCase do
       :neonfs_nfs in apps -> :nfs
       :neonfs_fuse in apps -> :fuse
       :neonfs_containerd in apps -> :containerd
+      :neonfs_cifs in apps -> :cifs
       true -> raise ArgumentError, "no recognised interface app in #{inspect(apps)}"
     end
   end

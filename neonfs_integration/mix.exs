@@ -30,6 +30,7 @@ defmodule NeonFS.Integration.MixProject do
     [
       ignore_warnings: ".dialyzer_ignore.exs",
       plt_add_apps: [
+        :neonfs_cifs,
         :neonfs_client,
         :neonfs_containerd,
         :neonfs_core,
@@ -52,6 +53,7 @@ defmodule NeonFS.Integration.MixProject do
   defp deps do
     [
       # Path dependencies for testing (runtime: false since only used in tests)
+      {:neonfs_cifs, path: "../neonfs_cifs", runtime: false},
       {:neonfs_containerd, path: "../neonfs_containerd", runtime: false},
       {:neonfs_core, path: "../neonfs_core", runtime: false},
       {:neonfs_test_support, path: "../neonfs_test_support", runtime: false},

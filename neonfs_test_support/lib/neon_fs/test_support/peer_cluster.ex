@@ -430,10 +430,12 @@ defmodule NeonFS.TestSupport.PeerCluster do
       end
 
     socket_allocations =
-      if :neonfs_containerd in peer_apps do
-        [{:containerd, Path.join(data_dir, "containerd.sock")}]
-      else
-        []
+      for {app, key, name} <- [
+            {:neonfs_containerd, :containerd, "containerd.sock"},
+            {:neonfs_cifs, :cifs, "cifs.sock"}
+          ],
+          app in peer_apps do
+        {key, Path.join(data_dir, name)}
       end
 
     Map.new(port_allocations ++ socket_allocations)
@@ -484,6 +486,7 @@ defmodule NeonFS.TestSupport.PeerCluster do
     |> maybe_add_s3_config(peer_apps, interface_ports)
     |> maybe_add_webdav_config(peer_apps, interface_ports)
     |> maybe_add_containerd_config(peer_apps, interface_ports)
+    |> maybe_add_cifs_config(peer_apps, interface_ports)
   end
 
   # Per-peer ports keep multi-NFS-peer clusters from
@@ -541,6 +544,26 @@ defmodule NeonFS.TestSupport.PeerCluster do
         [
           neonfs_containerd: [
             socket_path: ports.containerd,
+            start_supervisor: true,
+            register_service: true
+          ]
+        ]
+    else
+      app_config
+    end
+  end
+
+  # `:neonfs_cifs` listens on the UDS that `vfs_neonfs.so` dials from
+  # inside smbd, so the path has to be one an out-of-BEAM process can
+  # reach — the peer's data dir, not a name only the test knows. Same
+  # `:start_supervisor` override as containerd: the omnibus test config
+  # defaults it off to stay clear of the host's `/run/neonfs/cifs.sock`.
+  defp maybe_add_cifs_config(app_config, peer_apps, ports) do
+    if :neonfs_cifs in peer_apps and Map.has_key?(ports, :cifs) do
+      app_config ++
+        [
+          neonfs_cifs: [
+            socket_path: ports.cifs,
             start_supervisor: true,
             register_service: true
           ]
