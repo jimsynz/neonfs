@@ -73,12 +73,41 @@ defmodule NeonFS.Client.ChunkReader do
       `nil`: `Router` picks the core node internally and does not report
       which.
 
-  Two paths emit nothing, because neither makes a per-chunk fetch whose
-  bytes or duration could be attributed honestly: a cache hit (which
-  costs no fetch at all, and correctly contributes zero to the ratio),
-  and the whole-range fallbacks — the buffered `read_file/3` fallback
-  and the degraded-erasure stripe walk — where one core call covers many
-  chunks.
+  A cache hit emits nothing: it costs no fetch at all, and correctly
+  contributes zero to the ratio.
+
+  The fallbacks that read many chunks in one core call emit
+  `[:neonfs, :client, :chunk_reader, :range_fetched]` instead, with
+  measurements `%{read_length, chunk_bytes, duration}` and metadata
+  `%{volume, source}`. Splitting one such call across the chunks it
+  covered would multiply the duration histogram by the chunk count and
+  stop `chunk_fetched`'s count meaning "fetches", so the granularity
+  follows the call: one event per core call, `chunk_bytes` summed over
+  everything that call had to read and process.
+
+  `source` names which fallback made the call:
+
+    * `:buffered` — one call for the caller's whole range, taken when
+      any chunk in it needs server-side processing, when no location has
+      a data endpoint, or when an erasure-coded file is too degraded for
+      chunk refs. `chunk_bytes` is the sum of the covered chunks'
+      `original_size`, or of the covered stripes' byte ranges when the
+      caller already held the file's metadata.
+    * `:stripe` — one call per stripe of the degraded-erasure walk.
+      `chunk_bytes` is the stripe's whole byte range: core rebuilds the
+      stripe from parity to serve any part of it.
+
+  `chunk_bytes` is **absent, not zero**, on the one path that cannot
+  determine it: the buffered API's degraded-erasure read, which has
+  neither chunk refs (the call that would have returned them is the one
+  that refused) nor a stripe layout, and would need a metadata round trip
+  it does not otherwise make. Zero would claim the call moved nothing,
+  which is the under-report this event exists to end.
+
+  Both events are per-read-path, not per-file: a single `read_file/3`
+  emits either a run of `chunk_fetched` or exactly one `range_fetched`,
+  never both, so summing `chunk_size` and `chunk_bytes` across the two
+  double-counts nothing.
 
   Callers can attribute these events to their own domain object by
   passing `:telemetry_metadata`; the map is merged into the event's
@@ -122,7 +151,7 @@ defmodule NeonFS.Client.ChunkReader do
     * `:exclude_nodes` - nodes to skip when selecting a chunk location
       (useful for avoiding known-bad replicas)
     * `:telemetry_metadata` - a map merged into the metadata of every
-      `chunk_fetched` event this read emits
+      `chunk_fetched` and `range_fetched` event this read emits
   """
   @spec read_file(String.t(), String.t(), read_opts()) ::
           {:ok, binary()} | {:error, term()}
@@ -156,7 +185,7 @@ defmodule NeonFS.Client.ChunkReader do
         dispatch_read(chunks, result.hole_bytes, volume_name, target, opts)
 
       {:error, :stripe_refs_unsupported} ->
-        fallback_read(volume_name, target, opts)
+        degraded_read(volume_name, target, opts)
 
       {:error, _} = error ->
         error
@@ -245,11 +274,14 @@ defmodule NeonFS.Client.ChunkReader do
 
   defp dispatch_read(chunks, hole_bytes, volume_name, target, opts) do
     if Enum.any?(chunks, &needs_server_processing?/1) do
-      fallback_read(volume_name, target, opts)
+      buffered_read(volume_name, target, opts, covered_chunk_bytes(chunks))
     else
       case assemble(chunks, hole_bytes, fetch_ctx(volume_name, opts)) do
-        {:error, :no_data_endpoint} -> fallback_read(volume_name, target, opts)
-        other -> other
+        {:error, :no_data_endpoint} ->
+          buffered_read(volume_name, target, opts, covered_chunk_bytes(chunks))
+
+        other ->
+          other
       end
     end
   end
@@ -409,10 +441,68 @@ defmodule NeonFS.Client.ChunkReader do
     compression != :none or encrypted
   end
 
-  defp fallback_read(volume_name, target, opts) do
+  defp buffered_read(volume_name, target, opts, chunk_bytes) do
+    ctx = fetch_ctx(volume_name, opts)
     forward_opts = Keyword.take(opts, [:offset, :length, :uid, :gids])
-    core_read(volume_name, target, forward_opts)
+    start = System.monotonic_time()
+
+    with {:ok, bytes} = ok <- core_read(volume_name, target, forward_opts) do
+      emit_range_fetched(ctx, byte_size(bytes), chunk_bytes, %{source: :buffered}, start)
+      ok
+    end
   end
+
+  # The buffered API's degraded-erasure read is one core call spanning many
+  # stripes, and the refs call that would have sized it is the call that
+  # just refused. Sizing it needs a `get_file_meta` round trip this path
+  # does not otherwise make — a cost worth deciding on rather than adding
+  # in passing, so the event goes out without `chunk_bytes` — visible as a
+  # read whose chunk cost is unknown, rather than as no read at all.
+  defp degraded_read(volume_name, target, opts) do
+    buffered_read(volume_name, target, opts, nil)
+  end
+
+  # One core call covering many chunks gets one event, not one per chunk:
+  # dividing its duration across the chunks it served would multiply the
+  # histogram by the chunk count, and `chunk_fetched`'s count would stop
+  # meaning "fetches". A `chunk_bytes` we could not determine is left out
+  # rather than sent as zero — see the module doc.
+  defp emit_range_fetched(ctx, read_length, chunk_bytes, source_metadata, start) do
+    measurements =
+      %{read_length: read_length, duration: System.monotonic_time() - start}
+      |> put_chunk_bytes(chunk_bytes)
+
+    metadata =
+      %{volume: ctx.volume}
+      |> Map.merge(source_metadata)
+      |> Map.merge(ctx.telemetry_metadata)
+
+    :telemetry.execute(
+      [:neonfs, :client, :chunk_reader, :range_fetched],
+      measurements,
+      metadata
+    )
+  end
+
+  defp put_chunk_bytes(measurements, nil), do: measurements
+
+  defp put_chunk_bytes(measurements, chunk_bytes),
+    do: Map.put(measurements, :chunk_bytes, chunk_bytes)
+
+  defp covered_chunk_bytes(chunks), do: Enum.sum(Enum.map(chunks, & &1.original_size))
+
+  defp covered_stripe_bytes(%{stripes: stripes} = meta, opts) when is_list(stripes) do
+    offset = Keyword.get(opts, :offset, 0)
+    end_byte = compute_end_byte(meta.size, offset, Keyword.get(opts, :length, :all))
+
+    stripes
+    |> Enum.map(&normalise_byte_range(&1.byte_range))
+    |> Enum.filter(fn {start, stop} -> start < end_byte and stop > offset end)
+    |> Enum.map(fn {start, stop} -> stop - start end)
+    |> Enum.sum()
+  end
+
+  defp covered_stripe_bytes(_meta, _opts), do: nil
 
   defp build_chunk_stream(chunks, hole_bytes, volume_name, target, opts) do
     ctx = fetch_ctx(volume_name, opts)
@@ -499,7 +589,8 @@ defmodule NeonFS.Client.ChunkReader do
   end
 
   defp buffered_fallback_stream(meta, volume_name, target, opts) do
-    with {:ok, bytes} <- fallback_read(volume_name, target, opts) do
+    with {:ok, bytes} <-
+           buffered_read(volume_name, target, opts, covered_stripe_bytes(meta, opts)) do
       stream =
         Stream.unfold(bytes, fn
           <<>> -> nil
@@ -523,28 +614,43 @@ defmodule NeonFS.Client.ChunkReader do
         |> Enum.map(&stripe_segment(&1, offset, end_byte))
         |> Enum.reject(&is_nil/1)
 
-      Stream.unfold(segments, &pull_stripe_segment(&1, volume_name, target))
+      ctx = fetch_ctx(volume_name, opts)
+
+      Stream.unfold(segments, &pull_stripe_segment(&1, ctx, target))
     end
   end
 
+  # `stripe_bytes` is the whole stripe, not the slice of it this segment
+  # asks for: core rebuilds the stripe from parity to serve any part of
+  # it, so that is what the read cost regardless of how much was wanted.
   defp stripe_segment(%{byte_range: byte_range}, offset, end_byte) do
     {s, e} = normalise_byte_range(byte_range)
     read_start = max(s, offset)
     read_end = min(e, end_byte)
 
     if read_start < read_end do
-      %{offset: read_start, length: read_end - read_start}
+      %{offset: read_start, length: read_end - read_start, stripe_bytes: e - s}
     end
   end
 
-  defp pull_stripe_segment([], _volume_name, _target), do: nil
+  defp pull_stripe_segment([], _ctx, _target), do: nil
 
-  defp pull_stripe_segment([%{offset: offset, length: length} | rest], volume_name, target) do
-    case core_read(volume_name, target, offset: offset, length: length) do
+  defp pull_stripe_segment([segment | rest], ctx, target) do
+    start = System.monotonic_time()
+
+    case core_read(ctx.volume, target, offset: segment.offset, length: segment.length) do
       {:ok, <<>>} ->
-        pull_stripe_segment(rest, volume_name, target)
+        pull_stripe_segment(rest, ctx, target)
 
       {:ok, bytes} ->
+        emit_range_fetched(
+          ctx,
+          byte_size(bytes),
+          segment.stripe_bytes,
+          %{source: :stripe},
+          start
+        )
+
         {bytes, rest}
 
       {:error, reason} ->

@@ -947,6 +947,206 @@ defmodule NeonFS.Client.ChunkReaderTest do
     end
   end
 
+  describe "range_fetched telemetry" do
+    setup do
+      ref_tel =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:neonfs, :client, :chunk_reader, :range_fetched],
+          [:neonfs, :client, :chunk_reader, :chunk_fetched]
+        ])
+
+      {:ok, ref_tel: ref_tel}
+    end
+
+    # The buffered fallback is taken precisely because the chunks need
+    # decompressing or decrypting, so reporting the bytes handed back
+    # would show an amplification of 1.0 on the volumes whose read
+    # amplification is worst.
+    test "a buffered fallback reports every chunk the one call had to process", %{
+      ref_tel: ref_tel
+    } do
+      refs = [
+        ref(
+          seed: 1,
+          original_size: 4096,
+          chunk_offset: 0,
+          read_start: 0,
+          read_length: 16,
+          compression: :zstd
+        ),
+        ref(
+          seed: 2,
+          original_size: 2048,
+          chunk_offset: 4096,
+          read_start: 0,
+          read_length: 8,
+          compression: :zstd
+        )
+      ]
+
+      expect(Router, :call, fn NeonFS.Core, :read_file_refs, _ ->
+        {:ok, %{file_size: 6144, chunks: refs, hole_bytes: 0}}
+      end)
+
+      expect(Router, :call, fn NeonFS.Core, :read_file, _ -> {:ok, "0123456789abcdefghij"} end)
+
+      assert {:ok, _bytes} = ChunkReader.read_file("vol", "/z.txt")
+
+      assert_received {[:neonfs, :client, :chunk_reader, :range_fetched], ^ref_tel, measurements,
+                       metadata}
+
+      assert measurements.read_length == 20
+      assert measurements.chunk_bytes == 4096 + 2048
+      assert is_integer(measurements.duration)
+      assert metadata.source == :buffered
+      assert metadata.volume == "vol"
+
+      # One call, one event — not one per chunk it covered, which would
+      # multiply the duration histogram by the chunk count.
+      refute_received {[:neonfs, :client, :chunk_reader, :range_fetched], ^ref_tel, _, _}
+      refute_received {[:neonfs, :client, :chunk_reader, :chunk_fetched], ^ref_tel, _, _}
+    end
+
+    test "a fallback taken for want of a data endpoint reports the same way", %{ref_tel: ref_tel} do
+      refs = [
+        ref(
+          seed: 1,
+          original_size: 512,
+          chunk_offset: 0,
+          read_start: 0,
+          read_length: 4,
+          locations: [%{node: :a@host, drive_id: "d1", tier: :hot}]
+        )
+      ]
+
+      expect(Router, :call, fn NeonFS.Core, :read_file_refs, _ ->
+        {:ok, %{file_size: 512, chunks: refs, hole_bytes: 0}}
+      end)
+
+      stub(Router, :data_call, fn _node, :get_chunk, _args, _opts ->
+        {:error, :no_data_endpoint}
+      end)
+
+      expect(Router, :call, fn NeonFS.Core, :read_file, _ -> {:ok, "abcd"} end)
+
+      assert {:ok, "abcd"} = ChunkReader.read_file("vol", "/nopool.txt")
+
+      assert_received {[:neonfs, :client, :chunk_reader, :range_fetched], ^ref_tel, measurements,
+                       metadata}
+
+      assert measurements.read_length == 4
+      assert measurements.chunk_bytes == 512
+      assert metadata.source == :buffered
+    end
+
+    # Core rebuilds a whole stripe from parity to serve any part of it, so
+    # a ten-byte read of a stripe costs the stripe.
+    test "the degraded-erasure walk reports the whole stripe per call", %{ref_tel: ref_tel} do
+      stripes = [
+        %{stripe_id: "s1", byte_range: {0, 100}},
+        %{stripe_id: "s2", byte_range: {100, 200}}
+      ]
+
+      expect(Router, :call, fn NeonFS.Core, :read_file_refs, _ ->
+        {:error, :stripe_refs_unsupported}
+      end)
+
+      expect(Router, :call, fn NeonFS.Core, :get_file_meta, ["vol", "/ec.bin" | _] ->
+        {:ok, %{size: 200, stripes: stripes}}
+      end)
+
+      expect(Router, :call, 2, fn NeonFS.Core, :read_file, ["vol", "/ec.bin", opts] ->
+        {:ok, String.duplicate("A", opts[:length])}
+      end)
+
+      assert {:ok, %{stream: stream}} =
+               ChunkReader.read_file_stream("vol", "/ec.bin", offset: 90, length: 20)
+
+      assert Enum.into(stream, <<>>) == String.duplicate("A", 20)
+
+      assert_received {[:neonfs, :client, :chunk_reader, :range_fetched], ^ref_tel, first, meta}
+      assert meta.source == :stripe
+      assert first.read_length == 10
+      assert first.chunk_bytes == 100
+
+      assert_received {[:neonfs, :client, :chunk_reader, :range_fetched], ^ref_tel, second, _meta}
+      assert second.read_length == 10
+      assert second.chunk_bytes == 100
+    end
+
+    # Neither refs nor a stripe layout is in hand here, and a metadata
+    # round trip to get one is a cost this path does not otherwise pay.
+    # Zero would claim the call moved nothing.
+    test "the buffered degraded read omits chunk_bytes rather than claiming zero", %{
+      ref_tel: ref_tel
+    } do
+      expect(Router, :call, fn NeonFS.Core, :read_file_refs, _ ->
+        {:error, :stripe_refs_unsupported}
+      end)
+
+      expect(Router, :call, fn NeonFS.Core, :read_file, _ -> {:ok, "ec-file-bytes"} end)
+
+      assert {:ok, "ec-file-bytes"} = ChunkReader.read_file("vol", "/ec.bin")
+
+      assert_received {[:neonfs, :client, :chunk_reader, :range_fetched], ^ref_tel, measurements,
+                       metadata}
+
+      assert measurements.read_length == byte_size("ec-file-bytes")
+      refute Map.has_key?(measurements, :chunk_bytes)
+      assert metadata.source == :buffered
+    end
+
+    test "caller metadata is merged into a range event too", %{ref_tel: ref_tel} do
+      refs = [
+        ref(
+          seed: 1,
+          original_size: 64,
+          chunk_offset: 0,
+          read_start: 0,
+          read_length: 8,
+          encrypted: true
+        )
+      ]
+
+      expect(Router, :call, fn NeonFS.Core, :read_file_refs, _ ->
+        {:ok, %{file_size: 64, chunks: refs, hole_bytes: 0}}
+      end)
+
+      expect(Router, :call, fn NeonFS.Core, :read_file, _ -> {:ok, "12345678"} end)
+
+      assert {:ok, "12345678"} =
+               ChunkReader.read_file("vol", "/tagged.bin",
+                 telemetry_metadata: %{export: "vol:/dev.img"}
+               )
+
+      assert_received {[:neonfs, :client, :chunk_reader, :range_fetched], ^ref_tel, _measurements,
+                       metadata}
+
+      assert metadata.export == "vol:/dev.img"
+    end
+
+    # A read served entirely from the data plane must not also look like a
+    # range fetch, or the two series double-count each other.
+    test "a per-chunk read emits no range event", %{ref_tel: ref_tel} do
+      chunk = String.duplicate("D", 16)
+
+      refs = [
+        ref(content: chunk, original_size: 16, chunk_offset: 0, read_start: 0, read_length: 16)
+      ]
+
+      expect(Router, :call, fn NeonFS.Core, :read_file_refs, _ ->
+        {:ok, %{file_size: 16, chunks: refs, hole_bytes: 0}}
+      end)
+
+      expect(Router, :data_call, fn :node1@host, :get_chunk, _args, _opts -> {:ok, chunk} end)
+
+      assert {:ok, ^chunk} = ChunkReader.read_file("vol", "/plain.bin")
+
+      assert_received {[:neonfs, :client, :chunk_reader, :chunk_fetched], ^ref_tel, _, _}
+      refute_received {[:neonfs, :client, :chunk_reader, :range_fetched], ^ref_tel, _, _}
+    end
+  end
+
   describe "chunk cache" do
     setup do
       start_supervised!({NeonFS.Client.ChunkCache, max_bytes: 1_000_000})
