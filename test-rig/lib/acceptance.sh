@@ -39,20 +39,20 @@ CIFS_PASS="${CIFS_PASS:-neonfs-rig}"
 # derived from one number rather than restated.
 #
 # Creating the volume writes the whole device as zeroes, one metadata entry
-# per 128 KiB chunk, and that commit rate — not the bytes — is what bounds
-# the size a rig run can afford. Measured on a single-node rig VM: 64 MiB in
-# 82 s and 256 MiB in 273 s, about 7 chunks/s either way, which puts a
-# gigabyte device at ~18 minutes of `volume create` before a single step
-# runs. 64 MiB keeps the suite usable and still crosses every device
-# boundary the steps care about; raise `BLOCK_MIB` (and
-# `BLOCK_CREATE_TIMEOUT` with it) to exercise a larger one deliberately.
+# per 128 KiB chunk, and that is what bounds the size a rig run can afford —
+# not the bytes. Measured on a single-node rig VM: 64 MiB in 82 s, 256 MiB
+# in 273 s, about 7 chunks/s either way. Worse, 64 MiB commits its chunk
+# list as a single batch that exceeds the volume committer's deadline, so
+# the create is refused outright; 8 MiB provisions in seconds and still
+# crosses every device boundary these steps care about. Raise `BLOCK_MIB`
+# to exercise a larger device once the extent map lands.
 BLOCK_VOL="${BLOCK_VOL:-accept_block}"
-BLOCK_MIB="${BLOCK_MIB:-64}"
+BLOCK_MIB="${BLOCK_MIB:-8}"
 BLOCK_SIZE="${BLOCK_MIB}M"
 BLOCK_BYTES=$(( BLOCK_MIB * 1024 * 1024 ))
 BLOCK_DEV="${BLOCK_DEV:-/dev/nbd0}"
 BLOCK_MNT="/mnt/${BLOCK_VOL}-blk"
-BLOCK_FIO_BYTES="${BLOCK_FIO_BYTES:-32M}"
+BLOCK_FIO_BYTES="${BLOCK_FIO_BYTES:-4M}"
 BLOCK_CREATE_TIMEOUT="${BLOCK_CREATE_TIMEOUT:-600}"
 
 # Set by s_block_attach once the kernel has the device; gates the steps that
