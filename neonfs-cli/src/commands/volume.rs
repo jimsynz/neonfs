@@ -11,6 +11,10 @@ use clap::Subcommand;
 use eetf::{Atom, BigInteger, Binary, FixInteger, Map, Term};
 use std::collections::HashMap;
 
+/// A block volume's device advertises 4 KiB logical blocks, so its size has
+/// to be a whole number of them.
+const BLOCK_DEVICE_ALIGNMENT: u64 = 4096;
+
 /// Volume management subcommands
 #[derive(Debug, Subcommand)]
 pub enum VolumeCommand {
@@ -29,8 +33,8 @@ pub enum VolumeCommand {
         volume_type: String,
 
         /// Size in bytes, with an optional K/M/G/T suffix. Required for
-        /// `--type block`, where it is the device size; a size quota on a
-        /// filesystem volume.
+        /// `--type block`, where it is the device size and must be a
+        /// positive multiple of 4096; a size quota on a filesystem volume.
         #[arg(long)]
         size: Option<String>,
 
@@ -958,6 +962,27 @@ impl VolumeCommand {
         value.checked_mul(multiplier).ok_or_else(size_err)
     }
 
+    /// A block volume's `--size` is its device size, so it must be given and
+    /// must be a whole number of logical blocks. There is no rounding: the
+    /// device is the size that was asked for, or there is an error. The
+    /// daemon re-checks this, but refusing here reports it before a volume
+    /// is created and rolled back.
+    fn validate_device_size(max_size: Option<u64>) -> Result<()> {
+        match max_size {
+            None => Err(crate::error::CliError::InvalidArgument(
+                "--size is required for --type block; it is the device size".to_string(),
+            )),
+            Some(size) if size == 0 || size % BLOCK_DEVICE_ALIGNMENT != 0 => {
+                Err(crate::error::CliError::InvalidArgument(format!(
+                    "--size for --type block must be a positive multiple of {} bytes \
+                     (the device's logical block size); got {}",
+                    BLOCK_DEVICE_ALIGNMENT, size
+                )))
+            }
+            Some(_) => Ok(()),
+        }
+    }
+
     /// Default replicate durability map derived from `--replicas`.
     fn replicate_map(replicas: u32) -> Term {
         Term::Map(Map {
@@ -1049,10 +1074,8 @@ impl VolumeCommand {
 
         let max_size = size.map(Self::parse_size).transpose()?;
 
-        if volume_type == "block" && max_size.is_none() {
-            return Err(crate::error::CliError::InvalidArgument(
-                "--size is required for --type block; it is the device size".to_string(),
-            ));
+        if volume_type == "block" {
+            Self::validate_device_size(max_size)?;
         }
 
         // A block volume cannot compress — the daemon rejects one that asks
@@ -2500,6 +2523,19 @@ mod tests {
         for bad in ["", "G", "10X", "ten", "10 G", "-1"] {
             assert!(
                 VolumeCommand::parse_size(bad).is_err(),
+                "expected {bad:?} to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn device_size_must_be_a_whole_number_of_logical_blocks() {
+        assert!(VolumeCommand::validate_device_size(Some(4096)).is_ok());
+        assert!(VolumeCommand::validate_device_size(Some(10 * 1024 * 1024 * 1024)).is_ok());
+
+        for bad in [None, Some(0), Some(1), Some(4095), Some(4097), Some(6144)] {
+            assert!(
+                VolumeCommand::validate_device_size(bad).is_err(),
                 "expected {bad:?} to be rejected"
             );
         }

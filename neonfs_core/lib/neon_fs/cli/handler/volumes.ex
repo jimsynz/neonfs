@@ -20,6 +20,7 @@ defmodule NeonFS.CLI.Handler.Volumes do
     ACLManager,
     AuditLog,
     Authorise,
+    BlockBacking,
     DriveRegistry,
     KeyManager,
     KeyRotation,
@@ -104,7 +105,8 @@ defmodule NeonFS.CLI.Handler.Volumes do
            final_opts = merge_verification_defaults(enc_opts),
            :ok <- check_durability_fits_cluster(name, final_opts),
            {:ok, volume} <- VolumeRegistry.create(name, final_opts),
-           :ok <- setup_encryption_if_needed(volume) do
+           :ok <- setup_encryption_if_needed(volume),
+           :ok <- BlockBacking.provision_volume_device(volume) do
         create_initial_acl(volume.id, owner_uid, owner_gid)
 
         AuditLog.log_event(

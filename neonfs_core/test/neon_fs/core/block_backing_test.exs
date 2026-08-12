@@ -90,6 +90,37 @@ defmodule NeonFS.Core.BlockBackingTest do
     end
   end
 
+  describe "provision_volume_device/1" do
+    test "a block volume created through core owns a device sized to its maximum" do
+      name = "block-provisioned-#{:rand.uniform(999_999)}"
+
+      {:ok, volume} =
+        NeonFS.Core.create_volume(name, type: :block, max_size: 4 * @chunk)
+
+      assert volume.type == :block
+
+      assert {:ok, device} = BlockBacking.open_device(name, BlockBacking.device_path())
+      assert device.size == 4 * @chunk
+    end
+
+    test "a filesystem volume is left alone" do
+      name = "fs-#{:rand.uniform(999_999)}"
+
+      {:ok, _volume} = NeonFS.Core.create_volume(name, max_size: 4 * @chunk)
+
+      assert {:error, _reason} = BlockBacking.open_device(name, BlockBacking.device_path())
+    end
+
+    test "a device that cannot be written takes its volume with it" do
+      name = "block-unaligned-#{:rand.uniform(999_999)}"
+
+      assert {:error, {:invalid_device_size, 4097}} =
+               NeonFS.Core.create_volume(name, type: :block, max_size: 4097)
+
+      refute NeonFS.Core.volume_exists?(name)
+    end
+  end
+
   describe "write/5" do
     setup %{volume_name: volume_name} do
       {:ok, device} = BlockBacking.create_device(volume_name, "/dev.img", 8 * @chunk)

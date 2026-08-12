@@ -11,6 +11,10 @@ defmodule NeonFS.Block.Device do
   A volume name cannot contain a colon, so the split is unambiguous, and the
   path keeps its leading slash exactly as it appears in the volume.
 
+  A bare `<volume>` names that volume's own device, whose path core answers
+  with rather than this module assuming it. That is the form `nbd-client -N
+  blockvol` and CSI want, and one device per volume makes it unambiguous.
+
   ## Reads stream
 
   A read never materialises its range. `NeonFS.Client.ChunkReader` yields one
@@ -206,8 +210,17 @@ defmodule NeonFS.Block.Device do
 
   defp split_export(export) do
     case String.split(export, ":", parts: 2) do
-      [volume, path] when volume != "" and path != "" -> {:ok, volume, path}
-      _otherwise -> {:error, {:malformed_export_name, export}}
+      [volume, path] when volume != "" and path != "" ->
+        {:ok, volume, path}
+
+      [volume] when volume != "" ->
+        case core_call(:device_path, []) do
+          path when is_binary(path) -> {:ok, volume, path}
+          other -> {:error, other}
+        end
+
+      _otherwise ->
+        {:error, {:malformed_export_name, export}}
     end
   end
 
