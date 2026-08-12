@@ -2,7 +2,7 @@ defmodule NeonFS.Client.RouterDataCallTest do
   use ExUnit.Case, async: false
 
   alias NeonFS.Client.Router
-  alias NeonFS.Transport.{PoolManager, PoolSupervisor, TLS}
+  alias NeonFS.Transport.{PoolManager, PoolSupervisor, StubBlobStore, TLS}
 
   @moduletag :tmp_dir
 
@@ -12,6 +12,40 @@ defmodule NeonFS.Client.RouterDataCallTest do
     test "returns {:error, :no_data_endpoint} when no pool exists" do
       assert {:error, :no_data_endpoint} =
                Router.data_call(:unknown@host, :get_chunk, hash: "abc", volume_id: "vol1")
+    end
+  end
+
+  describe "data_call/4 targeting this node" do
+    setup do
+      start_supervised!(StubBlobStore)
+      StubBlobStore.seed("abc", "chunk-bytes")
+      Application.put_env(:neonfs_client, :dispatch_module, StubBlobStore)
+      on_exit(fn -> Application.delete_env(:neonfs_client, :dispatch_module) end)
+    end
+
+    # There is no pool from a node to itself — PoolManager discovers peers —
+    # so without a local path these answer `:no_data_endpoint` and the
+    # caller falls back to an RPC per chunk.
+    test "reads a chunk from this node's own blob store" do
+      assert {:ok, "chunk-bytes"} =
+               Router.data_call(node(), :get_chunk, hash: "abc", volume_id: "vol1")
+    end
+
+    test "answers has_chunk from the local store" do
+      assert {:ok, %{tier: :hot, size: 11}} =
+               Router.data_call(node(), :has_chunk, hash: "abc")
+    end
+
+    test "reports a chunk this node does not hold" do
+      assert {:error, _reason} =
+               Router.data_call(node(), :get_chunk, hash: "missing", volume_id: "vol1")
+    end
+
+    # A write fans out replicas as part of the store, which is the data
+    # plane's job rather than this shortcut's.
+    test "leaves a local write to the generic path" do
+      assert {:error, :no_data_endpoint} =
+               Router.data_call(node(), :put_chunk, hash: "abc", data: "x")
     end
   end
 
