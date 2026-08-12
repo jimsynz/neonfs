@@ -192,7 +192,8 @@ defmodule NeonFS.CIFS.Handler do
     with_volume(state, fn volume, state ->
       with {:ok, file} <- open_or_create(volume, path, flags, create_mode),
            {:ok, claim_id} <- pin_file(volume, path),
-           {:ok, handle} <- HandleRegistry.open(volume, file.id, flags, claim_id, self()) do
+           {:ok, handle} <-
+             HandleRegistry.open(volume, file.id, path, flags, claim_id, self()) do
         {{:ok, %{handle: handle}}, state}
       else
         {:error, reason} -> {{:error, errno_for(reason)}, state}
@@ -425,12 +426,25 @@ defmodule NeonFS.CIFS.Handler do
   # directory's attributes live in a path-keyed record the by-id API cannot
   # reach. `Core.update_file_meta/4` dispatches on record type, so the path
   # form serves both.
+  # The volume root is the one target with no identity to address: its
+  # `FileMeta` carries `id: nil`, so a by-id lookup has nothing to look up
+  # and answers an error that surfaces to smbd as EIO. It resolves by name
+  # instead. This clause has to come first — an entry carries both keys, so
+  # the `file_id` clause below would otherwise match with a nil id.
+  defp set_attrs(%{volume: volume, file_id: nil, path: path}, updates) do
+    core_call(NeonFS.Core, :update_file_meta, [volume, path, updates])
+  end
+
   defp set_attrs(%{volume: volume, file_id: file_id}, updates) do
     core_call(NeonFS.Core, :update_file_meta_by_id, [volume, file_id, updates])
   end
 
   defp set_attrs(%{volume: volume, path: path}, updates) do
     core_call(NeonFS.Core, :update_file_meta, [volume, path, updates])
+  end
+
+  defp fetch_meta(%{volume: volume, file_id: nil, path: path}) do
+    core_call(NeonFS.Core, :get_file_meta, [volume, path])
   end
 
   defp fetch_meta(%{volume: volume, file_id: file_id}) do

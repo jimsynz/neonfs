@@ -13,6 +13,15 @@ defmodule NeonFS.CIFS.HandleRegistry do
   pin taken at open, so the file survives an unlink for as long as the
   handle is open and a rename does not move the pin off it.
 
+  It also holds the path the handle was opened at, for the one thing with
+  no identity to be held by: the volume root, whose `FileMeta` carries
+  `id: nil`. smbd opens a pathref on the share root and stats it *through
+  that handle* on every tree connect, so with no name to fall back on the
+  root is reachable by path and unreachable by handle — and smbd only ever
+  asks by handle. The path serves that case alone; anything with an id
+  still resolves by identity, which is what keeps a handle working across
+  a rename.
+
   ## Releasing the pin exactly once
 
   Two things can end a handle: an explicit `close/1`, and the owning
@@ -37,7 +46,8 @@ defmodule NeonFS.CIFS.HandleRegistry do
   @type handle :: pos_integer()
   @type entry :: %{
           volume: String.t(),
-          file_id: String.t(),
+          file_id: String.t() | nil,
+          path: String.t(),
           flags: integer(),
           claim_id: String.t() | nil,
           owner: pid()
@@ -58,10 +68,10 @@ defmodule NeonFS.CIFS.HandleRegistry do
   `owner` is the connection process; its death releases this handle's pin and
   no others.
   """
-  @spec open(String.t(), String.t(), integer(), String.t() | nil, pid()) ::
+  @spec open(String.t(), String.t() | nil, String.t(), integer(), String.t() | nil, pid()) ::
           {:ok, handle()} | {:error, term()}
-  def open(volume, file_id, flags, claim_id, owner \\ self()) do
-    GenServer.call(__MODULE__, {:open, volume, file_id, flags, claim_id, owner})
+  def open(volume, file_id, path, flags, claim_id, owner \\ self()) do
+    GenServer.call(__MODULE__, {:open, volume, file_id, path, flags, claim_id, owner})
   end
 
   @doc """
@@ -110,10 +120,18 @@ defmodule NeonFS.CIFS.HandleRegistry do
   end
 
   @impl true
-  def handle_call({:open, volume, file_id, flags, claim_id, owner}, _from, state) do
+  def handle_call({:open, volume, file_id, path, flags, claim_id, owner}, _from, state) do
     handle = state.next_handle
 
-    entry = %{volume: volume, file_id: file_id, flags: flags, claim_id: claim_id, owner: owner}
+    entry = %{
+      volume: volume,
+      file_id: file_id,
+      path: path,
+      flags: flags,
+      claim_id: claim_id,
+      owner: owner
+    }
+
     :ets.insert(@table, {handle, entry})
 
     {:reply, {:ok, handle}, %{state | next_handle: handle + 1, monitors: monitor(state, owner)}}
