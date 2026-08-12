@@ -75,6 +75,12 @@ defmodule NeonFS.Core.BlockBacking do
   @chunk_bytes 131_072
   @chunk_strategy {:fixed, @chunk_bytes}
 
+  # One device per volume means the backing file's name is the same
+  # everywhere, so it is defined once here rather than spelled out by core,
+  # the CLI, CSI and the acceptance rig. It is deliberately not a field on
+  # the volume record, which could only ever hold this one value.
+  @device_path "/dev.img"
+
   @logical_block_bytes 4096
   @physical_block_bytes 4096
 
@@ -105,6 +111,34 @@ defmodule NeonFS.Core.BlockBacking do
   """
   @spec chunk_bytes() :: pos_integer()
   def chunk_bytes, do: @chunk_bytes
+
+  @doc """
+  The path of the single backing file a block volume holds.
+  """
+  @spec device_path() :: String.t()
+  def device_path, do: @device_path
+
+  @doc """
+  Provisions the device a freshly-created block volume owns.
+
+  A block volume is its device: `max_size` is both the volume's quota and
+  the device's size, so creating one provisions the backing file rather
+  than leaving the volume half-made until a second command runs. Volumes
+  of any other type are left alone.
+
+  A device that cannot be written takes its volume with it — the volume is
+  deleted and the device's error returned, so a block volume without its
+  device is never observable.
+  """
+  @spec provision_volume_device(NeonFS.Core.Volume.t()) :: :ok | {:error, term()}
+  def provision_volume_device(%{type: :block, name: name, max_size: max_size}) do
+    case create_device(name, @device_path, max_size) do
+      {:ok, _device} -> :ok
+      {:error, _reason} = error -> rollback(error, name)
+    end
+  end
+
+  def provision_volume_device(_volume), do: :ok
 
   @doc """
   Creates a backing file of exactly `size_bytes` at `path` in `volume`.
@@ -323,6 +357,11 @@ defmodule NeonFS.Core.BlockBacking do
     )
 
     result
+  end
+
+  defp rollback(error, volume) do
+    _ = Core.delete_volume(volume)
+    error
   end
 
   defp device_from_meta(volume, meta) do

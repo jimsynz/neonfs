@@ -10,6 +10,7 @@ defmodule NeonFS.CLI.HandlerTest do
 
   alias NeonFS.Core.{
     AuditLog,
+    BlockBacking,
     CertificateAuthority,
     ClusterMode,
     Drive,
@@ -642,6 +643,15 @@ defmodule NeonFS.CLI.HandlerTest do
     end
 
     test "creates a block volume from the string type the CLI sends" do
+      # Alone among these, this one provisions a device, so it needs the
+      # storage stack behind it rather than the registry alone.
+      start_drive_registry()
+      start_blob_store()
+      start_chunk_index()
+      start_file_index()
+      start_stripe_index()
+      ensure_chunk_access_tracker()
+
       vol_name = "blk-vol-#{:rand.uniform(999_999)}"
 
       assert {:ok, volume} =
@@ -653,6 +663,10 @@ defmodule NeonFS.CLI.HandlerTest do
 
       assert {:ok, stored} = VolumeRegistry.get_by_name(vol_name)
       assert stored.type == :block
+
+      assert {:ok, device} = BlockBacking.open_device(vol_name, BlockBacking.device_path())
+
+      assert device.size == 1024 * 1024
     end
 
     test "refuses a block volume with no size" do

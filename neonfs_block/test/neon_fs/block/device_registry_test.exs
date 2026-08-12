@@ -9,9 +9,9 @@ defmodule NeonFS.Block.DeviceRegistryTest do
   end
 
   describe "attach/3" do
-    test "refuses an export that does not name a volume and a path", %{registry: registry} do
-      assert {:error, {:malformed_export_name, "nocolon"}} =
-               DeviceRegistry.attach("nocolon", self(), registry)
+    test "refuses an export that names neither a volume nor a path", %{registry: registry} do
+      assert {:error, {:malformed_export_name, ""}} =
+               DeviceRegistry.attach("", self(), registry)
 
       assert {:error, {:malformed_export_name, ":/dev.img"}} =
                DeviceRegistry.attach(":/dev.img", self(), registry)
@@ -20,8 +20,28 @@ defmodule NeonFS.Block.DeviceRegistryTest do
                DeviceRegistry.attach("vol:", self(), registry)
     end
 
+    test "a bare volume names that volume's own device", %{registry: registry} do
+      test = self()
+
+      Application.put_env(:neonfs_block, :core_call_fn, fn _module, function, args ->
+        send(test, {:core_call, function, args})
+
+        case function do
+          :device_path -> "/dev.img"
+          :open_device -> {:error, :not_found}
+        end
+      end)
+
+      on_exit(fn -> Application.delete_env(:neonfs_block, :core_call_fn) end)
+
+      DeviceRegistry.attach("blockvol", self(), registry)
+
+      assert_receive {:core_call, :device_path, []}
+      assert_receive {:core_call, :open_device, ["blockvol", "/dev.img"]}
+    end
+
     test "a failed attach leaves nothing attached", %{registry: registry} do
-      DeviceRegistry.attach("nocolon", self(), registry)
+      DeviceRegistry.attach(":/dev.img", self(), registry)
 
       assert DeviceRegistry.attached(registry) == %{}
     end

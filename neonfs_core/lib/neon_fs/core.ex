@@ -9,6 +9,7 @@ defmodule NeonFS.Core do
   """
 
   alias NeonFS.Core.Authorise
+  alias NeonFS.Core.BlockBacking
   alias NeonFS.Core.ClusterMode
   alias NeonFS.Core.CommitChunks
   alias NeonFS.Core.CredentialManager
@@ -139,15 +140,22 @@ defmodule NeonFS.Core do
   """
   @spec create_volume(String.t()) :: {:ok, NeonFS.Core.Volume.t()} | {:error, term()}
   def create_volume(name) do
-    VolumeRegistry.create(name)
+    create_volume(name, [])
   end
 
   @doc """
   Creates a volume with the given name and options.
+
+  A volume of `type: :block` is provisioned with its backing device, sized
+  to the volume's `max_size` — see
+  `NeonFS.Core.BlockBacking.provision_volume_device/1`.
   """
   @spec create_volume(String.t(), keyword()) :: {:ok, NeonFS.Core.Volume.t()} | {:error, term()}
   def create_volume(name, opts) do
-    VolumeRegistry.create(name, opts)
+    with {:ok, volume} <- VolumeRegistry.create(name, opts),
+         :ok <- BlockBacking.provision_volume_device(volume) do
+      {:ok, volume}
+    end
   end
 
   @doc """
