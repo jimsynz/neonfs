@@ -54,20 +54,42 @@ defmodule NeonFS.Block.ProtocolTest do
       payload = <<6::32, "neonfs", 2::16, 0::16, 3::16>>
 
       assert {:ok, {:go, %{name: "neonfs", info_requests: [0, 3]}}, ""} =
-               Protocol.decode_option(option_frame(8, payload))
+               Protocol.decode_option(option_frame(7, payload))
     end
 
     test "reads NBD_OPT_INFO the same way as GO" do
       payload = <<6::32, "neonfs", 0::16>>
 
       assert {:ok, {:info, %{name: "neonfs", info_requests: []}}, ""} =
-               Protocol.decode_option(option_frame(7, payload))
+               Protocol.decode_option(option_frame(6, payload))
     end
 
     test "names the payload-free options" do
       assert {:ok, {:abort, nil}, ""} = Protocol.decode_option(option_frame(2, ""))
       assert {:ok, {:list, nil}, ""} = Protocol.decode_option(option_frame(3, ""))
-      assert {:ok, {:structured_reply, nil}, ""} = Protocol.decode_option(option_frame(9, ""))
+      assert {:ok, {:structured_reply, nil}, ""} = Protocol.decode_option(option_frame(8, ""))
+    end
+
+    # The numbers, spelled out against the specification rather than against
+    # this module: a code map shifted by one still round-trips through its own
+    # encoder, so only the constants themselves can catch it. A real client
+    # sending NBD_OPT_GO (7) into a map that reads 7 as NBD_OPT_INFO gets a
+    # correct-looking info reply and a connection that never transmits.
+    test "reads each option at the code the specification assigns it" do
+      for {code, option} <- [
+            {1, :export_name},
+            {2, :abort},
+            {3, :list},
+            {5, :starttls},
+            {6, :info},
+            {7, :go},
+            {8, :structured_reply}
+          ] do
+        assert {:ok, decoded, ""} =
+                 Protocol.decode_option(option_frame(code, payload_for(option)))
+
+        assert elem(decoded, 0) == option, "option #{code} decoded as #{inspect(decoded)}"
+      end
     end
 
     test "returns an unknown option as unknown rather than as an error" do
@@ -97,19 +119,19 @@ defmodule NeonFS.Block.ProtocolTest do
       # A name length that overruns its own payload: complete frame, nonsense
       # contents. Answering `NBD_REP_ERR_INVALID` needs the option code, so it
       # comes back as unknown rather than as an error.
-      assert {:ok, {:unknown, %{code: 8}}, ""} =
-               Protocol.decode_option(option_frame(8, <<99::32, "no">>))
+      assert {:ok, {:unknown, %{code: 7}}, ""} =
+               Protocol.decode_option(option_frame(7, <<99::32, "no">>))
     end
   end
 
   describe "option replies" do
     test "carry the option being answered and the reply type" do
       reply = Protocol.encode_option_reply(:go, :ack)
-      assert <<0x0003E889045565A9::64, 8::32, 1::32, 0::32>> = reply
+      assert <<0x0003E889045565A9::64, 7::32, 1::32, 0::32>> = reply
     end
 
     test "refuse structured replies with the code the protocol requires" do
-      assert <<_magic::64, 9::32, 0x80000001::32, 0::32>> =
+      assert <<_magic::64, 8::32, 0x80000001::32, 0::32>> =
                Protocol.encode_option_reply(:structured_reply, :err_unsup)
     end
 
@@ -117,7 +139,7 @@ defmodule NeonFS.Block.ProtocolTest do
       payload = Protocol.encode_info_export(@export)
       reply = Protocol.encode_option_reply(:go, :info, payload)
 
-      assert <<_magic::64, 8::32, 3::32, length::32, rest::binary>> = reply
+      assert <<_magic::64, 7::32, 3::32, length::32, rest::binary>> = reply
       assert length == byte_size(payload)
       assert rest == payload
     end
@@ -303,7 +325,7 @@ defmodule NeonFS.Block.ProtocolTest do
 
     property "a decoded option keeps whatever followed it" do
       check all(
-              code <- member_of([2, 3, 9]),
+              code <- member_of([2, 3, 8]),
               trailing <- binary(max_length: 64)
             ) do
         frame = option_frame(code, "") <> trailing
@@ -318,6 +340,12 @@ defmodule NeonFS.Block.ProtocolTest do
       end
     end
   end
+
+  # NBD_OPT_GO and NBD_OPT_INFO carry a name and an info-request list; the
+  # rest of the options this server knows carry nothing.
+  defp payload_for(option) when option in [:go, :info], do: <<6::32, "neonfs", 0::16>>
+  defp payload_for(:export_name), do: "neonfs"
+  defp payload_for(_option), do: ""
 
   defp option_frame(code, payload) do
     <<@ihaveopt::64, code::32, byte_size(payload)::32, payload::binary>>

@@ -488,6 +488,11 @@ REMOTE
 # fio's own verification, not ours: a crc32c mismatch is a corrupt device.
 # The run deliberately includes the device's last block, so an off-by-one at
 # the end of the device fails here rather than in production.
+#
+# Runs before the filesystem step, not after: it writes random data across
+# the device, superblock included, so a filesystem laid down first would not
+# survive it — and the step that follows would report the destruction as its
+# own failure.
 s_block_fio_verify() {
   [ "${BLOCK_READY}" = 1 ] || return 77
   node_ssh 1 "command -v fio >/dev/null 2>&1 || sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q fio >/dev/null 2>&1
@@ -654,8 +659,8 @@ acceptance_run() {
   step "CIFS/SMB share (smbd + vfs_neonfs)"          s_cifs_share
   step "CIFS/SMB operations (smbclient round-trip)"  s_cifs_ops
   step "block device attach (nbd-client + geometry)" s_block_attach
-  step "block device filesystem (mkfs.ext4/remount)" s_block_fs
   step "block device fio --verify=crc32c"            s_block_fio_verify
+  step "block device filesystem (mkfs.ext4/remount)" s_block_fs
   step "block device detach (data survives)"         s_block_detach
   step "volume show reflects stored data"           s_volume_stats
   step "FUSE unmount does not wedge control plane"  s_fuse_unmount_resilience
