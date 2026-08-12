@@ -147,12 +147,29 @@ defmodule NeonFS.Integration.CLITest do
     env = [
       {"NEONFS_COOKIE", cookie_str},
       {"NEONFS_NODE", node_str},
-      {"NEONFS_DIST_PORT", Integer.to_string(node_info.dist_port)}
+      {"NEONFS_DIST_PORT", Integer.to_string(node_info.dist_port)},
+      {"NEONFS_TLS_DIR", cli_tls_dir(node_info)}
     ]
 
     case System.cmd(@cli_path, args, stderr_to_stdout: true, env: env) do
       {output, 0} -> {:ok, output}
       {output, code} -> {:error, {code, output}}
     end
+  end
+
+  # An empty directory, deliberately. `NEONFS_TLS_DIR` unset defaults to
+  # `/var/lib/neonfs/tls`, so on a machine with NeonFS actually installed
+  # the CLI reads the *host's* production material and fails on its
+  # permissions — the test's result then depends on what else is on the
+  # box. The CLI enables TLS distribution only when `ssl_dist.conf` is in
+  # this directory; with none it dials plainly, which is what it already
+  # does in CI (where the default path does not exist) and therefore what
+  # these tests have always covered. Pointing it at the peer's own `tls/`
+  # would not work either: the cluster CA there issues node certs, not the
+  # `cli.crt`/`cli.key`/`local-ca.crt` triple the CLI wants.
+  defp cli_tls_dir(node_info) do
+    dir = Path.join(node_info.data_dir, "cli-tls")
+    File.mkdir_p!(dir)
+    dir
   end
 end

@@ -23,6 +23,8 @@ defmodule NeonFS.TestSupport.LoopbackDevice do
       end
   """
 
+  alias NeonFS.TestSupport.Privileges
+
   @type t :: %__MODULE__{
           path: String.t(),
           loop_device: String.t(),
@@ -38,7 +40,7 @@ defmodule NeonFS.TestSupport.LoopbackDevice do
   """
   @spec available?() :: boolean()
   def available? do
-    root?() and losetup_present?()
+    Privileges.root?() and losetup_present?()
   end
 
   @doc """
@@ -92,13 +94,6 @@ defmodule NeonFS.TestSupport.LoopbackDevice do
   end
 
   # --- Private helpers ---
-
-  defp root? do
-    case System.cmd("id", ["-u"], stderr_to_stdout: true) do
-      {"0\n", 0} -> true
-      _ -> false
-    end
-  end
 
   defp losetup_present? do
     case System.find_executable("losetup") do

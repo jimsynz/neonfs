@@ -38,6 +38,18 @@ loopback_excludes =
     [:loopback]
   end
 
+# Exclude tests that need root unless we have it. `:requires_root` was
+# already tagged on the containerd and drive-space modules but never
+# excluded, so an unprivileged run failed them on the machine rather than
+# on the change — `containerd` boots but cannot create its runtime state,
+# and `losetup` refuses outright.
+root_excludes =
+  if NeonFS.TestSupport.Privileges.root?() do
+    []
+  else
+    [:requires_root]
+  end
+
 # Exclude containerd-dependent tests unless `containerd` and `ctr` are on PATH.
 # Prep work for the containerd content-store integration tests.
 containerd_excludes =
@@ -64,6 +76,7 @@ test_registry_excludes =
 
 excludes =
   loopback_excludes ++
+    root_excludes ++
     containerd_excludes ++
     test_registry_excludes ++ [:profile, :benchmark]
 

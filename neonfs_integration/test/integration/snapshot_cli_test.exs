@@ -149,12 +149,21 @@ defmodule NeonFS.Integration.SnapshotCLITest do
     env = [
       {"NEONFS_COOKIE", cookie_str},
       {"NEONFS_NODE", node_str},
-      {"NEONFS_DIST_PORT", Integer.to_string(node_info.dist_port)}
+      {"NEONFS_DIST_PORT", Integer.to_string(node_info.dist_port)},
+      {"NEONFS_TLS_DIR", cli_tls_dir(node_info)}
     ]
 
     case System.cmd(@cli_path, args, stderr_to_stdout: true, env: env) do
       {output, 0} -> {:ok, output}
       {output, code} -> {:error, {code, output}}
     end
+  end
+
+  # See the same helper in `cli_test.exs` for why this is empty rather
+  # than the peer's own `tls/`.
+  defp cli_tls_dir(node_info) do
+    dir = Path.join(node_info.data_dir, "cli-tls")
+    File.mkdir_p!(dir)
+    dir
   end
 end
