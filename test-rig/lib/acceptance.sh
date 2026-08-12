@@ -35,6 +35,30 @@ CIFS_SOCK="${CIFS_SOCK:-/run/neonfs/cifs.sock}"
 CIFS_USER="${CIFS_USER:-neonfs}"
 CIFS_PASS="${CIFS_PASS:-neonfs-rig}"
 
+# Block device (NBD). The volume's size is the device's size, so the two are
+# derived from one number rather than restated.
+#
+# Creating the volume writes the whole device as zeroes, one metadata entry
+# per 128 KiB chunk, and that commit rate — not the bytes — is what bounds
+# the size a rig run can afford. Measured on a single-node rig VM: 64 MiB in
+# 82 s and 256 MiB in 273 s, about 7 chunks/s either way, which puts a
+# gigabyte device at ~18 minutes of `volume create` before a single step
+# runs. 64 MiB keeps the suite usable and still crosses every device
+# boundary the steps care about; raise `BLOCK_MIB` (and
+# `BLOCK_CREATE_TIMEOUT` with it) to exercise a larger one deliberately.
+BLOCK_VOL="${BLOCK_VOL:-accept_block}"
+BLOCK_MIB="${BLOCK_MIB:-64}"
+BLOCK_SIZE="${BLOCK_MIB}M"
+BLOCK_BYTES=$(( BLOCK_MIB * 1024 * 1024 ))
+BLOCK_DEV="${BLOCK_DEV:-/dev/nbd0}"
+BLOCK_MNT="/mnt/${BLOCK_VOL}-blk"
+BLOCK_FIO_BYTES="${BLOCK_FIO_BYTES:-32M}"
+BLOCK_CREATE_TIMEOUT="${BLOCK_CREATE_TIMEOUT:-600}"
+
+# Set by s_block_attach once the kernel has the device; gates the steps that
+# operate on it, and cleared again by s_block_detach.
+BLOCK_READY=0
+
 # --- harness ---------------------------------------------------------------
 
 A_PASS=0 ; A_FAIL=0 ; A_SKIP=0
@@ -390,6 +414,147 @@ echo "cifs round-trip OK (mkdir/put/stat/readdir/get/rename/delete/rmdir)"
 REMOTE
 }
 
+# --- block device (NBD) ----------------------------------------------------
+#
+# A kernel block device cannot be attached from inside a container — the `nbd`
+# module has to be loaded on the host that runs the client — which is why this
+# lives here rather than in ExUnit or a package CI job. The VM installs the
+# real `.deb` packages, so the NBD listener is the shipped one.
+#
+# The device is provisioned by `volume create --type block --size N`: a block
+# volume is its device, and `max_size` is both the quota and the device size.
+# The export name is the bare volume, which resolves to that volume's only
+# device.
+
+s_block_attach() {
+  block_prereqs || return 77
+
+  # Creating the volume writes the whole device as zeroes, one metadata entry
+  # per chunk, so it takes longer than the interactive CLI timeout allows.
+  volume_present "${BLOCK_VOL}" \
+    || node_ssh 1 "sudo timeout ${BLOCK_CREATE_TIMEOUT} neonfs volume create ${BLOCK_VOL} --type block --size ${BLOCK_SIZE} --replicas 1" 2>&1 | grep -qi 'created successfully' \
+    || { echo "  volume create --type block failed" >&2; return 1; }
+
+  node_ssh 1 "sudo bash -s ${BLOCK_VOL} ${BLOCK_DEV} ${BLOCK_BYTES}" 2>&1 <<'REMOTE' | sed 's/^/  /' >&2
+set -e
+VOL="$1"; DEV="$2"; BYTES="$3"
+
+nbd-client -d "${DEV}" >/dev/null 2>&1 || true
+# `-b 4096` is not decoration: nbd-client defaults to 512 regardless of the
+# NBD_INFO_BLOCK_SIZE the server advertises, and the backing store refuses a
+# request that is not 4 KiB-aligned — so a 512-block attachment breaks on the
+# first sub-4K IO the kernel decides to issue.
+nbd-client -N "${VOL}" 127.0.0.1 10809 "${DEV}" -b 4096 -persist -timeout 60
+
+for _ in $(seq 1 30); do [ "$(blockdev --getsize64 "${DEV}" 2>/dev/null || echo 0)" != 0 ] && break; sleep 1; done
+
+size=$(blockdev --getsize64 "${DEV}")
+ss=$(blockdev --getss "${DEV}")
+pbsz=$(blockdev --getpbsz "${DEV}")
+echo "attached ${DEV}: size=${size} logical=${ss} physical=${pbsz}"
+
+[ "${size}" = "${BYTES}" ] || { echo "device size ${size} != volume size ${BYTES}"; exit 1; }
+[ "${ss}" = 4096 ] || { echo "logical block size ${ss} != 4096"; exit 1; }
+[ "${pbsz}" = 4096 ] || { echo "physical block size ${pbsz} != 4096"; exit 1; }
+REMOTE
+  local rc=$?
+  [ "${rc}" -eq 0 ] && BLOCK_READY=1
+  return "${rc}"
+}
+
+# A filesystem surviving a remount is the real proof the device is coherent:
+# ext4 reads back its own metadata from wherever it left it, including the
+# superblock backups mkfs scatters across the device.
+s_block_fs() {
+  [ "${BLOCK_READY}" = 1 ] || { echo "  no block device attached — skipping" >&2; return 77; }
+  node_ssh 1 "sudo bash -s ${BLOCK_DEV} ${BLOCK_MNT} ${TAG}" 2>&1 <<'REMOTE' | sed 's/^/  /' >&2
+set -e
+DEV="$1"; MNT="$2"; TAG="$3"
+
+umount "${MNT}" 2>/dev/null || true
+mkfs.ext4 -q -F "${DEV}"
+mkdir -p "${MNT}"
+mount "${DEV}" "${MNT}"
+echo "block-content-${TAG}" > "${MNT}/b.txt"
+[ "$(cat "${MNT}/b.txt")" = "block-content-${TAG}" ]
+umount "${MNT}"
+mount "${DEV}" "${MNT}"
+[ "$(cat "${MNT}/b.txt")" = "block-content-${TAG}" ] || { echo "file did not survive the remount"; exit 1; }
+umount "${MNT}"
+echo "ext4 mkfs/write/remount round-trip OK"
+REMOTE
+}
+
+# fio's own verification, not ours: a crc32c mismatch is a corrupt device.
+# The run deliberately includes the device's last block, so an off-by-one at
+# the end of the device fails here rather than in production.
+s_block_fio_verify() {
+  [ "${BLOCK_READY}" = 1 ] || return 77
+  node_ssh 1 "command -v fio >/dev/null 2>&1 || sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q fio >/dev/null 2>&1
+    command -v fio >/dev/null 2>&1" 2>/dev/null \
+    || { echo "  fio unavailable and not installable — skipping" >&2; return 77; }
+
+  node_ssh 1 "sudo bash -s ${BLOCK_DEV} ${BLOCK_FIO_BYTES}" 2>&1 <<'REMOTE' | sed 's/^/  /' >&2
+set -e
+DEV="$1"; SPAN="$2"
+SIZE=$(blockdev --getsize64 "${DEV}")
+TAIL=$(( SIZE - 1048576 ))
+
+# Two runs: random over the head of the device, then the final MiB, so the
+# last addressable block is written and read back rather than assumed.
+fio --name=head --filename="${DEV}" --direct=1 --rw=randrw --rwmixread=50 \
+    --bs=4k --size="${SPAN}" --io_size="${SPAN}" --verify=crc32c \
+    --verify_fatal=1 --do_verify=1 --numjobs=1 --iodepth=8 --ioengine=libaio \
+    --group_reporting --output-format=terse --minimal
+fio --name=tail --filename="${DEV}" --direct=1 --rw=randwrite --bs=4k \
+    --offset="${TAIL}" --size=1M --verify=crc32c --verify_fatal=1 \
+    --do_verify=1 --numjobs=1 --iodepth=4 --ioengine=libaio \
+    --group_reporting --output-format=terse --minimal
+echo "fio --verify=crc32c reported no verification errors"
+REMOTE
+}
+
+# Detaching must leave the data where it was: the backing file is a file in a
+# NeonFS volume and outlives any attachment of it.
+s_block_detach() {
+  [ "${BLOCK_READY}" = 1 ] || return 77
+  node_ssh 1 "sudo bash -s ${BLOCK_VOL} ${BLOCK_DEV} ${BLOCK_MNT} ${TAG}" 2>&1 <<'REMOTE' | sed 's/^/  /' >&2
+set -e
+VOL="$1"; DEV="$2"; MNT="$3"; TAG="$4"
+
+umount "${MNT}" 2>/dev/null || true
+nbd-client -d "${DEV}"
+
+for _ in $(seq 1 15); do [ "$(cat "/sys/block/$(basename "${DEV}")/size" 2>/dev/null || echo 0)" = 0 ] && break; sleep 1; done
+[ "$(cat "/sys/block/$(basename "${DEV}")/size")" = 0 ] || { echo "${DEV} still reports a size after detach"; exit 1; }
+
+nbd-client -N "${VOL}" 127.0.0.1 10809 "${DEV}" -b 4096 -persist -timeout 60
+for _ in $(seq 1 30); do [ "$(blockdev --getsize64 "${DEV}" 2>/dev/null || echo 0)" != 0 ] && break; sleep 1; done
+mount "${DEV}" "${MNT}"
+[ "$(cat "${MNT}/b.txt")" = "block-content-${TAG}" ] || { echo "data did not survive detach and re-attach"; exit 1; }
+umount "${MNT}"
+nbd-client -d "${DEV}"
+echo "detach/re-attach OK — filesystem and contents survived"
+REMOTE
+  local rc=$?
+  [ "${rc}" -eq 0 ] && BLOCK_READY=0
+  return "${rc}"
+}
+
+# nbd-client and a loadable `nbd` module are what separate a VM from a
+# container here; either being absent is a skip, not a failure.
+block_prereqs() {
+  # `nbd-client` lives in /sbin, which is not on the login shell's PATH here,
+  # so every check for it runs under sudo — as the steps themselves do.
+  node_ssh 1 "sudo sh -c 'command -v nbd-client' >/dev/null 2>&1 || sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q nbd-client >/dev/null 2>&1
+    sudo sh -c 'command -v nbd-client' >/dev/null 2>&1" 2>/dev/null \
+    || { echo "  nbd-client unavailable and not installable — skipping" >&2; return 1; }
+  node_ssh 1 "sudo modprobe nbd max_part=8" 2>/dev/null \
+    || { echo "  nbd module could not be loaded — skipping" >&2; return 1; }
+  node_ssh 1 "test -b ${BLOCK_DEV}" 2>/dev/null \
+    || { echo "  ${BLOCK_DEV} absent after modprobe nbd — skipping" >&2; return 1; }
+}
+
 # Cross-interface: write via FUSE, must be visible via S3 and WebDAV (and NFS).
 s_cross_consistency() {
   [ -n "${S3_KEY}" ] || return 77
@@ -462,6 +627,7 @@ acceptance_cleanup() {
   node_ssh 1 "sudo umount ${NFS_MNT} 2>/dev/null; sudo timeout 20 neonfs fuse unmount ${FUSE_MNT} 2>/dev/null" >/dev/null 2>&1 || true
   node_ssh 1 "command -v docker >/dev/null 2>&1 && sudo docker volume rm ${DOCKER_VOL} >/dev/null 2>&1" >/dev/null 2>&1 || true
   node_ssh 1 "command -v smbd >/dev/null 2>&1 && sudo systemctl stop smbd 2>/dev/null" >/dev/null 2>&1 || true
+  node_ssh 1 "sudo umount ${BLOCK_MNT} 2>/dev/null; command -v nbd-client >/dev/null 2>&1 && sudo nbd-client -d ${BLOCK_DEV} 2>/dev/null" >/dev/null 2>&1 || true
 }
 
 # --- driver ----------------------------------------------------------------
@@ -487,6 +653,10 @@ acceptance_run() {
   step "containerd content store (ingest/get via ctr)"    s_containerd_content
   step "CIFS/SMB share (smbd + vfs_neonfs)"          s_cifs_share
   step "CIFS/SMB operations (smbclient round-trip)"  s_cifs_ops
+  step "block device attach (nbd-client + geometry)" s_block_attach
+  step "block device filesystem (mkfs.ext4/remount)" s_block_fs
+  step "block device fio --verify=crc32c"            s_block_fio_verify
+  step "block device detach (data survives)"         s_block_detach
   step "volume show reflects stored data"           s_volume_stats
   step "FUSE unmount does not wedge control plane"  s_fuse_unmount_resilience
   step "replication across nodes"                   s_replication
