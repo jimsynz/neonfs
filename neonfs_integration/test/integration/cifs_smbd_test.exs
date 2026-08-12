@@ -190,7 +190,17 @@ defmodule NeonFS.Integration.CIFSSmbdTest do
       assert {:ok, _} = Smbd.client(server, "mkdir queried")
 
       assert {:ok, info} = Smbd.client(server, "allinfo queried")
-      refute info =~ "NT_STATUS_", "allinfo on a directory failed:\n#{info}"
+
+      # `attributes: D` is the directory bit, and it only gets there by way
+      # of an `fstat` on the handle smbclient opened.
+      assert info =~ ~r/attributes:.*\bD\b/, "allinfo did not report a directory:\n#{info}"
+
+      # smbclient also asks for VSS shadow-copy data, which the module does
+      # not implement and NeonFS has no equivalent of, so its
+      # INVALID_DEVICE_REQUEST is expected. Asserting no NT_STATUS appears
+      # anywhere would fail on that rather than on anything this covers.
+      refute info =~ "NT_STATUS_OBJECT", "path resolution failed:\n#{info}"
+      refute info =~ "NT_STATUS_ACCESS", "access check failed:\n#{info}"
     end
   end
 
