@@ -258,6 +258,93 @@ defmodule NeonFS.Integration.CIFSSmbdTest do
     end
   end
 
+  # The rest of the suite runs one core peer and one interface peer, which
+  # has no minority to be in. This block builds its own topology: three
+  # core peers so a majority exists to be cut off from, and the bridge peer
+  # isolated alongside the one core node it can still reach.
+  describe "minority partition" do
+    @describetag timeout: 420_000
+
+    test "a write through a share served by a minority node is refused" do
+      cluster =
+        PeerCluster.start_cluster!(4,
+          roles: %{
+            node1: [:neonfs_core],
+            node2: [:neonfs_core],
+            node3: [:neonfs_core],
+            node4: [:neonfs_cifs]
+          }
+        )
+
+      on_exit(fn -> PeerCluster.stop_cluster(cluster) end)
+
+      PeerCluster.connect_nodes(cluster)
+
+      :ok =
+        ClusterCase.init_mixed_role_cluster(cluster,
+          name: "cifs-partition-test",
+          volumes: [{@volume_name, @volume_opts}]
+        )
+
+      cifs_peer = PeerCluster.get_node!(cluster, :node4)
+      :ok = wait_for_socket(cifs_peer.interface_ports.cifs, 30_000)
+
+      dir = Path.join(cifs_peer.data_dir, "smbd")
+
+      server =
+        Smbd.start!(dir: dir, socket_path: cifs_peer.interface_ports.cifs, volume: @volume_name)
+
+      on_exit(fn -> Smbd.stop(server) end)
+
+      local = Path.join(dir, "partitioned.txt")
+      File.write!(local, "written while whole")
+
+      # Establish that the share works before the partition, so a refusal
+      # afterwards is attributable to the partition rather than to a share
+      # that never worked.
+      assert {:ok, _} = Smbd.client(server, "put #{local} before-partition.txt"),
+             Smbd.logs(server)
+
+      # node1 and the bridge on one side, the majority on the other. The
+      # bridge can still reach a core node; that node just cannot commit.
+      :ok = PeerCluster.partition_cluster(cluster, [[:node1, :node4], [:node2, :node3]])
+
+      assert {:error, {_status, output}} =
+               Smbd.client(server, "put #{local} during-partition.txt")
+
+      # The architecture specifies write protection for this case. What
+      # matters first is that the write is refused rather than acked — a
+      # block-level ack for something no quorum accepted is the failure
+      # this is really guarding against.
+      assert output =~ "NT_STATUS_",
+             "a write in the minority was not refused:\n#{output}"
+
+      :ok = PeerCluster.heal_partition(cluster)
+
+      # And that the refusal was the partition talking, not a wedged
+      # cluster: the same write succeeds once the majority is reachable.
+      assert eventually_writes?(server, local),
+             "the share never recovered after the partition healed:\n#{Smbd.logs(server)}"
+    end
+  end
+
+  # Recovery is not instantaneous — the bridge's client has to notice the
+  # core node is reachable again — so this polls rather than asserting on
+  # the first attempt after the heal.
+  defp eventually_writes?(server, local, attempts \\ 30) do
+    case Smbd.client(server, "put #{local} after-partition.txt") do
+      {:ok, _} ->
+        true
+
+      {:error, _} when attempts > 1 ->
+        Process.sleep(1_000)
+        eventually_writes?(server, local, attempts - 1)
+
+      {:error, _} ->
+        false
+    end
+  end
+
   defp wait_for_socket(path, timeout_ms) do
     deadline = System.monotonic_time(:millisecond) + timeout_ms
     do_wait_for_socket(path, deadline)
