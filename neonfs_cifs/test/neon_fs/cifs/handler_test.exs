@@ -65,6 +65,22 @@ defmodule NeonFS.CIFS.HandlerTest do
     {handle, state}
   end
 
+  # Opening an existing directory, the way smbd does after `mkdirat`.
+  defp open_directory(state, path) do
+    expect(NeonFS.Client, :core_call, fn NeonFS.Core, :get_file_meta, ["vol-a", ^path] ->
+      {:ok, file_meta(path, id: "object:" <> path, mode: 0o40755)}
+    end)
+
+    expect(NeonFS.Client, :core_call, fn NeonFS.Core, :pin_file, ["vol-a", ^path, _holder] ->
+      {:ok, %{claim_id: "claim:" <> path, file_id: "object:" <> path}}
+    end)
+
+    {{:ok, %{handle: handle}}, state} =
+      Handler.handle({:openat, %{"path" => path, "flags" => 0, "mode" => 0}}, state)
+
+    {handle, state}
+  end
+
   defp open_file(state, path, flags \\ 0o100) do
     expect(NeonFS.Client, :core_call, fn NeonFS.Core, :get_file_meta, ["vol-a", ^path] ->
       {:error, not_found(path)}
@@ -261,6 +277,24 @@ defmodule NeonFS.CIFS.HandlerTest do
 
       {reply, _} = Handler.handle({:fstat, %{"handle" => handle}}, state)
       assert match?({:ok, %{stat: %{size: 7}}}, reply)
+    end
+
+    # A directory has an id, and it is not one `get_file_meta_by_id` can
+    # resolve — directories live as dirents and only regular files are in
+    # the by-id index. Keying a directory handle by that id mints a handle
+    # whose every later op answers ENOENT, which is what smbd hit creating
+    # a directory: it opens what it just made and stats it through that
+    # handle before renaming it into place.
+    test "a directory handle resolves by name even though the directory has an id" do
+      {handle, state} = open_directory(connected(), "/adir")
+
+      expect(NeonFS.Client, :core_call, fn NeonFS.Core, :get_file_meta, ["vol-a", "/adir"] ->
+        {:ok, file_meta("/adir", id: "object:/adir", mode: 0o40755)}
+      end)
+
+      {reply, _} = Handler.handle({:fstat, %{"handle" => handle}}, state)
+
+      assert match?({:ok, %{stat: %{kind: :directory}}}, reply)
     end
 
     test "fstat on an unknown handle is :ebadf" do

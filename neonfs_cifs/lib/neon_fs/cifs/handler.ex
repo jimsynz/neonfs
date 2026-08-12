@@ -193,7 +193,7 @@ defmodule NeonFS.CIFS.Handler do
       with {:ok, file} <- open_or_create(volume, path, flags, create_mode),
            {:ok, claim_id} <- pin_file(volume, path),
            {:ok, handle} <-
-             HandleRegistry.open(volume, file.id, path, flags, claim_id, self()) do
+             HandleRegistry.open(volume, handle_identity(file), path, flags, claim_id, self()) do
         {{:ok, %{handle: handle}}, state}
       else
         {:error, reason} -> {{:error, errno_for(reason)}, state}
@@ -567,6 +567,24 @@ defmodule NeonFS.CIFS.Handler do
   defp time_to_unix(%DateTime{} = dt), do: DateTime.to_unix(dt)
   defp time_to_unix(n) when is_integer(n), do: n
   defp time_to_unix(_), do: 0
+
+  # What a handle on this target should be keyed by. Regular files go by
+  # identity, so a handle survives a rename of the name it was opened at.
+  # Directories cannot: they live as dirents, and only regular files are in
+  # the by-id index, so `get_file_meta_by_id` answers `:not_found` for a
+  # directory id that resolves perfectly well by name. Registering it would
+  # mint a handle whose every later operation returns ENOENT — which is
+  # what smbd hit creating a directory, since it opens what it just made
+  # and stats it through that handle before renaming it into place.
+  #
+  # `HandleRegistry`'s own doc already says this is the arrangement: "a
+  # file handle carries a `file_id`, a directory handle a `path`".
+  defp handle_identity(file) do
+    case kind_of(Map.get(file, :mode, 0o100644)) do
+      :directory -> nil
+      _otherwise -> Map.get(file, :id)
+    end
+  end
 
   defp kind_of(mode) when is_integer(mode) do
     cond do
