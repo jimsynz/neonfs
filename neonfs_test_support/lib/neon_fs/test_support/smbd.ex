@@ -194,6 +194,13 @@ defmodule NeonFS.TestSupport.Smbd do
         path = /
         read only = #{if read_only, do: "yes", else: "no"}
         guest ok = yes
+        # Without this the session runs as `nobody` and every create is
+        # refused before a VFS hook is reached: the module implements no
+        # ACL hooks, so smbd's access check falls through to the default
+        # VFS and answers from the host filesystem rather than NeonFS.
+        # Fine for a test share, which is asserting the data path rather
+        # than access control; not an answer for a deployment.
+        force user = root
         vfs objects = neonfs
         neonfs:socket = #{socket_path}
         neonfs:volume = #{volume}
