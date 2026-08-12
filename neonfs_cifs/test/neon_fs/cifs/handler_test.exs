@@ -2,7 +2,7 @@ defmodule NeonFS.CIFS.HandlerTest do
   use ExUnit.Case, async: false
   use Mimic
 
-  alias NeonFS.CIFS.{Handler, HandleRegistry}
+  alias NeonFS.CIFS.{ConnectionHandler, Handler, HandleRegistry}
   alias NeonFS.Client.ChunkReader
   alias NeonFS.Error.{AlreadyExists, FileNotFound}
 
@@ -19,8 +19,13 @@ defmodule NeonFS.CIFS.HandlerTest do
     :ok
   end
 
+  # Taken from the production initial state rather than restated. Restating
+  # it is what hid the `:disconnect` defect: this literal had drifted the
+  # same way that one had, so a test asserting the reset state equalled it
+  # asserted the two agreed on being wrong.
   defp blank_state do
-    %{volume: nil, next_handle: 1, dirs: %{}}
+    {:continue, state} = ConnectionHandler.handle_connection(nil, nil)
+    state
   end
 
   defp connected do
@@ -92,6 +97,16 @@ defmodule NeonFS.CIFS.HandlerTest do
       {reply, new} = Handler.handle({:disconnect, %{}}, state)
       assert {:ok, %{}} == reply
       assert new == blank_state()
+    end
+
+    # `handle_close/2` is the sweep that releases handles the C shim left
+    # open. It reads `state.files`, so a reset state missing that key made
+    # it raise on its first line — skipping the sweep, and doing it inside
+    # `terminate/2` where a normal teardown then reads as a crash.
+    test "the state a disconnect leaves behind can still be swept on close" do
+      {_reply, reset} = Handler.handle({:disconnect, %{}}, connected())
+
+      assert :ok = ConnectionHandler.handle_close(nil, reset)
     end
   end
 

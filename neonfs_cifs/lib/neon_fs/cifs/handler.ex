@@ -56,6 +56,7 @@ defmodule NeonFS.CIFS.Handler do
   @type state :: %{
           required(:volume) => String.t() | nil,
           required(:next_handle) => non_neg_integer(),
+          required(:files) => %{non_neg_integer() => term()},
           required(:dirs) => %{
             non_neg_integer() => [{String.t(), String.t(), non_neg_integer()}]
           }
@@ -114,10 +115,18 @@ defmodule NeonFS.CIFS.Handler do
     {{:ok, %{}}, %{state | volume: volume}}
   end
 
-  defp do_handle(:disconnect, _args, _state) do
-    # Best-effort: C shim is also tearing down, so we just blank
-    # the per-connection state and let `handle_close/2` run.
-    {{:ok, %{}}, %{volume: nil, next_handle: 1, dirs: %{}}}
+  # Best-effort: the C shim is tearing down too, so blank the
+  # per-connection state and let `handle_close/2` run.
+  #
+  # Blanked from the live state rather than rebuilt as a second literal of
+  # the same shape. The second literal was free to drift from
+  # `handle_connection/2`'s, and did — it lost `:files`, so `handle_close/2`
+  # raised `KeyError` on its first line for every connection that
+  # disconnected cleanly, skipping the sweep that releases handles the shim
+  # left open and reporting a normal teardown as a crashed one. Updating the
+  # map cannot drop a key the initial state put there.
+  defp do_handle(:disconnect, _args, state) do
+    {{:ok, %{}}, %{state | volume: nil, next_handle: 1, files: %{}, dirs: %{}}}
   end
 
   ## Metadata
