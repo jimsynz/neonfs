@@ -28,7 +28,7 @@ synchronisation:
 
 | Event | Measurements | Metadata |
 | --- | --- | --- |
-| `[:neonfs, :block, :command]` | `bytes`, `duration` | `export`, `command` (`:read`/`:write`/`:flush`/`:write_zeroes`), `status` |
+| `[:neonfs, :block, :command]` | `bytes`, `duration`, `chunk_bytes` (write and zero-fill), `chunks_replaced` (zero-fill) | `export`, `command` (`:read`/`:write`/`:flush`/`:write_zeroes`), `status` |
 | `[:neonfs, :block, :attached]` | `holders` | `export` |
 | `[:neonfs, :block, :detached]` | — | `export` |
 

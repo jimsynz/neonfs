@@ -33,6 +33,14 @@ defmodule NeonFS.Core.BlockBacking do
   offsets, which is what the extent-map backend that replaces this path
   introduces.
 
+  `write_zeroes/4` reports that as two costs rather than one, because they
+  are not the same quantity: the chunks it clips at either end are
+  read-modify-written and cost their bytes, while the chunks it covers end
+  to end cost a metadata entry each and no bytes beyond the single zero
+  chunk they all share. Charging a 64 GiB TRIM for 64 GiB of rewrites is
+  not a rounding error, and charging it for nothing hides the half-million
+  metadata entries it does cost.
+
   ## Durability
 
   `write/4` returns when the volume's write acknowledgement policy is
@@ -53,6 +61,9 @@ defmodule NeonFS.Core.BlockBacking do
       `chunk_bytes`, `chunks_rewritten`, `duration`. Metadata: `volume`,
       `file_id`, `offset`. `chunk_bytes / guest_bytes` is the write
       amplification of that request.
+    * `[:neonfs, :block, :write_zeroes]` — Measurements: `guest_bytes`,
+      `chunk_bytes`, `chunks_rewritten`, `chunks_replaced`, `duration`.
+      Metadata: `volume`, `file_id`, `offset`. Serves discard too.
     * `[:neonfs, :block, :read]` — Measurements: `guest_bytes`,
       `duration`. Metadata: `volume`, `file_id`, `offset`.
     * `[:neonfs, :block, :flush]` — Measurements: `duration`. Metadata:
@@ -81,6 +92,12 @@ defmodule NeonFS.Core.BlockBacking do
           chunk_bytes: pos_integer(),
           logical_block_bytes: pos_integer(),
           physical_block_bytes: pos_integer()
+        }
+
+  @type zero_fill_cost :: %{
+          chunk_bytes: non_neg_integer(),
+          chunks_rewritten: non_neg_integer(),
+          chunks_replaced: non_neg_integer()
         }
 
   @doc """
@@ -245,15 +262,33 @@ defmodule NeonFS.Core.BlockBacking do
   full-device TRIM is therefore one commit, not one per megabyte. Memory
   stays bounded at a single chunk. See the module doc for why this cannot
   drop the extent instead.
+
+  Returns that cost as its two halves: `chunk_bytes` is what the chunk
+  layer wrote — the clipped chunks it read-modify-wrote plus one stored
+  zero chunk per distinct covered size — and `chunks_replaced` counts the
+  chunks that cost a metadata entry and no bytes at all.
   """
   @spec write_zeroes(String.t(), binary(), non_neg_integer(), pos_integer()) ::
-          :ok | {:error, term()}
+          {:ok, zero_fill_cost()} | {:error, term()}
   def write_zeroes(volume, file_id, offset, length) do
+    start_time = System.monotonic_time()
+
     with :ok <- validate_alignment(offset, length),
          {:ok, device} <- device_info(volume, file_id),
          :ok <- validate_range(device, offset, length),
          {:ok, _meta} <- Core.write_zeroes_by_id(volume, file_id, offset, length) do
-      :ok
+      cost = zero_fill_cost(device, offset, length)
+
+      :telemetry.execute(
+        [:neonfs, :block, :write_zeroes],
+        Map.merge(cost, %{
+          guest_bytes: length,
+          duration: System.monotonic_time() - start_time
+        }),
+        %{volume: volume, file_id: file_id, offset: offset}
+      )
+
+      {:ok, cost}
     end
   end
 
@@ -264,7 +299,8 @@ defmodule NeonFS.Core.BlockBacking do
   extent, so even a chunk-aligned discard zero-fills. The zeroes dedup, so
   the storage cost collapses even though the metadata entries remain.
   """
-  @spec discard(String.t(), binary(), non_neg_integer(), pos_integer()) :: :ok | {:error, term()}
+  @spec discard(String.t(), binary(), non_neg_integer(), pos_integer()) ::
+          {:ok, zero_fill_cost()} | {:error, term()}
   def discard(volume, file_id, offset, length) do
     write_zeroes(volume, file_id, offset, length)
   end
@@ -359,13 +395,51 @@ defmodule NeonFS.Core.BlockBacking do
     last = div(offset + length - 1, @chunk_bytes)
 
     chunk_bytes =
-      Enum.reduce(first..last, 0, fn index, acc ->
-        chunk_start = index * @chunk_bytes
-        acc + min(chunk_start + @chunk_bytes, size) - chunk_start
-      end)
+      Enum.reduce(first..last, 0, fn index, acc -> acc + span_size(chunk_span(size, index)) end)
 
     {last - first + 1, chunk_bytes}
   end
+
+  # Which chunks a zero-fill covers end to end and which it merely clips is
+  # the same arithmetic, but the two cannot be added into one number. A
+  # clipped chunk is read back and rewritten, costing its whole size; a
+  # covered one is replaced by the hash of a zero chunk, so the entire
+  # covered run costs one stored chunk per distinct size it contains. Every
+  # chunk strictly between the first and the last is covered and full-sized
+  # — the file's short tail chunk can only ever be the last — so the two
+  # edges are the only ones that need examining.
+  defp zero_fill_cost(%{size: size}, offset, length) do
+    write_end = offset + length
+    first = div(offset, @chunk_bytes)
+    last = div(write_end - 1, @chunk_bytes)
+    edges = Enum.uniq([first, last])
+
+    {clipped, covered_edges} =
+      edges
+      |> Enum.map(&chunk_span(size, &1))
+      |> Enum.split_with(fn {start, stop} -> start < offset or stop > write_end end)
+
+    covered_middle = last - first + 1 - Enum.count(edges)
+
+    stored_zeroes =
+      Enum.uniq(middle_chunk_sizes(covered_middle) ++ Enum.map(covered_edges, &span_size/1))
+
+    %{
+      chunk_bytes: Enum.sum(Enum.map(clipped, &span_size/1)) + Enum.sum(stored_zeroes),
+      chunks_rewritten: Enum.count(clipped),
+      chunks_replaced: covered_middle + Enum.count(covered_edges)
+    }
+  end
+
+  defp middle_chunk_sizes(0), do: []
+  defp middle_chunk_sizes(_covered_middle), do: [@chunk_bytes]
+
+  defp chunk_span(size, index) do
+    start = index * @chunk_bytes
+    {start, min(start + @chunk_bytes, size)}
+  end
+
+  defp span_size({start, stop}), do: stop - start
 
   defp zero_stream(size) do
     Stream.unfold(size, fn

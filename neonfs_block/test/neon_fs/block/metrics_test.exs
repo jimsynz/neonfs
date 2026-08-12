@@ -37,6 +37,14 @@ defmodule NeonFS.Block.MetricsTest do
       assert [:neonfs, :block, :read, :chunk_bytes] in names
     end
 
+    # A zero-fill's cost is mostly metadata, so its amplification ratio
+    # tends to zero however many entries it rewrote.
+    test "a zero-fill's replaced chunks are exported, since its bytes do not describe it" do
+      names = Enum.map(Telemetry.metrics(), & &1.name)
+
+      assert [:neonfs, :block, :command, :chunks_replaced] in names
+    end
+
     test "a command metric is tagged by export and command so one device is separable" do
       for metric <- Telemetry.metrics(),
           metric.event_name == [:neonfs, :block, :command] do
@@ -45,12 +53,24 @@ defmodule NeonFS.Block.MetricsTest do
       end
     end
 
-    test "write chunk bytes are kept only for writes, whose events alone carry them" do
+    test "chunk bytes are kept only for the commands whose events carry them" do
       metric = metric_named([:neonfs, :block, :command, :chunk_bytes])
 
       assert metric.keep.(%{command: :write})
+      assert metric.keep.(%{command: :write_zeroes})
       refute metric.keep.(%{command: :read})
       refute metric.keep.(%{command: :flush})
+    end
+
+    # A write rewrites every chunk it touches, so it has nothing to replace;
+    # a zero on the series would read as "this one replaced nothing" rather
+    # than "this one cannot".
+    test "replaced chunks are kept only for zero-fills" do
+      metric = metric_named([:neonfs, :block, :command, :chunks_replaced])
+
+      assert metric.keep.(%{command: :write_zeroes})
+      refute metric.keep.(%{command: :write})
+      refute metric.keep.(%{command: :read})
     end
 
     # The chunk_fetched event is emitted for every ChunkReader caller on the

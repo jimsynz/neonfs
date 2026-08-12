@@ -94,7 +94,12 @@ defmodule NeonFS.Integration.BlockBackingTest do
     {:ok, _} = block_rpc(cluster, :node1, :write, [@volume, device.file_id, 0, payload])
     :ok = block_rpc(cluster, :node1, :flush, [@volume, device.file_id])
 
-    :ok = block_rpc(cluster, :node1, :write_zeroes, [@volume, device.file_id, 0, @chunk])
+    # The cost rides back on the reply, which is why it is returned rather
+    # than only emitted: node1's telemetry is invisible to an exporter on
+    # the interface node that asked for the zero-fill.
+    assert {:ok, %{chunks_replaced: 1, chunks_rewritten: 0}} =
+             block_rpc(cluster, :node1, :write_zeroes, [@volume, device.file_id, 0, @chunk])
+
     :ok = block_rpc(cluster, :node1, :flush, [@volume, device.file_id])
 
     {:ok, cluster} = PeerCluster.restart_node(cluster, :node1)
