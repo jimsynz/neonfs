@@ -111,6 +111,30 @@ defmodule NeonFS.Core.BlockBackingTest do
       assert {:error, _reason} = BlockBacking.open_device(name, BlockBacking.device_path())
     end
 
+    test "deleting a block volume takes its device with it" do
+      # Removing the device is an unlink, which refuses to run when it
+      # cannot establish the file's pin state.
+      start_namespace_coordination()
+      name = "block-deleted-#{:rand.uniform(999_999)}"
+
+      {:ok, _volume} = NeonFS.Core.create_volume(name, type: :block, max_size: 2 * @chunk)
+      assert {:ok, _device} = BlockBacking.open_device(name, BlockBacking.device_path())
+
+      assert :ok = NeonFS.Core.delete_volume(name)
+      refute NeonFS.Core.volume_exists?(name)
+    end
+
+    test "a filesystem volume's content still blocks its deletion" do
+      start_namespace_coordination()
+      name = "fs-nonempty-#{:rand.uniform(999_999)}"
+
+      {:ok, _volume} = NeonFS.Core.create_volume(name, [])
+      {:ok, _meta} = NeonFS.Core.write_file_streamed(name, "/a.txt", ["content"])
+
+      assert {:error, error} = NeonFS.Core.delete_volume(name)
+      assert Exception.message(error) =~ "cannot delete"
+    end
+
     test "a device that cannot be written takes its volume with it" do
       name = "block-unaligned-#{:rand.uniform(999_999)}"
 

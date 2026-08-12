@@ -633,6 +633,12 @@ acceptance_cleanup() {
   node_ssh 1 "command -v docker >/dev/null 2>&1 && sudo docker volume rm ${DOCKER_VOL} >/dev/null 2>&1" >/dev/null 2>&1 || true
   node_ssh 1 "command -v smbd >/dev/null 2>&1 && sudo systemctl stop smbd 2>/dev/null" >/dev/null 2>&1 || true
   node_ssh 1 "sudo umount ${BLOCK_MNT} 2>/dev/null; command -v nbd-client >/dev/null 2>&1 && sudo nbd-client -d ${BLOCK_DEV} 2>/dev/null" >/dev/null 2>&1 || true
+  # The block volume is deleted rather than left behind: it is the one
+  # volume the suite creates whose whole content is a device it provisioned,
+  # so keeping it leaks a device per run. The detach above comes first —
+  # tearing a volume out from under an attached device is not this suite's
+  # business to provoke.
+  node_ssh 1 "sudo timeout 60 neonfs volume delete ${BLOCK_VOL} --force 2>/dev/null" >/dev/null 2>&1 || true
 }
 
 # --- driver ----------------------------------------------------------------
