@@ -74,10 +74,10 @@ defmodule NeonFS.Block.Protocol do
     1 => :export_name,
     2 => :abort,
     3 => :list,
-    6 => :starttls,
-    7 => :info,
-    8 => :go,
-    9 => :structured_reply
+    5 => :starttls,
+    6 => :info,
+    7 => :go,
+    8 => :structured_reply
   }
 
   @option_replies %{

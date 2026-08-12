@@ -245,12 +245,14 @@ cannot load the `nbd` module or attach a block device at all:
   provisions the device itself), and `nbd-client -N <volume>` attaches it. The
   kernel must then report the advertised size and 4 KiB logical and physical
   blocks (`blockdev --getsize64/--getss/--getpbsz`).
+- **block device `fio --verify`** — a `crc32c`-verified random read/write
+  workload, plus a second run over the device's final MiB so an off-by-one at
+  the end of the device fails here rather than in production. It runs before
+  the filesystem step because it writes random data over the whole device,
+  superblock included.
 - **block device filesystem** — `mkfs.ext4`, mount, write a file, `umount`,
   remount, and the file is still there. A filesystem surviving a remount is
   the proof the device is coherent, superblock backups included.
-- **block device `fio --verify`** — a `crc32c`-verified random read/write
-  workload, plus a second run over the device's final MiB so an off-by-one at
-  the end of the device fails here rather than in production.
 - **block device detach** — detach, confirm the kernel no longer sizes the
   device, then re-attach and confirm the filesystem and its contents survived.
   The backing file is a file in a volume and outlives any attachment of it.

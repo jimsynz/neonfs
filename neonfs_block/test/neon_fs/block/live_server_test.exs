@@ -90,13 +90,40 @@ defmodule NeonFS.Block.LiveServerTest do
 
       # NBD_OPT_STRUCTURED_REPLY, which this server declines by design — the
       # protocol requires a client to tolerate the refusal.
-      :ok = :gen_tcp.send(socket, <<@ihaveopt::64, 9::32, 0::32>>)
+      :ok = :gen_tcp.send(socket, <<@ihaveopt::64, 8::32, 0::32>>)
 
-      assert {:ok, <<_magic::64, 9::32, 0x80000001::32, 0::32>>} =
+      assert {:ok, <<_magic::64, 8::32, 0x80000001::32, 0::32>>} =
                :gen_tcp.recv(socket, 20, 2_000)
 
       assert {:ok, <<size::64, _flags::16>>} = export_name(socket, @export)
       assert size == @size
+    end
+
+    test "NBD_OPT_GO selects the export and enters transmission", %{port: port} do
+      socket = connect(port)
+      assert {:ok, _greeting} = :gen_tcp.recv(socket, 18, 2_000)
+      :ok = :gen_tcp.send(socket, <<1::32>>)
+
+      name = @export
+      payload = <<byte_size(name)::32, name::binary, 0::16>>
+      :ok = :gen_tcp.send(socket, <<@ihaveopt::64, 7::32, byte_size(payload)::32>> <> payload)
+
+      # NBD_REP_INFO(export), NBD_REP_INFO(block size), NBD_REP_ACK.
+      assert {:ok, <<_::64, 7::32, 3::32, 12::32, 0::16, size::64, _flags::16>>} =
+               :gen_tcp.recv(socket, 20 + 12, 2_000)
+
+      assert size == @size
+
+      assert {:ok, <<_::64, 7::32, 3::32, 14::32, _info::binary-size(14)>>} =
+               :gen_tcp.recv(socket, 20 + 14, 2_000)
+
+      assert {:ok, <<_::64, 7::32, 1::32, 0::32>>} = :gen_tcp.recv(socket, 20, 2_000)
+
+      :ok = :gen_tcp.send(socket, request(@read, 1, 0, @block))
+
+      assert {:ok, <<@simple_reply_magic::32, 0::32, 1::64>>} = :gen_tcp.recv(socket, 16, 2_000)
+      assert {:ok, data} = :gen_tcp.recv(socket, @block, 2_000)
+      assert byte_size(data) == @block
     end
 
     test "answers an option it cannot parse by its numeric code", %{port: port} do
@@ -106,9 +133,9 @@ defmodule NeonFS.Block.LiveServerTest do
 
       # NBD_OPT_GO with no payload: recognised code, unparseable body, so the
       # codec hands back the code and the reply has to be addressed by it.
-      :ok = :gen_tcp.send(socket, <<@ihaveopt::64, 8::32, 0::32>>)
+      :ok = :gen_tcp.send(socket, <<@ihaveopt::64, 7::32, 0::32>>)
 
-      assert {:ok, <<_magic::64, 8::32, 0x80000001::32, 0::32>>} =
+      assert {:ok, <<_magic::64, 7::32, 0x80000001::32, 0::32>>} =
                :gen_tcp.recv(socket, 20, 2_000)
 
       assert {:ok, <<size::64, _flags::16>>} = export_name(socket, @export)
