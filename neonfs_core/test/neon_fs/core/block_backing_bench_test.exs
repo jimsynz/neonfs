@@ -123,7 +123,7 @@ defmodule NeonFS.Core.BlockBackingBenchTest do
     started = System.monotonic_time()
 
     for offset <- offsets do
-      :ok = BlockBacking.write(volume_name, device.file_id, offset, payload)
+      {:ok, _cost} = BlockBacking.write(volume_name, device.file_id, offset, payload)
     end
 
     elapsed = System.monotonic_time() - started

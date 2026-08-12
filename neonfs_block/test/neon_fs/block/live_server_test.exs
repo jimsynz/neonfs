@@ -18,6 +18,7 @@ defmodule NeonFS.Block.LiveServerTest do
   alias NeonFS.Block.{DeviceRegistry, Listener}
 
   @block 4096
+  @chunk 131_072
   @size 16 * @block
   @export "vol:/dev.img"
 
@@ -39,11 +40,15 @@ defmodule NeonFS.Block.LiveServerTest do
       case function do
         :open_device -> open_device_reply()
         :flush -> hold_flush(test)
+        :write -> write_reply()
         _other -> :ok
       end
     end)
 
-    Application.put_env(:neonfs_block, :read_stream_fn, fn _device, _offset, length ->
+    Application.put_env(:neonfs_block, :read_stream_fn, fn _device, opts ->
+      send(test, {:read_opts, opts})
+      length = Keyword.fetch!(opts, :length)
+
       # Two elements, so a read that forwards only its first chunk fails here.
       half = div(length, 2)
       {:ok, %{stream: [:binary.copy(<<0xA5>>, half), :binary.copy(<<0x5A>>, length - half)]}}
@@ -137,6 +142,39 @@ defmodule NeonFS.Block.LiveServerTest do
 
       assert_receive {:core_call, :write, ["vol", "file-id", 4096, ^payload]}, 2_000
       assert {:ok, <<@simple_reply_magic::32, 0::32, 1::64>>} = :gen_tcp.recv(socket, 16, 2_000)
+    end
+
+    test "a write's command event carries the chunk bytes core charged for it", %{port: port} do
+      ref = :telemetry_test.attach_event_handlers(self(), [[:neonfs, :block, :command]])
+
+      socket = connect(port)
+      {:ok, _export} = handshake(socket, @export)
+
+      :ok = :gen_tcp.send(socket, request(@write, 1, 0, @block) <> :binary.copy(<<0xEF>>, @block))
+
+      assert_receive {[:neonfs, :block, :command], ^ref, measurements, %{command: :write}}, 2_000
+
+      # Both halves of the ratio on one event: the guest asked for a block,
+      # the chunk layer moved a whole chunk to store it.
+      assert measurements.bytes == @block
+      assert measurements.chunk_bytes == @chunk
+
+      :telemetry.detach(ref)
+    end
+
+    test "a read tags its chunk fetches with the export they served", %{port: port} do
+      socket = connect(port)
+      {:ok, _export} = handshake(socket, @export)
+
+      :ok = :gen_tcp.send(socket, request(@read, 1, 0, @block))
+      assert {:ok, _reply} = :gen_tcp.recv(socket, 16 + @block, 2_000)
+
+      # A read's chunk bytes are only known inside `ChunkReader`, so the
+      # export travels with the request to come back on its telemetry.
+      # Without it the block exporter cannot separate one device from
+      # another, or its own reads from a co-located FUSE mount's.
+      assert_receive {:read_opts, opts}, 2_000
+      assert Keyword.fetch!(opts, :telemetry_metadata) == %{export: @export}
     end
 
     test "a write split across TCP segments is not acted on until it is whole", %{port: port} do
@@ -262,9 +300,15 @@ defmodule NeonFS.Block.LiveServerTest do
 
     case function do
       :open_device -> open_device_reply()
+      :write -> write_reply()
       _other -> :ok
     end
   end
+
+  # A 4 KiB guest write costs a whole chunk rewrite; `BlockBacking.write/5`
+  # does that arithmetic on core and returns it, because the chunk geometry
+  # is not known here.
+  defp write_reply, do: {:ok, %{chunk_bytes: @chunk, chunks_rewritten: 1}}
 
   defp open_device_reply do
     {:ok,

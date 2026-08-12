@@ -15,8 +15,10 @@ defmodule NeonFS.Core.BlockBacking do
   guest writes are absorbed by the guest's page cache, so writes reaching
   this module are block-aligned; each is read-modify-written at the chunk
   layer, making a single 4 KiB write cost a #{div(131_072, 1024)} KiB
-  chunk rewrite. `write/4` reports that amplification as telemetry rather
-  than leaving it to be inferred.
+  chunk rewrite. `write/5` reports that amplification as telemetry rather
+  than leaving it to be inferred, and returns it as well so a caller on
+  another node — which never sees this node's telemetry — can attribute
+  it to whatever it calls the device.
 
   ## Zeroes, discard and holes
 
@@ -200,9 +202,14 @@ defmodule NeonFS.Core.BlockBacking do
   The device cannot grow, so a write past the end is refused rather than
   extending the backing file. `opts` may not select a chunk strategy other
   than the forced fixed one.
+
+  Returns the chunk-layer cost of the write alongside the acknowledgement:
+  `chunk_bytes` is what the chunk layer rewrote to store `byte_size(data)`
+  guest bytes, so their ratio is the write amplification of this request.
   """
   @spec write(String.t(), binary(), non_neg_integer(), binary(), keyword()) ::
-          :ok | {:error, term()}
+          {:ok, %{chunk_bytes: non_neg_integer(), chunks_rewritten: pos_integer()}}
+          | {:error, term()}
   def write(volume, file_id, offset, data, opts \\ []) do
     start_time = System.monotonic_time()
     guest_bytes = byte_size(data)
@@ -225,7 +232,7 @@ defmodule NeonFS.Core.BlockBacking do
         %{volume: volume, file_id: file_id, offset: offset}
       )
 
-      :ok
+      {:ok, %{chunk_bytes: chunk_bytes, chunks_rewritten: chunks}}
     end
   end
 

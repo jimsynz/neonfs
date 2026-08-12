@@ -9,14 +9,39 @@ defmodule NeonFS.Block.Telemetry do
   ## Events
 
     * `[:neonfs, :block, :command]` — one guest IO command. Measurements
-      `bytes` and `duration`; metadata `export`, `command`
-      (`:read | :write | :flush | :write_zeroes`), `status`.
+      `bytes` and `duration`, plus `chunk_bytes` on a write; metadata
+      `export`, `command` (`:read | :write | :flush | :write_zeroes`),
+      `status`.
     * `[:neonfs, :block, :attached]` / `[:neonfs, :block, :detached]` —
       a device gaining or losing a holder. Measurement `holders`;
       metadata `export`.
+    * `[:neonfs, :client, :chunk_reader, :chunk_fetched]` — emitted by
+      `NeonFS.Client.ChunkReader` on this node, once per chunk a read
+      fetched. Not a block event, which is why it is filtered to the
+      ones `NeonFS.Block.Device` tagged with an `export`: on an omnibus
+      node the same event also carries FUSE's and S3's reads.
 
   Flush latency is the one to alert on: a flush is a durability barrier,
   so a guest filesystem's journal commits at whatever rate flush returns.
+
+  ## Amplification
+
+  Both directions export the chunk-layer bytes beside the guest bytes,
+  so the ratio is taken at query time rather than baked into a gauge
+  that cannot be re-aggregated:
+
+      neonfs_block_command_chunk_bytes{command="write"}
+        / neonfs_block_command_bytes{command="write"}
+
+      neonfs_block_read_chunk_bytes / neonfs_block_command_bytes{command="read"}
+
+  The two numerators come from different places because the measurement
+  does. A write's cost is arithmetic over the chunk geometry, which core
+  does and returns; a read's is only known to the client library that
+  fetched the chunks. Neither is computable here, and computing either
+  from the request's own offset and length would give an upper bound
+  rather than a measurement — a sparse device's unwritten region reads
+  as zeroes with no chunk fetched at all.
   """
 
   import Telemetry.Metrics
@@ -30,7 +55,7 @@ defmodule NeonFS.Block.Telemetry do
   """
   @spec metrics() :: [Telemetry.Metrics.t()]
   def metrics do
-    command_metrics() ++ attachment_metrics()
+    command_metrics() ++ amplification_metrics() ++ attachment_metrics()
   end
 
   defp command_metrics do
@@ -53,6 +78,25 @@ defmodule NeonFS.Block.Telemetry do
         measurement: :bytes,
         tags: [:export, :command],
         description: "Total bytes moved by block IO commands"
+      )
+    ]
+  end
+
+  defp amplification_metrics do
+    [
+      sum("neonfs.block.command.chunk_bytes",
+        event_name: [:neonfs, :block, :command],
+        measurement: :chunk_bytes,
+        tags: [:export, :command],
+        keep: &(&1.command == :write),
+        description: "Chunk-layer bytes rewritten to serve block writes"
+      ),
+      sum("neonfs.block.read.chunk_bytes",
+        event_name: [:neonfs, :client, :chunk_reader, :chunk_fetched],
+        measurement: :chunk_size,
+        tags: [:export],
+        keep: &is_map_key(&1, :export),
+        description: "Chunk-layer bytes fetched to serve block reads"
       )
     ]
   end

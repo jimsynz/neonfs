@@ -6,11 +6,14 @@ defmodule NeonFS.Block.MetricsTest do
   alias NeonFS.Block.{MetricsPlug, MetricsSupervisor, Telemetry}
 
   describe "metrics/0" do
-    test "every definition names an event the block target actually emits" do
+    test "every definition names an event something on a block node emits" do
       emitted = [
         [:neonfs, :block, :command],
         [:neonfs, :block, :attached],
-        [:neonfs, :block, :detached]
+        [:neonfs, :block, :detached],
+        # Not a block event: `NeonFS.Client.ChunkReader` emits it on this
+        # node for the reads `NeonFS.Block.Device` asks it to serve.
+        [:neonfs, :client, :chunk_reader, :chunk_fetched]
       ]
 
       for metric <- Telemetry.metrics() do
@@ -27,12 +30,39 @@ defmodule NeonFS.Block.MetricsTest do
       assert [:neonfs, :block, :command, :bytes] in names
     end
 
+    test "both directions export chunk bytes, so amplification is a query not a gauge" do
+      names = Enum.map(Telemetry.metrics(), & &1.name)
+
+      assert [:neonfs, :block, :command, :chunk_bytes] in names
+      assert [:neonfs, :block, :read, :chunk_bytes] in names
+    end
+
     test "a command metric is tagged by export and command so one device is separable" do
       for metric <- Telemetry.metrics(),
           metric.event_name == [:neonfs, :block, :command] do
         assert :export in metric.tags
         assert :command in metric.tags
       end
+    end
+
+    test "write chunk bytes are kept only for writes, whose events alone carry them" do
+      metric = metric_named([:neonfs, :block, :command, :chunk_bytes])
+
+      assert metric.keep.(%{command: :write})
+      refute metric.keep.(%{command: :read})
+      refute metric.keep.(%{command: :flush})
+    end
+
+    # The chunk_fetched event is emitted for every ChunkReader caller on the
+    # node, and an omnibus release runs FUSE and S3 beside the block target.
+    # Only the block target's reads carry an export, and a metric tagged
+    # `:export` would drop the rest with a logged error rather than ignore
+    # them.
+    test "read chunk bytes are kept only for the fetches Device tagged" do
+      metric = metric_named([:neonfs, :block, :read, :chunk_bytes])
+
+      assert metric.keep.(%{volume: "vol", export: "vol:/dev.img"})
+      refute metric.keep.(%{volume: "vol"})
     end
 
     test "the definitions are accepted by the Prometheus reporter" do
@@ -47,6 +77,11 @@ defmodule NeonFS.Block.MetricsTest do
       assert is_binary(TelemetryMetricsPrometheus.Core.scrape(:block_metrics_test))
 
       Supervisor.stop(pid)
+    end
+
+    defp metric_named(name) do
+      Enum.find(Telemetry.metrics(), &(&1.name == name)) ||
+        flunk("no metric named #{inspect(name)}")
     end
   end
 

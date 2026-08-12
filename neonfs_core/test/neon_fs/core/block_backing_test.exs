@@ -106,12 +106,16 @@ defmodule NeonFS.Core.BlockBackingTest do
       payload = :binary.copy(<<0xAB>>, @block)
       offset = 3 * @chunk
 
-      assert :ok = BlockBacking.write(volume_name, device.file_id, offset, payload)
+      assert {:ok, cost} = BlockBacking.write(volume_name, device.file_id, offset, payload)
 
       assert_receive {[:neonfs, :block, :write], ^ref, measurements, _meta}, 1_000
       assert measurements.guest_bytes == @block
       assert measurements.chunks_rewritten == 1
       assert measurements.chunk_bytes == @chunk
+
+      # The reply carries the same cost as the event, because a caller on
+      # another node never sees this node's telemetry.
+      assert cost == %{chunk_bytes: @chunk, chunks_rewritten: 1}
 
       assert {:ok, ^payload} = BlockBacking.read(volume_name, device.file_id, offset, @block)
 
@@ -134,11 +138,13 @@ defmodule NeonFS.Core.BlockBackingTest do
       offset = @chunk - @block
       payload = :binary.copy(<<0xCD>>, 2 * @block)
 
-      assert :ok = BlockBacking.write(volume_name, device.file_id, offset, payload)
+      assert {:ok, cost} = BlockBacking.write(volume_name, device.file_id, offset, payload)
 
       assert_receive {[:neonfs, :block, :write], ^ref, measurements, _meta}, 1_000
       assert measurements.chunks_rewritten == 2
       assert measurements.chunk_bytes == 2 * @chunk
+
+      assert cost == %{chunk_bytes: 2 * @chunk, chunks_rewritten: 2}
 
       assert {:ok, ^payload} =
                BlockBacking.read(volume_name, device.file_id, offset, 2 * @block)
@@ -208,7 +214,7 @@ defmodule NeonFS.Core.BlockBackingTest do
       device: device,
       zero_hash: zero_hash
     } do
-      :ok =
+      {:ok, _} =
         BlockBacking.write(volume_name, device.file_id, 0, :binary.copy(<<0xEF>>, 2 * @chunk))
 
       {:ok, dirty} = NeonFS.Core.get_file_meta_by_id(volume_name, device.file_id)
@@ -229,7 +235,9 @@ defmodule NeonFS.Core.BlockBackingTest do
     # than an artefact of the range fitting one batch.
     test "a range spanning many chunks costs one metadata commit", %{volume_name: volume_name} do
       {:ok, big} = BlockBacking.create_device(volume_name, "/big.img", 24 * @chunk)
-      :ok = BlockBacking.write(volume_name, big.file_id, 0, :binary.copy(<<0xEF>>, 24 * @chunk))
+
+      {:ok, _} =
+        BlockBacking.write(volume_name, big.file_id, 0, :binary.copy(<<0xEF>>, 24 * @chunk))
 
       ref =
         :telemetry_test.attach_event_handlers(self(), [[:neonfs, :write_operation, :stop]])
@@ -265,7 +273,7 @@ defmodule NeonFS.Core.BlockBackingTest do
       device: device,
       zero_hash: zero_hash
     } do
-      :ok =
+      {:ok, _} =
         BlockBacking.write(volume_name, device.file_id, 0, :binary.copy(<<0xEF>>, 4 * @chunk))
 
       # Straddles chunk 0's tail and chunk 3's head, covering 1 and 2 whole.
@@ -297,7 +305,8 @@ defmodule NeonFS.Core.BlockBackingTest do
       volume_name: volume_name,
       device: device
     } do
-      :ok = BlockBacking.write(volume_name, device.file_id, 0, :binary.copy(<<0xEF>>, @chunk))
+      {:ok, _} =
+        BlockBacking.write(volume_name, device.file_id, 0, :binary.copy(<<0xEF>>, @chunk))
 
       assert :ok = BlockBacking.discard(volume_name, device.file_id, 0, @block)
 
@@ -312,7 +321,7 @@ defmodule NeonFS.Core.BlockBackingTest do
   describe "flush/2" do
     test "returns once the backing file's chunks are durable", %{volume_name: volume_name} do
       {:ok, device} = BlockBacking.create_device(volume_name, "/dev.img", @chunk)
-      :ok = BlockBacking.write(volume_name, device.file_id, 0, :binary.copy(<<7>>, @block))
+      {:ok, _} = BlockBacking.write(volume_name, device.file_id, 0, :binary.copy(<<7>>, @block))
 
       ref = :telemetry_test.attach_event_handlers(self(), [[:neonfs, :block, :flush]])
 

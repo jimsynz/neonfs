@@ -28,8 +28,19 @@ defmodule NeonFS.Block.Device do
 
   ## Telemetry
 
-    * `[:neonfs, :block, :command]` — Measurements: `bytes`, `duration`.
-      Metadata: `export`, `command`, `status`.
+    * `[:neonfs, :block, :command]` — Measurements: `bytes`, `duration`,
+      and on a write `chunk_bytes`. Metadata: `export`, `command`,
+      `status`.
+
+  `bytes` is what the guest asked for; `chunk_bytes` is what the chunk
+  layer moved to serve it, so their ratio is the request's amplification.
+  A write gets its `chunk_bytes` from `BlockBacking.write/5`'s reply,
+  because the arithmetic depends on the chunk geometry, which lives on
+  core. A read's equivalent cannot come from here at all — only
+  `NeonFS.Client.ChunkReader` knows which chunks a range read fetched —
+  so it arrives as that module's `chunk_fetched` events, tagged with this
+  export through `:telemetry_metadata`. `NeonFS.Block.Telemetry` exports
+  both.
   """
 
   alias NeonFS.Client
@@ -101,15 +112,15 @@ defmodule NeonFS.Block.Device do
   end
 
   defp read_call(device, offset, length) do
-    case Application.get_env(:neonfs_block, :read_stream_fn) do
-      nil ->
-        ChunkReader.read_file_stream_by_id(device.volume, device.file_id,
-          offset: offset,
-          length: length
-        )
+    opts = [
+      offset: offset,
+      length: length,
+      telemetry_metadata: %{export: device.export}
+    ]
 
-      fun when is_function(fun, 3) ->
-        fun.(device, offset, length)
+    case Application.get_env(:neonfs_block, :read_stream_fn) do
+      nil -> ChunkReader.read_file_stream_by_id(device.volume, device.file_id, opts)
+      fun when is_function(fun, 2) -> fun.(device, opts)
     end
   end
 
@@ -149,14 +160,14 @@ defmodule NeonFS.Block.Device do
   """
   @spec measure_read(t(), non_neg_integer(), integer(), :ok | :error) :: :ok
   def measure_read(device, bytes, start_time, status) do
-    emit(device, :read, bytes, start_time, status)
+    emit(device, :read, bytes, %{}, start_time, status)
   end
 
   defp measure(device, command, bytes, fun) do
     start_time = System.monotonic_time()
     result = fun.()
     status = if match?({:error, _}, result), do: :error, else: :ok
-    emit(device, command, bytes, start_time, status)
+    emit(device, command, bytes, chunk_measurements(result), start_time, status)
 
     case result do
       {:ok, _} -> :ok
@@ -164,10 +175,22 @@ defmodule NeonFS.Block.Device do
     end
   end
 
-  defp emit(device, command, bytes, start_time, status) do
+  # Only a write comes back carrying its chunk-layer cost; the others have
+  # no such quantity, and inventing a zero for them would read as "this
+  # write moved no chunks" on the same series.
+  defp chunk_measurements({:ok, %{chunk_bytes: chunk_bytes}}), do: %{chunk_bytes: chunk_bytes}
+  defp chunk_measurements(_result), do: %{}
+
+  defp emit(device, command, bytes, extra_measurements, start_time, status) do
+    measurements =
+      Map.merge(
+        %{bytes: bytes, duration: System.monotonic_time() - start_time},
+        extra_measurements
+      )
+
     :telemetry.execute(
       [:neonfs, :block, :command],
-      %{bytes: bytes, duration: System.monotonic_time() - start_time},
+      measurements,
       %{export: device.export, command: command, status: status}
     )
   end

@@ -49,16 +49,41 @@ defmodule NeonFS.Client.ChunkReader do
 
   ## Telemetry
 
-  Each successful whole-chunk data-plane fetch emits
+  Each chunk fetched for a range read emits
   `[:neonfs, :client, :chunk_reader, :chunk_fetched]` with measurements
   `%{read_length, chunk_size, duration}` and metadata
-  `%{volume, node, hash, tier}`. `read_length` is the bytes the caller
-  asked for from this chunk and `chunk_size` is the whole-chunk bytes
-  pulled over the data plane, so `chunk_size / read_length` is the
-  read-amplification factor and the event count is the data-plane RPC
-  count — the signal behind the small-window large-image-pull
-  pathology. `duration` is in `:native` time units. Cache hits
-  emit nothing: they cost no data-plane fetch.
+  `%{volume, node, hash, tier, source}`. `read_length` is the bytes the
+  caller asked for from this chunk and `chunk_size` is the whole-chunk
+  bytes the fetch had to move to serve them, so `chunk_size /
+  read_length` is the read-amplification factor and the event count is
+  the fetch count — the signal behind the small-window
+  large-image-pull pathology. `duration` is in `:native` time units.
+
+  `source` names which fetch served the chunk:
+
+    * `:data_plane` — a whole chunk pulled over TLS. `chunk_size` is the
+      measured byte size of what arrived, and `node`/`tier` name the
+      replica it came from.
+    * `:core_rpc` — a range-limited `NeonFS.Core.read_file/3` call, used
+      for a chunk needing server-side processing or one with no data
+      endpoint. Only `read_length` bytes cross the wire, but core reads
+      and processes the whole chunk to produce them, so `chunk_size` is
+      the chunk's `original_size` — the chunk-layer bytes moved, the
+      same quantity the data-plane branch reports. `node` and `tier` are
+      `nil`: `Router` picks the core node internally and does not report
+      which.
+
+  Two paths emit nothing, because neither makes a per-chunk fetch whose
+  bytes or duration could be attributed honestly: a cache hit (which
+  costs no fetch at all, and correctly contributes zero to the ratio),
+  and the whole-range fallbacks — the buffered `read_file/3` fallback
+  and the degraded-erasure stripe walk — where one core call covers many
+  chunks.
+
+  Callers can attribute these events to their own domain object by
+  passing `:telemetry_metadata`; the map is merged into the event's
+  metadata. `neonfs_block` uses it to tag chunk fetches with the NBD
+  export they served, so read amplification is separable per device.
   """
 
   require Logger
@@ -76,7 +101,8 @@ defmodule NeonFS.Client.ChunkReader do
           offset: non_neg_integer(),
           length: non_neg_integer() | :all,
           timeout: timeout(),
-          exclude_nodes: [node()]
+          exclude_nodes: [node()],
+          telemetry_metadata: map()
         ]
 
   @type stream_result ::
@@ -95,6 +121,8 @@ defmodule NeonFS.Client.ChunkReader do
     * `:timeout` - per-chunk data-plane timeout in ms (default 30_000)
     * `:exclude_nodes` - nodes to skip when selecting a chunk location
       (useful for avoiding known-bad replicas)
+    * `:telemetry_metadata` - a map merged into the metadata of every
+      `chunk_fetched` event this read emits
   """
   @spec read_file(String.t(), String.t(), read_opts()) ::
           {:ok, binary()} | {:error, term()}
@@ -219,11 +247,22 @@ defmodule NeonFS.Client.ChunkReader do
     if Enum.any?(chunks, &needs_server_processing?/1) do
       fallback_read(volume_name, target, opts)
     else
-      case assemble(chunks, hole_bytes, volume_name, opts) do
+      case assemble(chunks, hole_bytes, fetch_ctx(volume_name, opts)) do
         {:error, :no_data_endpoint} -> fallback_read(volume_name, target, opts)
         other -> other
       end
     end
+  end
+
+  # Everything a chunk fetch needs that is not the ref itself, so the
+  # pipeline threads one value rather than four.
+  defp fetch_ctx(volume_name, opts) do
+    %{
+      volume: volume_name,
+      exclude: Keyword.get(opts, :exclude_nodes, []),
+      timeout: Keyword.get(opts, :timeout, @default_chunk_timeout),
+      telemetry_metadata: Keyword.get(opts, :telemetry_metadata, %{})
+    }
   end
 
   # `hole_bytes` is the sparse tail core reported for this range — a file grown
@@ -231,13 +270,10 @@ defmodule NeonFS.Client.ChunkReader do
   # requires them to read as zeros. Core decides how many, because it is the
   # only side that can tell an unwritten region from a chunk whose metadata is
   # missing.
-  defp assemble(chunks, hole_bytes, volume_name, opts) do
-    timeout = Keyword.get(opts, :timeout, @default_chunk_timeout)
-    exclude = Keyword.get(opts, :exclude_nodes, [])
-
+  defp assemble(chunks, hole_bytes, ctx) do
     chunks
     |> Enum.reduce_while({:ok, []}, fn ref, {:ok, acc} ->
-      case fetch_chunk_bytes(volume_name, ref, exclude, timeout) do
+      case fetch_chunk_bytes(ctx, ref) do
         {:ok, bytes} ->
           sliced = binary_part(bytes, ref.read_start, ref.read_length)
           {:cont, {:ok, [sliced | acc]}}
@@ -255,15 +291,15 @@ defmodule NeonFS.Client.ChunkReader do
     end
   end
 
-  defp fetch_chunk_bytes(volume_name, ref, exclude, timeout) do
-    case ChunkCache.get({volume_name, ref.hash}) do
+  defp fetch_chunk_bytes(ctx, ref) do
+    case ChunkCache.get({ctx.volume, ref.hash}) do
       {:ok, bytes} ->
         {:ok, bytes}
 
       :miss ->
         ordered =
           ref.locations
-          |> Enum.reject(&(&1.node in exclude))
+          |> Enum.reject(&(&1.node in ctx.exclude))
           |> prefer_local()
 
         case ordered do
@@ -271,14 +307,14 @@ defmodule NeonFS.Client.ChunkReader do
             {:error, :no_available_locations}
 
           locations ->
-            try_locations(volume_name, locations, ref, timeout, :no_locations_tried)
+            try_locations(ctx, locations, ref, :no_locations_tried)
         end
     end
   end
 
-  defp try_locations(_volume_name, [], _ref, _timeout, last_error), do: {:error, last_error}
+  defp try_locations(_ctx, [], _ref, last_error), do: {:error, last_error}
 
-  defp try_locations(volume_name, [loc | rest], ref, timeout, _last_error) do
+  defp try_locations(ctx, [loc | rest], ref, _last_error) do
     tier = tier_to_string(Map.get(loc, :tier, :hot))
     drive_id = Map.get(loc, :drive_id, "default")
 
@@ -286,10 +322,17 @@ defmodule NeonFS.Client.ChunkReader do
 
     start = System.monotonic_time()
 
-    case Router.data_call(loc.node, :get_chunk, args, timeout: timeout) do
+    case Router.data_call(loc.node, :get_chunk, args, timeout: ctx.timeout) do
       {:ok, bytes} ->
-        emit_chunk_fetched(volume_name, ref, bytes, loc, tier, start)
-        verify_and_accept(volume_name, bytes, loc, ref, rest, timeout)
+        emit_chunk_fetched(
+          ctx,
+          ref,
+          byte_size(bytes),
+          %{source: :data_plane, node: loc.node, tier: tier},
+          start
+        )
+
+        verify_and_accept(ctx, bytes, loc, ref, rest)
 
       {:error, reason} ->
         Logger.debug("Data-plane chunk fetch failed, trying next location",
@@ -297,7 +340,7 @@ defmodule NeonFS.Client.ChunkReader do
           reason: inspect(reason)
         )
 
-        try_locations(volume_name, rest, ref, timeout, reason)
+        try_locations(ctx, rest, ref, reason)
     end
   end
 
@@ -310,9 +353,9 @@ defmodule NeonFS.Client.ChunkReader do
   # fetched range-decoded via the core RPC path, not whole, so they can't
   # be verified against the whole-chunk hash here — that's core/scrub's
   # responsibility.
-  defp verify_and_accept(volume_name, bytes, loc, ref, rest, timeout) do
+  defp verify_and_accept(ctx, bytes, loc, ref, rest) do
     if :crypto.hash(:sha256, bytes) == ref.hash do
-      ChunkCache.put({volume_name, ref.hash}, bytes)
+      ChunkCache.put({ctx.volume, ref.hash}, bytes)
       {:ok, bytes}
     else
       :telemetry.execute(
@@ -326,22 +369,28 @@ defmodule NeonFS.Client.ChunkReader do
         chunk_hash: Base.encode16(ref.hash, case: :lower)
       )
 
-      try_locations(volume_name, rest, ref, timeout, {:chunk_verify_failed, ref.hash})
+      try_locations(ctx, rest, ref, {:chunk_verify_failed, ref.hash})
     end
   end
 
-  # Whole chunk pulled over the data plane but only `read_length` bytes are
-  # handed back: `chunk_size / read_length` is the amplification, the event
-  # count is the data-plane RPC count.
-  defp emit_chunk_fetched(volume_name, ref, bytes, loc, tier, start) do
+  # A whole chunk is moved to hand back only `read_length` bytes:
+  # `chunk_size / read_length` is the amplification, the event count is
+  # the fetch count. `source` says which fetch moved them — see the
+  # module doc for what `chunk_size` measures on each.
+  defp emit_chunk_fetched(ctx, ref, chunk_size, source_metadata, start) do
+    metadata =
+      %{volume: ctx.volume, hash: ref.hash, node: nil, tier: nil}
+      |> Map.merge(source_metadata)
+      |> Map.merge(ctx.telemetry_metadata)
+
     :telemetry.execute(
       [:neonfs, :client, :chunk_reader, :chunk_fetched],
       %{
         read_length: ref.read_length,
-        chunk_size: byte_size(bytes),
+        chunk_size: chunk_size,
         duration: System.monotonic_time() - start
       },
-      %{volume: volume_name, node: loc.node, hash: ref.hash, tier: tier}
+      metadata
     )
   end
 
@@ -366,8 +415,7 @@ defmodule NeonFS.Client.ChunkReader do
   end
 
   defp build_chunk_stream(chunks, hole_bytes, volume_name, target, opts) do
-    timeout = Keyword.get(opts, :timeout, @default_chunk_timeout)
-    exclude = Keyword.get(opts, :exclude_nodes, [])
+    ctx = fetch_ctx(volume_name, opts)
 
     chunk_stream =
       Stream.unfold(chunks, fn
@@ -375,7 +423,7 @@ defmodule NeonFS.Client.ChunkReader do
           nil
 
         [ref | rest] ->
-          case stream_fetch_chunk(ref, volume_name, target, exclude, timeout) do
+          case stream_fetch_chunk(ref, ctx, target) do
             {:ok, bytes} ->
               {bytes, rest}
 
@@ -402,16 +450,16 @@ defmodule NeonFS.Client.ChunkReader do
     end)
   end
 
-  defp stream_fetch_chunk(ref, volume_name, target, exclude, timeout) do
+  defp stream_fetch_chunk(ref, ctx, target) do
     if needs_server_processing?(ref) do
-      stream_fetch_via_core(ref, volume_name, target)
+      stream_fetch_via_core(ref, ctx, target)
     else
-      case fetch_chunk_bytes(volume_name, ref, exclude, timeout) do
+      case fetch_chunk_bytes(ctx, ref) do
         {:ok, bytes} ->
           {:ok, binary_part(bytes, ref.read_start, ref.read_length)}
 
         {:error, :no_data_endpoint} ->
-          stream_fetch_via_core(ref, volume_name, target)
+          stream_fetch_via_core(ref, ctx, target)
 
         {:error, _} = err ->
           err
@@ -419,11 +467,19 @@ defmodule NeonFS.Client.ChunkReader do
     end
   end
 
-  defp stream_fetch_via_core(ref, volume_name, target) do
+  # Core hands back only the requested slice, but it had to read and
+  # process the whole chunk to produce it — so the chunk-layer bytes this
+  # fetch moved are the chunk's `original_size`, not the slice's length.
+  defp stream_fetch_via_core(ref, ctx, target) do
     offset = ref.chunk_offset + ref.read_start
     length = ref.read_length
 
-    core_read(volume_name, target, offset: offset, length: length)
+    start = System.monotonic_time()
+
+    with {:ok, _bytes} = ok <- core_read(ctx.volume, target, offset: offset, length: length) do
+      emit_chunk_fetched(ctx, ref, ref.original_size, %{source: :core_rpc}, start)
+      ok
+    end
   end
 
   defp fallback_stream(volume_name, target, opts) do

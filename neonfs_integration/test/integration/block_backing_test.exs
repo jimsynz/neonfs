@@ -53,11 +53,17 @@ defmodule NeonFS.Integration.BlockBackingTest do
     overwritten_at = 2 * @chunk
     untouched_at = 5 * @chunk
 
-    :ok = block_rpc(cluster, :node1, :write, [@volume, device.file_id, overwritten_at, stale])
-    :ok = block_rpc(cluster, :node1, :write, [@volume, device.file_id, untouched_at, untouched])
+    {:ok, _} =
+      block_rpc(cluster, :node1, :write, [@volume, device.file_id, overwritten_at, stale])
+
+    {:ok, _} =
+      block_rpc(cluster, :node1, :write, [@volume, device.file_id, untouched_at, untouched])
+
     :ok = block_rpc(cluster, :node1, :flush, [@volume, device.file_id])
 
-    :ok = block_rpc(cluster, :node1, :write, [@volume, device.file_id, overwritten_at, fresh])
+    {:ok, _} =
+      block_rpc(cluster, :node1, :write, [@volume, device.file_id, overwritten_at, fresh])
+
     :ok = block_rpc(cluster, :node1, :flush, [@volume, device.file_id])
 
     {:ok, cluster} = PeerCluster.restart_node(cluster, :node1)
@@ -85,7 +91,7 @@ defmodule NeonFS.Integration.BlockBackingTest do
 
     payload = :binary.copy(<<0xD4>>, 2 * @chunk)
 
-    :ok = block_rpc(cluster, :node1, :write, [@volume, device.file_id, 0, payload])
+    {:ok, _} = block_rpc(cluster, :node1, :write, [@volume, device.file_id, 0, payload])
     :ok = block_rpc(cluster, :node1, :flush, [@volume, device.file_id])
 
     :ok = block_rpc(cluster, :node1, :write_zeroes, [@volume, device.file_id, 0, @chunk])

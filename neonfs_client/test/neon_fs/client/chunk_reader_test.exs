@@ -833,6 +833,85 @@ defmodule NeonFS.Client.ChunkReaderTest do
       assert metadata.node == :node1@host
       assert metadata.volume == "vol"
       assert metadata.tier == "hot"
+      assert metadata.source == :data_plane
+    end
+
+    # The core call hands back only the slice, but core read and
+    # decompressed the whole chunk to produce it. Reporting the slice
+    # would show an amplification of 1.0 for exactly the volumes whose
+    # amplification is worst.
+    test "a chunk served by core reports the whole-chunk bytes, not the slice" do
+      chunk = String.duplicate("Q", 4096)
+
+      refs = [
+        ref(
+          content: chunk,
+          original_size: 4096,
+          stored_size: 900,
+          chunk_offset: 0,
+          read_start: 0,
+          read_length: 16,
+          compression: :zstd
+        )
+      ]
+
+      expect(Router, :call, fn NeonFS.Core, :read_file_refs_by_id, _ ->
+        {:ok, %{file_size: 4096, chunks: refs, hole_bytes: 0}}
+      end)
+
+      expect(Router, :call, fn NeonFS.Core, :read_file_by_id, _ ->
+        {:ok, binary_part(chunk, 0, 16)}
+      end)
+
+      ref_tel =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:neonfs, :client, :chunk_reader, :chunk_fetched]
+        ])
+
+      assert {:ok, %{stream: stream}} = ChunkReader.read_file_stream_by_id("vol", "file-1")
+      assert Enum.to_list(stream) == [binary_part(chunk, 0, 16)]
+
+      assert_received {[:neonfs, :client, :chunk_reader, :chunk_fetched], ^ref_tel, measurements,
+                       metadata}
+
+      assert measurements.read_length == 16
+      assert measurements.chunk_size == 4096
+      assert metadata.source == :core_rpc
+
+      # `Router` picks the core node internally, so claiming one here
+      # would be inventing it.
+      assert metadata.node == nil
+      assert metadata.tier == nil
+    end
+
+    test "caller metadata is merged into the event, whichever fetch served it" do
+      chunk = String.duplicate("M", 32)
+
+      refs = [
+        ref(content: chunk, original_size: 32, chunk_offset: 0, read_start: 0, read_length: 32)
+      ]
+
+      expect(Router, :call, fn NeonFS.Core, :read_file_refs, _ ->
+        {:ok, %{file_size: 32, chunks: refs, hole_bytes: 0}}
+      end)
+
+      expect(Router, :data_call, fn :node1@host, :get_chunk, _args, _opts -> {:ok, chunk} end)
+
+      ref_tel =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:neonfs, :client, :chunk_reader, :chunk_fetched]
+        ])
+
+      assert {:ok, ^chunk} =
+               ChunkReader.read_file("vol", "/tagged.bin",
+                 telemetry_metadata: %{export: "vol:/dev.img"}
+               )
+
+      assert_received {[:neonfs, :client, :chunk_reader, :chunk_fetched], ^ref_tel, _measurements,
+                       metadata}
+
+      assert metadata.export == "vol:/dev.img"
+      assert metadata.volume == "vol"
     end
 
     test "a cache hit emits no chunk_fetched event" do
