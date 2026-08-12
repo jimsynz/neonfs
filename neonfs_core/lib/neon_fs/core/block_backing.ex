@@ -141,6 +141,30 @@ defmodule NeonFS.Core.BlockBacking do
   def provision_volume_device(_volume), do: :ok
 
   @doc """
+  Removes the device a block volume owns, as part of deleting the volume.
+
+  A block volume's single file is not content held in the volume — it *is*
+  the volume — so the emptiness check that protects a filesystem volume from
+  a careless delete would otherwise make a block volume undeletable. There
+  is nothing an operator could delete first: the CLI has no file-delete
+  verb, and a block volume cannot be mounted.
+
+  A volume of any other type is left alone, and a device that is already
+  gone is not an error — deleting a volume twice should fail on the volume,
+  not on its device.
+  """
+  @spec delete_volume_device(NeonFS.Core.Volume.t()) :: :ok | {:error, term()}
+  def delete_volume_device(%{type: :block, name: name}) do
+    case Core.delete_file(name, @device_path) do
+      :ok -> :ok
+      {:error, %NeonFS.Error.FileNotFound{}} -> :ok
+      {:error, _reason} = error -> error
+    end
+  end
+
+  def delete_volume_device(_volume), do: :ok
+
+  @doc """
   Creates a backing file of exactly `size_bytes` at `path` in `volume`.
 
   The file is written as zeroes through the forced fixed chunk strategy,
