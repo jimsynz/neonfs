@@ -47,6 +47,24 @@ defmodule NeonFS.CIFS.HandlerTest do
 
   defp not_found(path), do: FileNotFound.exception(file_path: path, volume_id: "vol-a")
 
+  # Opening the share root, the way smbd's pathref open does: the path
+  # already exists, so there is no create, and `get_file_meta` answers a
+  # directory whose id is nil.
+  defp open_root(state) do
+    expect(NeonFS.Client, :core_call, fn NeonFS.Core, :get_file_meta, ["vol-a", "/"] ->
+      {:ok, file_meta("/", mode: 0o40755)}
+    end)
+
+    expect(NeonFS.Client, :core_call, fn NeonFS.Core, :pin_file, ["vol-a", "/", _holder] ->
+      {:ok, %{claim_id: "claim:/", file_id: nil}}
+    end)
+
+    {{:ok, %{handle: handle}}, state} =
+      Handler.handle({:openat, %{"path" => "/", "flags" => 0, "mode" => 0}}, state)
+
+    {handle, state}
+  end
+
   defp open_file(state, path, flags \\ 0o100) do
     expect(NeonFS.Client, :core_call, fn NeonFS.Core, :get_file_meta, ["vol-a", ^path] ->
       {:error, not_found(path)}
@@ -195,6 +213,54 @@ defmodule NeonFS.CIFS.HandlerTest do
 
       {reply, _} = Handler.handle({:fstat, %{"handle" => handle}}, state)
       assert match?({:ok, %{stat: %{size: 99}}}, reply)
+    end
+
+    # smbd opens a pathref on the share root and stats it *through that
+    # handle* on every tree connect (`openat_pathref_fsp_dot` →
+    # `vfs_stat_fsp` → `fstat_fn`). The root's `FileMeta` carries
+    # `id: nil`, so a by-id lookup has nothing to look up: it answered an
+    # error that reached smbd as EIO, and every SMB2 create then failed
+    # with OBJECT_PATH_NOT_FOUND. Nothing could be done on any share.
+    test "fstat on the share root resolves by name, since the root has no id" do
+      {handle, state} = open_root(connected())
+
+      expect(NeonFS.Client, :core_call, fn NeonFS.Core, :get_file_meta, ["vol-a", "/"] ->
+        {:ok, file_meta("/", mode: 0o40755)}
+      end)
+
+      {reply, _} = Handler.handle({:fstat, %{"handle" => handle}}, state)
+
+      assert match?({:ok, %{stat: %{kind: :directory}}}, reply)
+    end
+
+    test "fchmod on the share root goes by name too" do
+      {handle, state} = open_root(connected())
+
+      expect(NeonFS.Client, :core_call, fn NeonFS.Core,
+                                           :update_file_meta,
+                                           ["vol-a", "/", [mode: 0o40700]] ->
+        {:ok, %{}}
+      end)
+
+      {reply, _} = Handler.handle({:fchmod, %{"handle" => handle, "mode" => 0o40700}}, state)
+
+      assert {:ok, %{}} == reply
+    end
+
+    test "a handle that does have an id still resolves by identity" do
+      {handle, state} = open_file(connected(), "/keeps-identity.txt")
+
+      # Not by path: resolving by name is what a rename breaks, and is why
+      # handles are identity-keyed in the first place. The root is the
+      # exception, not the rule.
+      expect(NeonFS.Client, :core_call, fn NeonFS.Core,
+                                           :get_file_meta_by_id,
+                                           ["vol-a", "object:/keeps-identity.txt"] ->
+        {:ok, file_meta("/keeps-identity.txt", size: 7)}
+      end)
+
+      {reply, _} = Handler.handle({:fstat, %{"handle" => handle}}, state)
+      assert match?({:ok, %{stat: %{size: 7}}}, reply)
     end
 
     test "fstat on an unknown handle is :ebadf" do
@@ -685,7 +751,13 @@ defmodule NeonFS.CIFS.HandlerTest do
           receive do
             {:open, from} ->
               {:ok, handle} =
-                HandleRegistry.open("vol-a", "object:/theirs.txt", 0, "claim:/theirs.txt")
+                HandleRegistry.open(
+                  "vol-a",
+                  "object:/theirs.txt",
+                  "/theirs.txt",
+                  0,
+                  "claim:/theirs.txt"
+                )
 
               send(from, {:opened, handle})
               receive do: (:die -> :ok)
