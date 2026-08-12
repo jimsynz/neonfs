@@ -33,6 +33,13 @@ resources/scripts/neonfs-each mix check --no-retry   # All checks in all subproj
 resources/scripts/neonfs-each mix deps.get           # Fetch deps everywhere
 ```
 
+That fan-out takes 45+ minutes. For verifying a branch, prefer the scoped version, which runs `mix check --no-retry` only in the packages the branch's changed paths can affect:
+```bash
+resources/scripts/neonfs-check-affected              # affected packages only
+resources/scripts/neonfs-check-affected mix test     # any command, same selection
+```
+It derives the selection from `ci-affected`, the same path-to-package mapping CI uses, so a change to shared code still fans out to every downstream package. It does **not** run the integration, cli, wire or vfs suites — it names the ones your change selected and leaves them to CI, where the integration suite is sharded across two runners.
+
 ### Pre-Commit Checks
 
 After making changes, always run these before committing:

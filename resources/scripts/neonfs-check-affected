@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# Run a command only in the subprojects this branch's changes can affect.
+#
+# Usage:
+#   neonfs-check-affected                  # mix check --no-retry in affected packages
+#   neonfs-check-affected mix test         # any command, same selection
+#   NEONFS_BASE=release-1.2 neonfs-check-affected
+#
+# The path -> package mapping is `ci-affected`'s, used unmodified. That
+# script is CI's source of truth for the sibling dependency graph — the
+# test_support build dep that puts core on every interface's path, s3's test
+# dep on webdav, client's fan-out to everything — and a second copy of that
+# graph here would drift from it without anyone noticing.
+#
+# `ci-affected` also selects the integration, cli, wire and vfs jobs. Those
+# are deliberately NOT run here: CI runs them, the integration suite is
+# sharded across two runners there and would not be here, and whatever
+# opened the branch has to drive its PR to green regardless. Which of them
+# was selected is reported, so it's visible what will decide the PR.
+#
+# Changed paths are the branch's commits against its base, plus anything
+# uncommitted or untracked in the working tree.
+
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+ci_affected="$repo_root/resources/scripts/ci-affected"
+
+if [ "$#" -eq 0 ]; then
+  set -- mix check --no-retry
+fi
+
+base="${NEONFS_BASE:-}"
+if [ -z "$base" ]; then
+  if git -C "$repo_root" rev-parse --verify --quiet origin/main >/dev/null; then
+    base=origin/main
+  else
+    base=main
+  fi
+fi
+
+paths="$(
+  {
+    git -C "$repo_root" diff --name-only "$base...HEAD"
+    git -C "$repo_root" diff --name-only HEAD
+    git -C "$repo_root" ls-files --others --exclude-standard
+  } | sort -u
+)"
+
+if [ -z "$paths" ]; then
+  echo "No changes against $base — nothing to check."
+  exit 0
+fi
+
+packages_json='[]'
+deferred=()
+while IFS='=' read -r key value; do
+  case "$key" in
+    packages) packages_json="$value" ;;
+    run_integration) [ "$value" = true ] && deferred+=(integration) ;;
+    run_cli) [ "$value" = true ] && deferred+=(cli) ;;
+    run_wire) [ "$value" = true ] && deferred+=(wire) ;;
+    run_vfs) [ "$value" = true ] && deferred+=(vfs) ;;
+  esac
+done < <(printf '%s\n' "$paths" | "$ci_affected")
+
+mapfile -t packages < <(jq -r '.[]' <<<"$packages_json")
+
+if [ "${#deferred[@]}" -gt 0 ]; then
+  printf 'Left to CI: %s\n' "${deferred[*]}"
+fi
+
+if [ "${#packages[@]}" -eq 0 ]; then
+  echo "No package affected by the changes against $base."
+  exit 0
+fi
+
+printf 'Affected (%d): %s\n' "${#packages[@]}" "${packages[*]}"
+
+failures=()
+for name in "${packages[@]}"; do
+  project="$repo_root/$name"
+  if [ ! -f "$project/mix.exs" ]; then
+    printf 'No mix.exs in %s — ci-matrix.json and the tree disagree.\n' "$name" >&2
+    exit 1
+  fi
+  printf '\n==> %s\n' "$name"
+  if ! (cd "$project" && "$@"); then
+    failures+=("$name")
+  fi
+done
+
+if [ "${#failures[@]}" -gt 0 ]; then
+  printf '\nFailed in: %s\n' "${failures[*]}" >&2
+  exit 1
+fi
