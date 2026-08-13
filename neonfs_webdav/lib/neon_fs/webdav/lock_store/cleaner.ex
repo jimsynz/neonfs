@@ -76,10 +76,13 @@ defmodule NeonFS.WebDAV.LockStore.Cleaner do
   defp sweep_expired do
     now = System.system_time(:second)
 
+    # An unreadable index is nothing to sweep: the next tick tries again,
+    # and deleting on a guess would drop live locks.
     expired =
-      [include_expired: true]
-      |> LockStore.active_locks()
-      |> Enum.filter(&(&1.expires_at <= now))
+      case LockStore.active_locks(include_expired: true) do
+        {:ok, locks} -> Enum.filter(locks, &(&1.expires_at <= now))
+        {:error, _reason} -> []
+      end
 
     Enum.each(expired, fn info ->
       release_namespace_claim_for(info)

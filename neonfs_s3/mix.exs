@@ -57,7 +57,7 @@ defmodule NeonFS.S3.MixProject do
       {:logger_json, "~> 7.0"},
       {:neonfs_client, path: "../neonfs_client"},
       {:plug, "~> 1.15"},
-      {:firkin, "~> 0.2.3"},
+      {:firkin, "~> 0.3"},
       {:telemetry_metrics_prometheus_core, "~> 1.2"},
 
       # dev/test
