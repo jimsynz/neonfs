@@ -787,4 +787,98 @@ defmodule NeonFS.CSI.NodeServerTest do
       end
     end
   end
+
+  describe "capability validation against the volume" do
+    setup do
+      Application.put_env(:neonfs_csi, :core_call_fn, fn
+        NeonFS.Core, :get_volume, ["vol-blk"] ->
+          {:ok, %Volume{id: "vol-blk", name: "vol-blk", type: :block, max_size: 4096}}
+
+        NeonFS.Core, :get_volume, [_other] ->
+          {:ok, %Volume{id: "vol-fs", name: "vol-fs", type: :fs}}
+      end)
+
+      :ok
+    end
+
+    test "refuses a mount capability against a block volume", %{staging_root: root} do
+      assert_raise GRPC.RPCError, ~r/is a block volume/, fn ->
+        NodeServer.node_stage_volume(
+          %NodeStageVolumeRequest{
+            volume_id: "vol-blk",
+            staging_target_path: Path.join(root, "s"),
+            volume_capability: @rw_capability
+          },
+          nil
+        )
+      end
+    end
+
+    test "refuses a block capability against a filesystem volume", %{staging_root: root} do
+      assert_raise GRPC.RPCError, ~r/is a mount volume/, fn ->
+        NodeServer.node_stage_volume(
+          %NodeStageVolumeRequest{
+            volume_id: "vol-fs",
+            staging_target_path: Path.join(root, "s"),
+            volume_capability: @block_capability
+          },
+          nil
+        )
+      end
+    end
+
+    # Publish compares against what was staged rather than asking core
+    # again — the staged record is the authority on what is attached.
+    test "refuses a publish whose capability contradicts the staging", %{staging_root: root} do
+      staging = Path.join(root, "blk")
+
+      NodeServer.node_stage_volume(
+        %NodeStageVolumeRequest{
+          volume_id: "vol-blk",
+          staging_target_path: staging,
+          volume_capability: @block_capability
+        },
+        nil
+      )
+
+      assert_raise GRPC.RPCError, ~r/is a block volume/, fn ->
+        NodeServer.node_publish_volume(
+          %NodePublishVolumeRequest{
+            volume_id: "vol-blk",
+            staging_target_path: staging,
+            target_path: Path.join(root, "t"),
+            volume_capability: @rw_capability,
+            readonly: false
+          },
+          nil
+        )
+      end
+    end
+  end
+
+  describe "NodeGetVolumeStats for a block volume" do
+    setup do
+      Application.put_env(:neonfs_csi, :core_call_fn, fn NeonFS.Core, :get_volume, _ ->
+        {:ok, %Volume{id: "vol-blk", name: "vol-blk", type: :block, max_size: 8_388_608}}
+      end)
+
+      :ok
+    end
+
+    # A raw device has no filesystem, so no inodes and no free space of its
+    # own. Inventing those numbers is worse than the spec's answer of total
+    # bytes alone.
+    test "reports the device size and no inode statistics", %{staging_root: root} do
+      reply =
+        NodeServer.node_get_volume_stats(
+          %NodeGetVolumeStatsRequest{
+            volume_id: "vol-blk",
+            volume_path: Path.join(root, "blk")
+          },
+          nil
+        )
+
+      assert [%{unit: :BYTES, total: 8_388_608, used: 8_388_608, available: 0}] = reply.usage
+    end
+  end
 end

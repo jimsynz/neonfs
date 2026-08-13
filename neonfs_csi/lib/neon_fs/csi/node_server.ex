@@ -175,6 +175,7 @@ defmodule NeonFS.CSI.NodeServer do
       ) do
     init_state_tables()
     ensure_capability_supported!(cap)
+    ensure_capability_matches_volume!(vol_id, cap)
 
     case :ets.lookup(@staged_table, vol_id) do
       [{^vol_id, %{staging_path: ^staging_path}}] ->
@@ -272,6 +273,7 @@ defmodule NeonFS.CSI.NodeServer do
       ) do
     init_state_tables()
     ensure_capability_supported!(cap)
+    ensure_capability_matches_staged!(vol_id, cap)
     ensure_staged!(vol_id, staging_path)
 
     case :ets.lookup(@published_table, {vol_id, target_path}) do
@@ -386,14 +388,8 @@ defmodule NeonFS.CSI.NodeServer do
 
   defp volume_usage(vol_id) do
     case core_call(NeonFS.Core, :get_volume, [vol_id]) do
-      {:ok, volume} ->
-        [
-          usage_entry(:BYTES, Map.get(volume, :logical_size, 0) || 0, Map.get(volume, :max_size)),
-          usage_entry(:INODES, Map.get(volume, :file_count, 0) || 0, Map.get(volume, :max_files))
-        ]
-
-      _ ->
-        []
+      {:ok, volume} -> usage_for(volume_access_type(volume), volume)
+      _ -> []
     end
   end
 
@@ -401,6 +397,22 @@ defmodule NeonFS.CSI.NodeServer do
   # remaining space (`available = total - used`). A thin volume has no
   # ceiling, so `total = used` → `available = 0` rather than a misleading
   # negative from the `total - used` arithmetic.
+  # A raw device has no filesystem, so it has no inodes and no free space
+  # of its own: the whole device is in use by whatever the guest put there.
+  # Reporting an inode count for it would be inventing a number, which is
+  # worse than the spec's answer of total bytes alone.
+  defp usage_for(:block, volume) do
+    size = Map.get(volume, :max_size) || Map.get(volume, :logical_size, 0) || 0
+    [%VolumeUsage{available: 0, total: size, used: size, unit: :BYTES}]
+  end
+
+  defp usage_for(_mount, volume) do
+    [
+      usage_entry(:BYTES, Map.get(volume, :logical_size, 0) || 0, Map.get(volume, :max_size)),
+      usage_entry(:INODES, Map.get(volume, :file_count, 0) || 0, Map.get(volume, :max_files))
+    ]
+  end
+
   defp usage_entry(unit, used, nil) do
     %VolumeUsage{available: 0, total: used, used: used, unit: unit}
   end
@@ -456,6 +468,40 @@ defmodule NeonFS.CSI.NodeServer do
 
   defp access_type(%{access_type: {:block, _}}), do: :block
   defp access_type(_capability), do: :mount
+
+  # A filesystem operation against a block volume, or a block operation
+  # against a filesystem one, is a mismatch the spec asks every RPC to
+  # refuse rather than attempt. Staging is where the volume's own type is
+  # first consulted; everything after it can compare against what was
+  # staged.
+  defp ensure_capability_matches_volume!(vol_id, cap) do
+    case core_call(NeonFS.Core, :get_volume, [vol_id]) do
+      {:ok, volume} ->
+        refuse_mismatch!(access_type(cap), volume_access_type(volume), vol_id)
+
+      _unresolved ->
+        :ok
+    end
+  end
+
+  defp ensure_capability_matches_staged!(vol_id, cap) do
+    case staged_record(vol_id) do
+      %{access_type: staged} -> refuse_mismatch!(access_type(cap), staged, vol_id)
+      nil -> :ok
+    end
+  end
+
+  defp refuse_mismatch!(same, same, _vol_id), do: :ok
+
+  defp refuse_mismatch!(requested, actual, vol_id) do
+    raise GRPC.RPCError,
+      status: :invalid_argument,
+      message:
+        "volume #{vol_id} is a #{actual} volume; a #{requested} capability cannot be used with it"
+  end
+
+  defp volume_access_type(%{type: :block}), do: :block
+  defp volume_access_type(_volume), do: :mount
 
   defp do_unstage(vol_id, %{access_type: :block, device_path: device_path}) do
     # A device that is already gone is the state this call is asking for.
