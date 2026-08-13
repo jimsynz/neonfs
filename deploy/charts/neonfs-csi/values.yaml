@@ -21,6 +21,14 @@ sidecars:
     image: registry.k8s.io/sig-storage/csi-provisioner:v6.3.0
     pullPolicy: IfNotPresent
     extraArgs: []
+  # Watches VolumeAttachment objects and calls ControllerPublishVolume.
+  # Required whenever `csiDriver.attachRequired` is true: without it
+  # Kubernetes creates attachments nothing ever acts on, and every pod
+  # using a NeonFS volume waits forever.
+  attacher:
+    image: registry.k8s.io/sig-storage/csi-attacher:v4.9.0
+    pullPolicy: IfNotPresent
+    extraArgs: []
   resizer:
     image: registry.k8s.io/sig-storage/csi-resizer:v2.2.1
     pullPolicy: IfNotPresent
@@ -95,7 +103,11 @@ node:
 # https://kubernetes.io/docs/reference/access-authn-authz/extensible-admission-controllers/
 # for semantics.
 csiDriver:
-  attachRequired: false
+  # Block volumes are attached through the controller so a second node
+  # cannot take a device the first still holds — the exclusion is a
+  # cluster-side claim rather than the CO's bookkeeping alone. Turning this
+  # off skips ControllerPublishVolume entirely, and with it that guarantee.
+  attachRequired: true
   podInfoOnMount: true
   # `Persistent` is the right answer for filesystem volumes;
   # `Ephemeral` would mean kubelet creates and tears them down inline

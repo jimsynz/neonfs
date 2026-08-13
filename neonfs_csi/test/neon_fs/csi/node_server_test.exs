@@ -203,6 +203,34 @@ defmodule NeonFS.CSI.NodeServerTest do
       end
     end
 
+    # A stage without the controller's attach is either a CO that skipped
+    # it or something driving the plugin directly, and neither should be
+    # handed a device another node may hold.
+    test "refuses a block stage that did not go through the controller", %{staging_root: root} do
+      assert_raise GRPC.RPCError, ~r/was not attached through the controller/, fn ->
+        NodeServer.node_stage_volume(
+          %NodeStageVolumeRequest{
+            volume_id: "vol-block",
+            staging_target_path: Path.join(root, "unattached"),
+            volume_capability: @block_capability
+          },
+          nil
+        )
+      end
+    end
+
+    test "stages a mount volume without any attach context", %{staging_root: root} do
+      assert %NodeStageVolumeResponse{} =
+               NodeServer.node_stage_volume(
+                 %NodeStageVolumeRequest{
+                   volume_id: "vol-mount",
+                   staging_target_path: Path.join(root, "mount"),
+                   volume_capability: @rw_capability
+                 },
+                 nil
+               )
+    end
+
     test "stages a block volume by attaching its device", %{staging_root: root} do
       staging = Path.join(root, "block")
 
@@ -211,7 +239,8 @@ defmodule NeonFS.CSI.NodeServerTest do
                  %NodeStageVolumeRequest{
                    volume_id: "vol-block",
                    staging_target_path: staging,
-                   volume_capability: @block_capability
+                   volume_capability: @block_capability,
+                   publish_context: %{"neonfs.attached_node" => "worker-a"}
                  },
                  nil
                )
@@ -649,7 +678,8 @@ defmodule NeonFS.CSI.NodeServerTest do
         %NodeStageVolumeRequest{
           volume_id: "vol-blk",
           staging_target_path: staging,
-          volume_capability: @block_capability
+          volume_capability: @block_capability,
+          publish_context: %{"neonfs.attached_node" => "worker-a"}
         },
         nil
       )
@@ -836,7 +866,8 @@ defmodule NeonFS.CSI.NodeServerTest do
         %NodeStageVolumeRequest{
           volume_id: "vol-blk",
           staging_target_path: staging,
-          volume_capability: @block_capability
+          volume_capability: @block_capability,
+          publish_context: %{"neonfs.attached_node" => "worker-a"}
         },
         nil
       )
