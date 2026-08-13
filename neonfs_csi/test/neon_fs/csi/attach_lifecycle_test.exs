@@ -139,6 +139,23 @@ defmodule NeonFS.CSI.AttachLifecycleTest do
       end
     end
 
+    # csi-sanity checks this directly: attaching to a node the driver has
+    # never heard of describes a topology that does not exist, and recording
+    # an attachment for it would be recording something nothing can act on.
+    test "refuses a node that is not known" do
+      assert_raise GRPC.RPCError, ~r/node worker-ghost is not known/, fn ->
+        publish("blk", "worker-ghost")
+      end
+    end
+
+    test "accepts the node this plugin is itself serving" do
+      Application.put_env(:neonfs_csi, :service_list_fn, fn :csi -> [] end)
+      Application.put_env(:neonfs_csi, :node_id, "self-reported")
+      on_exit(fn -> Application.delete_env(:neonfs_csi, :node_id) end)
+
+      assert %_{} = publish("fs", "self-reported", @mount_capability)
+    end
+
     test "refuses a volume that does not exist" do
       assert_raise GRPC.RPCError, ~r/not found/, fn ->
         publish("ghost", "worker-a")

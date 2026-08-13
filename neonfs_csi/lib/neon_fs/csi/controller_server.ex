@@ -82,6 +82,8 @@ defmodule NeonFS.CSI.ControllerServer do
 
   alias NeonFS.Client.Router
   alias NeonFS.CSI.AttachRegistry
+  alias NeonFS.CSI.NodeResolver
+  alias NeonFS.CSI.NodeServer
   alias NeonFS.CSI.VolumeHealth
 
   import Bitwise, only: [<<<: 2]
@@ -473,6 +475,7 @@ defmodule NeonFS.CSI.ControllerServer do
     volume = fetch_volume!(vol_id)
     ensure_capability_supported!(cap)
     ensure_capability_matches!(cap, volume)
+    ensure_node_exists!(node_id)
 
     case volume_access_type(volume) do
       :block -> attach_block(vol_id, node_id)
@@ -541,6 +544,22 @@ defmodule NeonFS.CSI.ControllerServer do
       raise GRPC.RPCError,
         status: :invalid_argument,
         message: "capability does not match volume #{Map.get(volume, :name, "")}"
+    end
+  end
+
+  # Attaching to a node that is not there is `NOT_FOUND`, whatever the
+  # volume's type: the CO is describing a topology that does not exist, and
+  # answering success would record an attachment nothing can act on.
+  #
+  # A node counts as existing if it registered (which is how a controller
+  # finds it at all) or if it is the node this plugin is itself serving —
+  # a single-binary deployment has no separate registration to consult.
+  defp ensure_node_exists!(node_id) do
+    known? =
+      node_id == NodeServer.node_id() or match?({:ok, _node}, NodeResolver.beam_node(node_id))
+
+    unless known? do
+      raise GRPC.RPCError, status: :not_found, message: "node #{node_id} is not known"
     end
   end
 
