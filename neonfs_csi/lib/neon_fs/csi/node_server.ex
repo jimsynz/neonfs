@@ -84,6 +84,7 @@ defmodule NeonFS.CSI.NodeServer do
     VolumeUsage
   }
 
+  alias NeonFS.Client.Discovery
   alias NeonFS.CSI.VolumeHealth
 
   @staged_table :csi_node_staged
@@ -186,7 +187,7 @@ defmodule NeonFS.CSI.NodeServer do
             "volume #{vol_id} is already staged at #{existing} (cannot re-stage at #{staging_path})"
 
       [] ->
-        do_stage(vol_id, staging_path)
+        do_stage(vol_id, staging_path, access_type(cap))
     end
   end
 
@@ -215,23 +216,14 @@ defmodule NeonFS.CSI.NodeServer do
       [] ->
         %NodeUnstageVolumeResponse{}
 
-      [{^vol_id, %{staging_path: ^staging_path, mount_id: mount_id}}] ->
+      [{^vol_id, %{staging_path: ^staging_path} = record}] ->
         if has_publishes?(vol_id) do
           raise GRPC.RPCError,
             status: :failed_precondition,
             message: "volume #{vol_id} still has active publishes; unpublish first"
         end
 
-        case fuse_unmount_fn().(mount_id) do
-          :ok ->
-            :ets.delete(@staged_table, vol_id)
-            %NodeUnstageVolumeResponse{}
-
-          {:error, reason} ->
-            raise GRPC.RPCError,
-              status: :internal,
-              message: "fuse unmount failed: #{inspect(reason)}"
-        end
+        do_unstage(vol_id, record)
 
       [{^vol_id, %{staging_path: existing}}] ->
         raise GRPC.RPCError,
@@ -424,10 +416,14 @@ defmodule NeonFS.CSI.NodeServer do
     end
   end
 
-  defp do_stage(vol_id, staging_path) do
+  defp do_stage(vol_id, staging_path, :mount) do
     with :ok <- File.mkdir_p(staging_path),
          {:ok, mount_id} <- fuse_mount_fn().(vol_id, staging_path) do
-      :ets.insert(@staged_table, {vol_id, %{staging_path: staging_path, mount_id: mount_id}})
+      :ets.insert(
+        @staged_table,
+        {vol_id, %{staging_path: staging_path, mount_id: mount_id, access_type: :mount}}
+      )
+
       %NodeStageVolumeResponse{}
     else
       {:error, reason} ->
@@ -437,20 +433,129 @@ defmodule NeonFS.CSI.NodeServer do
     end
   end
 
-  defp do_publish(vol_id, staging_path, target_path, readonly) do
-    with :ok <- File.mkdir_p(target_path),
-         :ok <- bind_mount_fn().(staging_path, target_path, readonly) do
+  # Staging a block volume attaches its device on this host. The staging
+  # path is still created and still a directory — the spec says so
+  # regardless of access type — but nothing is mounted on it; what is
+  # staged is the device, and its path is what the publish needs.
+  defp do_stage(vol_id, staging_path, :block) do
+    with :ok <- File.mkdir_p(staging_path),
+         {:ok, device_path} <- block_attach_fn().(vol_id) do
       :ets.insert(
-        @published_table,
-        {{vol_id, target_path}, %{staging_path: staging_path, readonly: readonly}}
+        @staged_table,
+        {vol_id, %{staging_path: staging_path, device_path: device_path, access_type: :block}}
       )
 
-      %NodePublishVolumeResponse{}
+      %NodeStageVolumeResponse{}
+    else
+      {:error, reason} ->
+        raise GRPC.RPCError,
+          status: :internal,
+          message: "block attach failed: #{inspect(reason)}"
+    end
+  end
+
+  defp access_type(%{access_type: {:block, _}}), do: :block
+  defp access_type(_capability), do: :mount
+
+  defp do_unstage(vol_id, %{access_type: :block, device_path: device_path}) do
+    # A device that is already gone is the state this call is asking for.
+    # Failing on it wedges the volume: the kubelet retries an unstage it
+    # can never satisfy.
+    case block_detach_fn().(device_path) do
+      :ok ->
+        :ets.delete(@staged_table, vol_id)
+        %NodeUnstageVolumeResponse{}
+
+      {:error, :not_attached} ->
+        :ets.delete(@staged_table, vol_id)
+        %NodeUnstageVolumeResponse{}
+
+      {:error, reason} ->
+        raise GRPC.RPCError,
+          status: :internal,
+          message: "block detach failed: #{inspect(reason)}"
+    end
+  end
+
+  defp do_unstage(vol_id, %{mount_id: mount_id}) do
+    case fuse_unmount_fn().(mount_id) do
+      :ok ->
+        :ets.delete(@staged_table, vol_id)
+        %NodeUnstageVolumeResponse{}
+
+      {:error, reason} ->
+        raise GRPC.RPCError,
+          status: :internal,
+          message: "fuse unmount failed: #{inspect(reason)}"
+    end
+  end
+
+  defp do_publish(vol_id, staging_path, target_path, readonly) do
+    case staged_record(vol_id) do
+      %{access_type: :block, device_path: device_path} ->
+        publish_device(vol_id, staging_path, device_path, target_path, readonly)
+
+      _mount ->
+        publish_mount(vol_id, staging_path, target_path, readonly)
+    end
+  end
+
+  defp publish_mount(vol_id, staging_path, target_path, readonly) do
+    with :ok <- File.mkdir_p(target_path),
+         :ok <- bind_mount_fn().(staging_path, target_path, readonly) do
+      record_publish(vol_id, staging_path, target_path, readonly)
     else
       {:error, reason} ->
         raise GRPC.RPCError,
           status: :internal,
           message: "bind mount failed: #{inspect(reason)}"
+    end
+  end
+
+  # For a block volume the kubelet's target path is a *file*, not a
+  # directory: the device node is bind-mounted onto it. Creating a
+  # directory there — which is what the mount path does — makes the bind
+  # fail with a type mismatch, so the file has to exist first and be
+  # exactly a file.
+  defp publish_device(vol_id, staging_path, device_path, target_path, readonly) do
+    with :ok <- File.mkdir_p(Path.dirname(target_path)),
+         :ok <- touch_target_file(target_path),
+         :ok <- bind_mount_fn().(device_path, target_path, readonly) do
+      record_publish(vol_id, staging_path, target_path, readonly)
+    else
+      {:error, reason} ->
+        raise GRPC.RPCError,
+          status: :internal,
+          message: "block bind mount failed: #{inspect(reason)}"
+    end
+  end
+
+  defp touch_target_file(target_path) do
+    cond do
+      File.dir?(target_path) ->
+        {:error, "target #{target_path} is a directory; a block target must be a file"}
+
+      File.exists?(target_path) ->
+        :ok
+
+      true ->
+        File.touch(target_path)
+    end
+  end
+
+  defp record_publish(vol_id, staging_path, target_path, readonly) do
+    :ets.insert(
+      @published_table,
+      {{vol_id, target_path}, %{staging_path: staging_path, readonly: readonly}}
+    )
+
+    %NodePublishVolumeResponse{}
+  end
+
+  defp staged_record(vol_id) do
+    case :ets.lookup(@staged_table, vol_id) do
+      [{^vol_id, record}] -> record
+      [] -> nil
     end
   end
 
@@ -487,12 +592,6 @@ defmodule NeonFS.CSI.NodeServer do
     :MULTI_NODE_SINGLE_WRITER
   ]
 
-  defp ensure_capability_supported!(%{access_type: {:block, _}}) do
-    raise GRPC.RPCError,
-      status: :invalid_argument,
-      message: "block volumes are not supported"
-  end
-
   defp ensure_capability_supported!(%{access_mode: %{mode: mode}})
        when mode in @supported_modes,
        do: :ok
@@ -526,6 +625,14 @@ defmodule NeonFS.CSI.NodeServer do
 
   defp bind_unmount_fn do
     Application.get_env(:neonfs_csi, :bind_unmount_fn, &default_bind_unmount/1)
+  end
+
+  defp block_attach_fn do
+    Application.get_env(:neonfs_csi, :block_attach_fn, &default_block_attach/1)
+  end
+
+  defp block_detach_fn do
+    Application.get_env(:neonfs_csi, :block_detach_fn, &default_block_detach/1)
   end
 
   defp default_fuse_mount(volume_name, staging_path) do
@@ -563,5 +670,73 @@ defmodule NeonFS.CSI.NodeServer do
       {_out, 0} -> :ok
       {out, code} -> {:error, "umount exit #{code}: #{String.trim(out)}"}
     end
+  end
+
+  # A bare export name resolves to the volume's own device, which is the
+  # form the block target answers and the one that does not require this
+  # node to know the backing file's path.
+  #
+  # `-b 4096` is not decoration: nbd-client defaults to 512-byte blocks
+  # whatever the server advertises, and the backing store refuses a
+  # request that is not 4 KiB-aligned.
+  defp default_block_attach(volume_id) do
+    with {:ok, {host, port}} <- block_endpoint(),
+         {:ok, device} <- free_nbd_device() do
+      args = ["-N", volume_id, host, to_string(port), device, "-b", "4096", "-persist"]
+
+      case System.cmd("nbd-client", args, stderr_to_stdout: true) do
+        {_out, 0} -> {:ok, device}
+        {out, code} -> {:error, "nbd-client exit #{code}: #{String.trim(out)}"}
+      end
+    end
+  end
+
+  defp default_block_detach(device_path) do
+    case System.cmd("nbd-client", ["-d", device_path], stderr_to_stdout: true) do
+      {_out, 0} -> :ok
+      {out, code} -> {:error, "nbd-client -d exit #{code}: #{String.trim(out)}"}
+    end
+  end
+
+  # The block target advertises where its NBD listener is as part of its
+  # service registration, so a deployment does not have to be told twice.
+  # An explicit config still wins, for a topology discovery cannot describe.
+  defp block_endpoint do
+    case Application.get_env(:neonfs_csi, :block_endpoint) do
+      {host, port} when is_binary(host) and is_integer(port) -> {:ok, {host, port}}
+      _unset -> discovered_block_endpoint()
+    end
+  end
+
+  defp discovered_block_endpoint do
+    :block
+    |> Discovery.list_by_type()
+    |> Enum.find_value(fn service ->
+      case Map.get(service.metadata || %{}, :nbd_endpoint) do
+        {host, port} when is_binary(host) and is_integer(port) -> {:ok, {host, port}}
+        _absent -> nil
+      end
+    end)
+    |> case do
+      {:ok, _endpoint} = ok -> ok
+      nil -> {:error, "no block service advertising an NBD endpoint was discovered"}
+    end
+  end
+
+  # `nbd-client -c` reports whether a device is already bound, so the first
+  # unbound one is free. Racing another attach on the same node is possible
+  # and is what the non-zero exit from `nbd-client` then reports.
+  defp free_nbd_device do
+    Enum.find_value(0..15, {:error, "no free /dev/nbdX device"}, fn index ->
+      device = "/dev/nbd#{index}"
+
+      if File.exists?(device) and not nbd_device_bound?(device) do
+        {:ok, device}
+      end
+    end)
+  end
+
+  defp nbd_device_bound?(device) do
+    match?({_out, 0}, System.cmd("nbd-client", ["-c", device], stderr_to_stdout: true))
   end
 end
