@@ -93,7 +93,10 @@ defmodule NeonFS.CSI.ControllerServerTest do
       assert :CREATE_DELETE_VOLUME in types
       assert :LIST_VOLUMES in types
       assert :GET_CAPACITY in types
-      refute :PUBLISH_UNPUBLISH_VOLUME in types
+
+      # Block volumes are attached through the controller so the exclusion
+      # is cluster-side rather than the CO's alone.
+      assert :PUBLISH_UNPUBLISH_VOLUME in types
     end
   end
 
