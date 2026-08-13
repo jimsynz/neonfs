@@ -50,6 +50,44 @@ defmodule NeonFS.Transport.Handler do
     end
   end
 
+  @doc """
+  Reads one chunk from this node's blob store — the read counterpart to
+  `store_chunk/6`, and the same call the data-plane's `get_chunk` serves.
+
+  Shared so that a caller whose target is this node does not have to reach
+  itself over the network to read its own storage. There is no pool to a
+  node from itself (`PoolManager` discovers *peers*), so without this the
+  local case fell through to an RPC that made core read and process a whole
+  chunk to hand back a slice of it — on a single-node cluster, every read.
+  """
+  @spec fetch_chunk(binary(), binary(), atom() | binary(), module()) ::
+          {:ok, binary()} | {:error, term()}
+  def fetch_chunk(hash, volume_id, tier \\ "hot", dispatch \\ dispatch_module()) do
+    case dispatch.read_chunk(hash, volume_id, tier: tier) do
+      {:ok, chunk_bytes} -> {:ok, chunk_bytes}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc """
+  Whether this node's blob store holds `hash`, and in which tier — the
+  local counterpart of the data plane's `has_chunk`.
+  """
+  @spec chunk_info(binary(), module()) :: {:ok, map()} | {:error, term()}
+  def chunk_info(hash, dispatch \\ dispatch_module()) do
+    case dispatch.chunk_info(hash) do
+      {:ok, tier, size} -> {:ok, %{tier: tier, size: size}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # The blob store this node dispatches to. A core node leaves it at the
+  # default; the `:dispatch_module` the listener takes as an option is the
+  # same choice made per-listener rather than per-node.
+  defp dispatch_module do
+    Application.get_env(:neonfs_client, :dispatch_module, @default_dispatch)
+  end
+
   # GenServer callbacks
 
   @impl GenServer
@@ -141,15 +179,15 @@ defmodule NeonFS.Transport.Handler do
   end
 
   defp dispatch({:get_chunk, ref, hash, volume_id, tier}, state) do
-    case state.dispatch.read_chunk(hash, volume_id, tier: tier) do
+    case fetch_chunk(hash, volume_id, tier, state.dispatch) do
       {:ok, chunk_bytes} -> {:ok, ref, chunk_bytes}
       {:error, _reason} -> {:error, ref, :not_found}
     end
   end
 
   defp dispatch({:has_chunk, ref, hash}, state) do
-    case state.dispatch.chunk_info(hash) do
-      {:ok, tier, size} -> {:ok, ref, tier, size}
+    case chunk_info(hash, state.dispatch) do
+      {:ok, %{tier: tier, size: size}} -> {:ok, ref, tier, size}
       {:error, _reason} -> {:error, ref, :not_found}
     end
   end

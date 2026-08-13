@@ -14,7 +14,7 @@ defmodule NeonFS.Client.Router do
 
   alias NeonFS.Client.{CostFunction, Discovery, RootPlacement}
   alias NeonFS.Error.Unavailable
-  alias NeonFS.Transport.{ConnPool, PoolManager}
+  alias NeonFS.Transport.{ConnPool, Handler, PoolManager}
 
   @max_retries 2
   @default_data_timeout 30_000
@@ -65,7 +65,19 @@ defmodule NeonFS.Client.Router do
   """
   @spec data_call(node(), data_operation(), keyword(), keyword()) ::
           :ok | {:ok, term()} | {:error, term()}
-  def data_call(node, operation, args, opts \\ []) do
+  def data_call(node, operation, args, opts \\ [])
+
+  # This node's own storage is reachable without a socket, and there is no
+  # pool to reach it through anyway: `PoolManager` discovers *peers*, so a
+  # location on `Node.self()` has never had a data endpoint. Left to the
+  # generic path it answers `:no_data_endpoint` and the caller falls back to
+  # an RPC that makes core read and process a whole chunk to return a slice
+  # of it — on a single-node cluster, for every read there is.
+  def data_call(node, operation, args, _opts) when node == node() do
+    local_data_call(operation, args)
+  end
+
+  def data_call(node, operation, args, opts) do
     timeout = Keyword.get(opts, :timeout, @default_data_timeout)
 
     case PoolManager.get_pool(node) do
@@ -181,6 +193,17 @@ defmodule NeonFS.Client.Router do
   end
 
   ## Private helpers — data_call
+
+  # Only the read side is served locally. A local write still goes through
+  # the generic path, because `put_chunk` fans out replicas as part of the
+  # store and that is the data plane's job rather than this shortcut's.
+  defp local_data_call(:get_chunk, args) do
+    Handler.fetch_chunk(args[:hash], args[:volume_id], Keyword.get(args, :tier, "hot"))
+  end
+
+  defp local_data_call(:has_chunk, args), do: Handler.chunk_info(args[:hash])
+
+  defp local_data_call(_operation, _args), do: {:error, :no_data_endpoint}
 
   defp build_data_message(:put_chunk, ref, args) do
     # `:volume_id` historically carries the drive identifier; callers that
