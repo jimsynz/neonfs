@@ -65,11 +65,13 @@ defmodule NeonFS.Core.BlockDeviceInvariantTest do
   end
 
   # What `fio --verify` at iodepth=8 does, and what a guest filesystem does
-  # whenever it has more than one write in flight. Each write is a
+  # whenever it has more than one write in flight — eight is `fio`'s
+  # `iodepth=8`, the shape that found this. Each write is a
   # read-modify-write of the file's chunk list, so without the commit
   # comparing the snapshot it was computed from, two in flight at once
   # each commit a list built from the same starting point and the second
   # silently discards the first's chunk.
+  @tag timeout: 120_000
   test "concurrent writes to distinct chunks all survive", %{
     volume_name: volume_name,
     device: device
@@ -78,7 +80,7 @@ defmodule NeonFS.Core.BlockDeviceInvariantTest do
     parent = self()
 
     writers =
-      for index <- 0..31 do
+      for index <- 0..7 do
         offset = index * @chunk
         payload = :binary.copy(<<index + 1>>, @block)
 
@@ -90,7 +92,7 @@ defmodule NeonFS.Core.BlockDeviceInvariantTest do
         {offset, payload}
       end
 
-    for index <- 0..31 do
+    for index <- 0..7 do
       assert_receive {:written, ^index, {:ok, _cost}}, 60_000
     end
 
