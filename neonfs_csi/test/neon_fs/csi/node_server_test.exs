@@ -8,6 +8,7 @@ defmodule NeonFS.CSI.NodeServerTest do
     NodePublishVolumeRequest,
     NodeServiceCapability,
     NodeStageVolumeRequest,
+    NodeStageVolumeResponse,
     NodeUnpublishVolumeRequest,
     NodeUnstageVolumeRequest,
     VolumeCapability
@@ -22,6 +23,11 @@ defmodule NeonFS.CSI.NodeServerTest do
 
   @ro_capability %VolumeCapability{
     access_mode: %VolumeCapability.AccessMode{mode: :MULTI_NODE_READER_ONLY}
+  }
+
+  @block_capability %VolumeCapability{
+    access_type: {:block, %VolumeCapability.BlockVolume{}},
+    access_mode: %VolumeCapability.AccessMode{mode: :SINGLE_NODE_WRITER}
   }
 
   setup do
@@ -50,11 +56,23 @@ defmodule NeonFS.CSI.NodeServerTest do
       :ok
     end)
 
+    Application.put_env(:neonfs_csi, :block_attach_fn, fn vol ->
+      send(test_pid, {:block_attach, vol})
+      {:ok, "/dev/nbd0"}
+    end)
+
+    Application.put_env(:neonfs_csi, :block_detach_fn, fn device ->
+      send(test_pid, {:block_detach, device})
+      :ok
+    end)
+
     on_exit(fn ->
       Application.delete_env(:neonfs_csi, :fuse_mount_fn)
       Application.delete_env(:neonfs_csi, :fuse_unmount_fn)
       Application.delete_env(:neonfs_csi, :bind_mount_fn)
       Application.delete_env(:neonfs_csi, :bind_unmount_fn)
+      Application.delete_env(:neonfs_csi, :block_attach_fn)
+      Application.delete_env(:neonfs_csi, :block_detach_fn)
       Application.delete_env(:neonfs_csi, :node_id)
       Application.delete_env(:neonfs_csi, :core_call_fn)
       NodeServer.reset_state_tables()
@@ -185,19 +203,25 @@ defmodule NeonFS.CSI.NodeServerTest do
       end
     end
 
-    test "rejects block volumes", %{staging_root: root} do
-      block_cap = %VolumeCapability{access_type: {:block, %VolumeCapability.BlockVolume{}}}
+    test "stages a block volume by attaching its device", %{staging_root: root} do
+      staging = Path.join(root, "block")
 
-      assert_raise GRPC.RPCError, ~r/block volumes are not supported/, fn ->
-        NodeServer.node_stage_volume(
-          %NodeStageVolumeRequest{
-            volume_id: "vol-block",
-            staging_target_path: Path.join(root, "block"),
-            volume_capability: block_cap
-          },
-          nil
-        )
-      end
+      assert %NodeStageVolumeResponse{} =
+               NodeServer.node_stage_volume(
+                 %NodeStageVolumeRequest{
+                   volume_id: "vol-block",
+                   staging_target_path: staging,
+                   volume_capability: @block_capability
+                 },
+                 nil
+               )
+
+      assert_received {:block_attach, "vol-block"}
+      refute_received {:fuse_mount, _, _}
+
+      # The staging path is a directory even for a block volume — the spec
+      # says so regardless of access type — but nothing is mounted on it.
+      assert File.dir?(staging)
     end
 
     test "surfaces fuse mount errors as INTERNAL", %{staging_root: root} do
@@ -614,6 +638,153 @@ defmodule NeonFS.CSI.NodeServerTest do
 
       assert reply.volume_condition.abnormal == true
       assert reply.volume_condition.message =~ "FUSE mount probe"
+    end
+  end
+
+  describe "block volume lifecycle" do
+    setup %{staging_root: root} do
+      staging = Path.join(root, "blk-staging")
+
+      NodeServer.node_stage_volume(
+        %NodeStageVolumeRequest{
+          volume_id: "vol-blk",
+          staging_target_path: staging,
+          volume_capability: @block_capability
+        },
+        nil
+      )
+
+      {:ok, staging: staging, target: Path.join(root, "pods/vol-blk/dev")}
+    end
+
+    # The kubelet's target path for a block volume is a file, not a
+    # directory: the device node is bind-mounted onto it, and creating a
+    # directory there makes the bind fail with a type mismatch.
+    test "publishes the device onto a file target", %{staging: staging, target: target} do
+      assert %_{} =
+               NodeServer.node_publish_volume(
+                 %NodePublishVolumeRequest{
+                   volume_id: "vol-blk",
+                   staging_target_path: staging,
+                   target_path: target,
+                   volume_capability: @block_capability,
+                   readonly: false
+                 },
+                 nil
+               )
+
+      assert_received {:bind_mount, "/dev/nbd0", ^target, false}
+      assert File.regular?(target)
+    end
+
+    test "publishes read-only when asked", %{staging: staging, target: target} do
+      NodeServer.node_publish_volume(
+        %NodePublishVolumeRequest{
+          volume_id: "vol-blk",
+          staging_target_path: staging,
+          target_path: target,
+          volume_capability: @block_capability,
+          readonly: true
+        },
+        nil
+      )
+
+      assert_received {:bind_mount, "/dev/nbd0", ^target, true}
+    end
+
+    test "unpublish then unstage return it to nothing", %{staging: staging, target: target} do
+      NodeServer.node_publish_volume(
+        %NodePublishVolumeRequest{
+          volume_id: "vol-blk",
+          staging_target_path: staging,
+          target_path: target,
+          volume_capability: @block_capability,
+          readonly: false
+        },
+        nil
+      )
+
+      assert %_{} =
+               NodeServer.node_unpublish_volume(
+                 %NodeUnpublishVolumeRequest{volume_id: "vol-blk", target_path: target},
+                 nil
+               )
+
+      assert_received {:bind_unmount, ^target}
+
+      assert %_{} =
+               NodeServer.node_unstage_volume(
+                 %NodeUnstageVolumeRequest{
+                   volume_id: "vol-blk",
+                   staging_target_path: staging
+                 },
+                 nil
+               )
+
+      assert_received {:block_detach, "/dev/nbd0"}
+    end
+
+    # A kubelet retry must not wedge on a teardown that already happened.
+    test "both reversals are safe to call twice", %{staging: staging, target: target} do
+      NodeServer.node_publish_volume(
+        %NodePublishVolumeRequest{
+          volume_id: "vol-blk",
+          staging_target_path: staging,
+          target_path: target,
+          volume_capability: @block_capability,
+          readonly: false
+        },
+        nil
+      )
+
+      unpublish = %NodeUnpublishVolumeRequest{volume_id: "vol-blk", target_path: target}
+      assert %_{} = NodeServer.node_unpublish_volume(unpublish, nil)
+      assert %_{} = NodeServer.node_unpublish_volume(unpublish, nil)
+
+      unstage = %NodeUnstageVolumeRequest{
+        volume_id: "vol-blk",
+        staging_target_path: staging
+      }
+
+      assert %_{} = NodeServer.node_unstage_volume(unstage, nil)
+      assert %_{} = NodeServer.node_unstage_volume(unstage, nil)
+    end
+
+    # `nbd-client -d` on a device nothing is bound to is the state the call
+    # is asking for, so it must not fail the unstage.
+    test "unstage succeeds when the device is already detached", %{staging: staging} do
+      Application.put_env(:neonfs_csi, :block_detach_fn, fn _device ->
+        {:error, :not_attached}
+      end)
+
+      assert %_{} =
+               NodeServer.node_unstage_volume(
+                 %NodeUnstageVolumeRequest{
+                   volume_id: "vol-blk",
+                   staging_target_path: staging
+                 },
+                 nil
+               )
+    end
+
+    test "refuses a block target that is already a directory", %{
+      staging: staging,
+      target: target
+    } do
+      File.mkdir_p!(target)
+
+      assert_raise GRPC.RPCError, ~r/must be a file/, fn ->
+        NodeServer.node_publish_volume(
+          %NodePublishVolumeRequest{
+            volume_id: "vol-blk",
+            staging_target_path: staging,
+            target_path: target,
+            volume_capability: @block_capability,
+            readonly: false
+          },
+          nil
+        )
+      end
     end
   end
 end

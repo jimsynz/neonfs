@@ -43,6 +43,12 @@ defmodule NeonFS.Block.Listener do
     |> parse_address()
   end
 
+  @doc """
+  The configured port, which is what a client has to dial.
+  """
+  @spec port() :: :inet.port_number()
+  def port, do: configured_port()
+
   defp configured_bind, do: Application.get_env(:neonfs_block, :bind, @default_bind)
   defp configured_port, do: Application.get_env(:neonfs_block, :port, @default_port)
 
