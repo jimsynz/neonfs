@@ -53,7 +53,7 @@ defmodule NeonFS.CSI.Supervisor do
     children =
       case endpoint_child_spec() do
         {:ok, endpoint} ->
-          [endpoint] |> maybe_add_registrar(register?)
+          ([endpoint] ++ attach_holder_children()) |> maybe_add_registrar(register?)
 
         {:skip, message} ->
           Logger.warning("CSI plugin disabled: #{message}")
@@ -100,6 +100,16 @@ defmodule NeonFS.CSI.Supervisor do
     end
   end
 
+  # Only a node-mode plugin holds attachments, so only it needs the pid
+  # whose death releases them.
+  defp attach_holder_children do
+    if Application.get_env(:neonfs_csi, :mode, :controller) == :node do
+      [NeonFS.CSI.AttachHolder]
+    else
+      []
+    end
+  end
+
   defp maybe_add_registrar(children, false), do: children
 
   defp maybe_add_registrar(children, true) do
@@ -110,11 +120,25 @@ defmodule NeonFS.CSI.Supervisor do
       ]
   end
 
-  defp registration_metadata do
-    %{
+  # A node-mode plugin advertises the `node_id` it reports to the CO.
+  # `ServiceInfo` already carries the BEAM node, so the pair is what lets a
+  # controller turn the node name Kubernetes uses into the node a claim can
+  # be held on — see `NeonFS.CSI.NodeResolver`.
+  @doc """
+  The metadata this plugin registers itself with. Public so the
+  node_id-to-BEAM-node mapping it carries can be asserted directly.
+  """
+  @spec registration_metadata() :: map()
+  def registration_metadata do
+    base = %{
       capabilities: [:csi_identity],
       mode: Application.get_env(:neonfs_csi, :mode, :controller),
       version: to_string(Application.spec(:neonfs_csi, :vsn) || "0.0.0")
     }
+
+    case base.mode do
+      :node -> Map.put(base, :node_id, NeonFS.CSI.NodeServer.node_id())
+      _controller -> base
+    end
   end
 end

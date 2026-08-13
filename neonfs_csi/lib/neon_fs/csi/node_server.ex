@@ -648,7 +648,13 @@ defmodule NeonFS.CSI.NodeServer do
       message: "unsupported volume capability"
   end
 
-  defp node_id do
+  @doc """
+  The identifier this plugin reports to the CO, and the one a controller
+  has to resolve back to a BEAM node. Public because the service
+  registration advertises it.
+  """
+  @spec node_id() :: String.t()
+  def node_id do
     case System.get_env("NODE_ID") do
       val when is_binary(val) and val != "" -> val
       _ -> Application.get_env(:neonfs_csi, :node_id, to_string(Node.self()))
