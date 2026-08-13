@@ -258,9 +258,11 @@ cannot load the `nbd` module or attach a block device at all:
   The backing file is a file in a volume and outlives any attachment of it.
 
 The steps `SKIP` where `nbd-client` or `fio` cannot be installed or the `nbd`
-module will not load. The device is sized by `BLOCK_GIB` (default 1): creating
-it writes the whole device as zeroes, one metadata entry per 128 KiB, so a rig
-device is sized in gigabytes rather than hundreds of them.
+module will not load. The device is sized by `BLOCK_MIB` (default 8): creating
+it writes the whole device as zeroes at one metadata entry per 128 KiB, and
+that chunk list is committed as a single batch — a 64 MiB device already
+exceeds the volume committer's deadline and is refused, while 8 MiB
+provisions in seconds.
 
 ```bash
 ./neonfs-rig up            # bring a single-node cluster up first

@@ -45,4 +45,25 @@ defmodule NeonFS.Core.VolumeCommitterTest do
     assert pid_for.("vol-1") == pid_for.("vol-1")
     assert is_pid(pid_for.("vol-1"))
   end
+
+  test "a commit that outruns its deadline is an error, not an exit", %{writer_opts: writer_opts} do
+    Application.put_env(:neonfs_core, :volume_commit_timeout_ms, 50)
+    on_exit(fn -> Application.delete_env(:neonfs_core, :volume_commit_timeout_ms) end)
+
+    volume = "vol-slow"
+    mutations = [{:put, :file_index, "file:slow", MetadataValue.encode(%{id: "slow"})}]
+
+    # Occupy the volume's worker for longer than the deadline, so the commit
+    # behind it cannot be answered in time. `FileIndex` calls this holding a
+    # whole batch of pending replies, so an exit here would take the index
+    # down and strand every one of them.
+    worker = GenServer.whereis({:via, PartitionSupervisor, {VolumeCommitter.Supervisor, volume}})
+    refute is_nil(worker)
+    :sys.suspend(worker)
+    on_exit(fn -> :sys.resume(worker) end)
+
+    assert {:error, error} = VolumeCommitter.commit(volume, mutations, writer_opts)
+    assert error.class == :unavailable
+    assert Exception.message(error) =~ "timed out"
+  end
 end

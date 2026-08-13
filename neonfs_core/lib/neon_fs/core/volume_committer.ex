@@ -14,28 +14,48 @@ defmodule NeonFS.Core.VolumeCommitter do
 
   The workers are stateless: a commit is a single
   `MetadataWriter.apply_batch/3`.
+
+  ## A commit that outruns its deadline is an error, not an exit
+
+  `commit/3` answers a call timeout with a `class: :unavailable` error
+  rather than letting the exit propagate. The caller is `FileIndex`, which
+  is holding a whole batch's worth of pending replies: an exit there kills
+  the index, strands every other caller in that flush waiting for a reply
+  that never comes, and takes the process down mid-write. An error reply
+  fails the batch, and only the batch.
+
+  The worker keeps going, so a commit reported as timed out may still land.
+  That is the honest report — the write's fate is genuinely unknown at that
+  point — and it is why the caller's remedy is to check rather than assume.
   """
 
   use GenServer
 
   alias NeonFS.Core.Volume.MetadataWriter
+  alias NeonFS.Error.Unavailable
 
   @supervisor __MODULE__.Supervisor
 
   # Generous enough to outlast the writer's CAS-retry backoff so the
   # FileIndex-side call doesn't give up before the worker does.
-  @commit_timeout 30_000
+  @default_commit_timeout 30_000
 
   @doc """
-  How long a commit may take before the worker itself gives up.
+  How long a commit may take before it is reported as timed out.
 
   This bounds the slowest thing a `FileIndex` flush waits on, so every
   `FileIndex` client call that can trigger a flush must allow strictly
   more than this — see `NeonFS.Core.FileIndex.mutation_call_timeout/0`.
   Exposed rather than duplicated so the two cannot drift.
+
+  Configurable as `:neonfs_core, :volume_commit_timeout_ms` — a deployment
+  whose metadata writes are genuinely slower than the default has one
+  number to raise, rather than a rebuild.
   """
   @spec commit_timeout() :: pos_integer()
-  def commit_timeout, do: @commit_timeout
+  def commit_timeout do
+    Application.get_env(:neonfs_core, :volume_commit_timeout_ms, @default_commit_timeout)
+  end
 
   @doc """
   Child spec for the `PartitionSupervisor` that owns the stateless worker
@@ -59,8 +79,15 @@ defmodule NeonFS.Core.VolumeCommitter do
     GenServer.call(
       {:via, PartitionSupervisor, {@supervisor, volume_id}},
       {:commit, volume_id, mutations, writer_opts},
-      @commit_timeout
+      commit_timeout()
     )
+  catch
+    :exit, {:timeout, _call} ->
+      {:error,
+       Unavailable.exception(
+         message: "Volume metadata commit timed out",
+         details: %{volume_id: volume_id, mutations: length(mutations)}
+       )}
   end
 
   @impl true
