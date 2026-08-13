@@ -94,6 +94,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
              scope :: namespace_scope(), holder :: term()}
           | {:release_namespace_claim, claim_id :: String.t()}
           | {:release_namespace_claims_for_holder, holder :: term()}
+          | {:release_namespace_claims_for_node, node :: node()}
           | {:register_drive, entry :: drive_entry()}
           | {:deregister_drive, drive_id :: String.t()}
           | {:mark_drive_unverified, node(), drive_id :: String.t()}
@@ -1989,6 +1990,35 @@ defmodule NeonFS.Core.MetadataStateMachine do
     {new_state, {:ok, length(released_ids)}, []}
   end
 
+  # A holder that lived on a node which has gone away cannot release its
+  # own claims, and the coordinator that was monitoring it usually died in
+  # the same moment — the monitor is process-local, and on the node that
+  # took the claim. Without this, a claim outlives the machine that held it
+  # with nothing left watching, which for a block attachment means a volume
+  # that can never be attached anywhere else.
+  def apply(_meta, {:release_namespace_claims_for_node, node}, state) do
+    state = ensure_namespace(state)
+
+    {kept, released_ids} =
+      Enum.reduce(state.namespace_claims, {%{}, []}, fn {id, claim}, {acc, ids} ->
+        if holder_node(claim.holder) == node do
+          {acc, [id | ids]}
+        else
+          {Map.put(acc, id, claim), ids}
+        end
+      end)
+
+    new_state = %{state | namespace_claims: kept, version: state.version + 1}
+
+    :telemetry.execute(
+      [:neonfs, :ra, :command, :release_namespace_claims_for_node],
+      %{version: new_state.version, released: length(released_ids)},
+      %{released_claim_ids: released_ids, node: node}
+    )
+
+    {new_state, {:ok, length(released_ids)}, []}
+  end
+
   # Bootstrap-layer commands (new in v13).
   #
   # The bootstrap layer is a Ra-replicated *cache* of state that is
@@ -3037,6 +3067,9 @@ defmodule NeonFS.Core.MetadataStateMachine do
   # affects without having to query the state again. Fields default to
   # `nil` when the claim wasn't present (idempotent release of an
   # already-released or never-existed id).
+  defp holder_node(holder) when is_pid(holder), do: :erlang.node(holder)
+  defp holder_node(_holder), do: nil
+
   defp release_event_metadata(claim_id, nil) do
     %{claim_id: claim_id, claim_path: nil, claim_type: nil, claim_holder: nil}
   end

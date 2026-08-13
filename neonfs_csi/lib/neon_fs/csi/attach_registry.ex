@@ -121,9 +121,14 @@ defmodule NeonFS.CSI.AttachRegistry do
 
   defp publish_context(node_id), do: %{"neonfs.attached_node" => node_id}
 
+  # A controller co-located with core calls the coordinator directly; the
+  # Router path is for a controller running as its own interface node.
+  # Configured as a module rather than a closure so it can be set on
+  # another node, as `NodeResolver`'s service lookup is.
   defp coordinator_call(function, args) do
     case Application.get_env(:neonfs_csi, :coordinator_call_fn) do
       nil -> Router.call(NamespaceCoordinator, function, args)
+      module when is_atom(module) -> apply(module, function, args)
       fun when is_function(fun, 2) -> fun.(function, args)
     end
   end

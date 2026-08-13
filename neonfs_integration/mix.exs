@@ -34,6 +34,7 @@ defmodule NeonFS.Integration.MixProject do
         :neonfs_client,
         :neonfs_containerd,
         :neonfs_core,
+        :neonfs_csi,
         :neonfs_test_support
       ]
     ]
@@ -56,6 +57,7 @@ defmodule NeonFS.Integration.MixProject do
       {:neonfs_cifs, path: "../neonfs_cifs", runtime: false},
       {:neonfs_containerd, path: "../neonfs_containerd", runtime: false},
       {:neonfs_core, path: "../neonfs_core", runtime: false},
+      {:neonfs_csi, path: "../neonfs_csi", runtime: false},
       {:neonfs_test_support, path: "../neonfs_test_support", runtime: false},
       {:jason, "~> 1.0"},
 
