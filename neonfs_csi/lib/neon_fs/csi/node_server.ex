@@ -169,13 +169,15 @@ defmodule NeonFS.CSI.NodeServer do
         %NodeStageVolumeRequest{
           volume_id: vol_id,
           staging_target_path: staging_path,
-          volume_capability: cap
+          volume_capability: cap,
+          publish_context: publish_context
         },
         _stream
       ) do
     init_state_tables()
     ensure_capability_supported!(cap)
     ensure_capability_matches_volume!(vol_id, cap)
+    ensure_attached!(vol_id, cap, publish_context)
 
     case :ets.lookup(@staged_table, vol_id) do
       [{^vol_id, %{staging_path: ^staging_path}}] ->
@@ -502,6 +504,29 @@ defmodule NeonFS.CSI.NodeServer do
 
   defp volume_access_type(%{type: :block}), do: :block
   defp volume_access_type(_volume), do: :mount
+
+  # The controller records a block attachment as an exclusive cluster claim
+  # and reports it back through the publish context. A stage without it is
+  # either a CO that skipped the attach or something driving this plugin
+  # directly, and neither should quietly be handed a device that another
+  # node may hold.
+  #
+  # Mount volumes take no claim, so there is nothing to check for them.
+  defp ensure_attached!(vol_id, cap, publish_context) do
+    if access_type(cap) == :block and not attached?(publish_context) do
+      raise GRPC.RPCError,
+        status: :failed_precondition,
+        message: "volume #{vol_id} was not attached through the controller"
+    end
+
+    :ok
+  end
+
+  defp attached?(publish_context) when is_map(publish_context) do
+    Map.has_key?(publish_context, "neonfs.attached_node")
+  end
+
+  defp attached?(_publish_context), do: false
 
   defp do_unstage(vol_id, %{access_type: :block, device_path: device_path}) do
     # A device that is already gone is the state this call is asking for.
