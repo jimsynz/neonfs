@@ -48,4 +48,33 @@ defmodule NeonFS.CSI.SupervisorTest do
     children = Supervisor.which_children(NeonFS.CSI.Supervisor)
     assert children == []
   end
+
+  describe "service registration metadata" do
+    setup do
+      on_exit(fn -> Application.delete_env(:neonfs_csi, :mode) end)
+      :ok
+    end
+
+    # The controller resolves a CSI node_id to a BEAM node through this
+    # metadata; without it there is no mapping in the cluster at all.
+    test "a node-mode plugin advertises the node_id it reports to the CO" do
+      Application.put_env(:neonfs_csi, :mode, :node)
+      Application.put_env(:neonfs_csi, :node_id, "worker-7")
+      on_exit(fn -> Application.delete_env(:neonfs_csi, :node_id) end)
+
+      metadata = NeonFS.CSI.Supervisor.registration_metadata()
+
+      assert metadata.mode == :node
+      assert metadata.node_id == "worker-7"
+    end
+
+    test "a controller-mode plugin advertises no node_id, having none" do
+      Application.put_env(:neonfs_csi, :mode, :controller)
+
+      metadata = NeonFS.CSI.Supervisor.registration_metadata()
+
+      assert metadata.mode == :controller
+      refute Map.has_key?(metadata, :node_id)
+    end
+  end
 end
