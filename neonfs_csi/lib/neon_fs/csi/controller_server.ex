@@ -54,6 +54,10 @@ defmodule NeonFS.CSI.ControllerServer do
     ControllerGetCapabilitiesResponse,
     ControllerGetVolumeRequest,
     ControllerGetVolumeResponse,
+    ControllerPublishVolumeRequest,
+    ControllerPublishVolumeResponse,
+    ControllerUnpublishVolumeRequest,
+    ControllerUnpublishVolumeResponse,
     ControllerServiceCapability,
     CreateSnapshotRequest,
     CreateSnapshotResponse,
@@ -77,6 +81,7 @@ defmodule NeonFS.CSI.ControllerServer do
   }
 
   alias NeonFS.Client.Router
+  alias NeonFS.CSI.AttachRegistry
   alias NeonFS.CSI.VolumeHealth
 
   import Bitwise, only: [<<<: 2]
@@ -92,6 +97,7 @@ defmodule NeonFS.CSI.ControllerServer do
         Enum.map(
           [
             :CREATE_DELETE_VOLUME,
+            :PUBLISH_UNPUBLISH_VOLUME,
             :LIST_VOLUMES,
             :GET_CAPACITY,
             :GET_VOLUME,
@@ -414,6 +420,132 @@ defmodule NeonFS.CSI.ControllerServer do
 
     %GetCapacityResponse{available_capacity: capacity}
   end
+
+  @doc """
+  CSI `Controller.ControllerPublishVolume` — attaches a block volume to a
+  node, exclusively.
+
+  A block device has one writer. Kubernetes' own attach controller enforces
+  that for well-behaved clusters, but nothing stops a second cluster, a
+  manual attach, or a CO that has lost track of an attachment — so the
+  exclusion is taken here, in the cluster, as an exclusive
+  `NamespaceCoordinator` claim held by a pid on the target node.
+
+  Held by a pid *on the target node* because that is what makes the claim
+  release when the node dies: the coordinator monitors the holder, so a
+  node that goes away takes its attachments with it and the volume can be
+  attached elsewhere without operator intervention.
+
+  It cannot preempt a holder that is partitioned but alive — that node
+  still believes it holds the device, and taking it away would give two
+  nodes a writable device between them. Force-attach needs fencing epochs;
+  until those exist this is the honest limit of the guarantee.
+
+  A filesystem volume needs no claim and is answered without one: the FUSE
+  path supports the multi-reader modes, and taking an exclusive claim for
+  it would refuse attachments that are legitimate.
+  """
+  @spec controller_publish_volume(ControllerPublishVolumeRequest.t(), term()) ::
+          ControllerPublishVolumeResponse.t()
+  def controller_publish_volume(%ControllerPublishVolumeRequest{volume_id: ""}, _stream) do
+    raise GRPC.RPCError, status: :invalid_argument, message: "volume_id is required"
+  end
+
+  def controller_publish_volume(%ControllerPublishVolumeRequest{node_id: ""}, _stream) do
+    raise GRPC.RPCError, status: :invalid_argument, message: "node_id is required"
+  end
+
+  def controller_publish_volume(
+        %ControllerPublishVolumeRequest{volume_capability: nil},
+        _stream
+      ) do
+    raise GRPC.RPCError, status: :invalid_argument, message: "volume_capability is required"
+  end
+
+  def controller_publish_volume(
+        %ControllerPublishVolumeRequest{
+          volume_id: vol_id,
+          node_id: node_id,
+          volume_capability: cap
+        },
+        _stream
+      ) do
+    volume = fetch_volume!(vol_id)
+    ensure_capability_supported!(cap)
+    ensure_capability_matches!(cap, volume)
+
+    case volume_access_type(volume) do
+      :block -> attach_block(vol_id, node_id)
+      :mount -> %ControllerPublishVolumeResponse{}
+    end
+  end
+
+  @doc """
+  CSI `Controller.ControllerUnpublishVolume` — releases the attachment.
+
+  Idempotent in both directions the CO can get it wrong: unpublishing a
+  volume that was never published, and unpublishing one whose holder has
+  already died, both succeed. A detach that cannot succeed is a volume no
+  kubelet can ever move on from.
+  """
+  @spec controller_unpublish_volume(ControllerUnpublishVolumeRequest.t(), term()) ::
+          ControllerUnpublishVolumeResponse.t()
+  def controller_unpublish_volume(%ControllerUnpublishVolumeRequest{volume_id: ""}, _stream) do
+    raise GRPC.RPCError, status: :invalid_argument, message: "volume_id is required"
+  end
+
+  def controller_unpublish_volume(
+        %ControllerUnpublishVolumeRequest{volume_id: vol_id, node_id: node_id},
+        _stream
+      ) do
+    AttachRegistry.release(vol_id, node_id)
+    %ControllerUnpublishVolumeResponse{}
+  end
+
+  defp attach_block(vol_id, node_id) do
+    case AttachRegistry.claim(vol_id, node_id) do
+      {:ok, context} ->
+        %ControllerPublishVolumeResponse{publish_context: context}
+
+      {:error, {:attached_elsewhere, holder_node_id}} ->
+        raise GRPC.RPCError,
+          status: :failed_precondition,
+          message:
+            "volume #{vol_id} is attached to #{holder_node_id}; detach it before attaching to #{node_id}"
+
+      {:error, reason} ->
+        raise GRPC.RPCError,
+          status: :internal,
+          message: "attach failed: #{inspect(reason)}"
+    end
+  end
+
+  defp fetch_volume!(vol_id) do
+    case core_call(NeonFS.Core, :get_volume, [vol_id]) do
+      {:ok, volume} ->
+        volume
+
+      _not_found ->
+        raise GRPC.RPCError, status: :not_found, message: "volume #{vol_id} not found"
+    end
+  end
+
+  defp ensure_capability_supported!(cap) do
+    unless all_capabilities_supported?([cap]) do
+      raise GRPC.RPCError, status: :invalid_argument, message: "unsupported volume capability"
+    end
+  end
+
+  defp ensure_capability_matches!(cap, volume) do
+    unless capabilities_match_volume?([cap], volume) do
+      raise GRPC.RPCError,
+        status: :invalid_argument,
+        message: "capability does not match volume #{Map.get(volume, :name, "")}"
+    end
+  end
+
+  defp volume_access_type(%{type: :block}), do: :block
+  defp volume_access_type(_volume), do: :mount
 
   @doc """
   CSI `Controller.ControllerGetVolume` — returns the volume plus a
