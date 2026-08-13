@@ -111,7 +111,10 @@ classify() {
     neonfs_webdav/*) mark neonfs_webdav neonfs_s3 neonfs_omnibus ;;
     neonfs_s3/*) mark neonfs_s3 neonfs_omnibus ;;
     neonfs_containerd/*) mark neonfs_containerd neonfs_omnibus integration ;;
-    neonfs_csi/*) mark neonfs_csi ;;
+    # `integration` because the block attach-failover test drives
+    # `NeonFS.CSI.AttachRegistry` against a peer cluster, so the
+    # integration project has it as a test-only path dep.
+    neonfs_csi/*) mark neonfs_csi integration ;;
     # `integration` because the SMB end-to-end test starts `:neonfs_cifs`
     # on a peer, so the integration project has it as a test-only path dep.
     neonfs_cifs/*) mark neonfs_cifs neonfs_omnibus integration ;;

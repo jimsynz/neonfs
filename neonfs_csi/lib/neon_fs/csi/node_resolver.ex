@@ -50,12 +50,21 @@ defmodule NeonFS.CSI.NodeResolver do
     end
   end
 
-  # Overridable so a test can describe a cluster without registering
-  # against one, the same seam the rest of this package uses for core.
+  # A controller co-located with core reads the registry directly, the way
+  # `NeonFS.Transport.PoolManager` does — `Discovery` is the interface-node
+  # cache and holds nothing on a core node. Configured as an MFA rather
+  # than a closure so it survives being set on another node.
   defp list_services(type) do
     case Application.get_env(:neonfs_csi, :service_list_fn) do
       nil -> NeonFS.Client.Discovery.list_by_type(type)
+      {module, function, args} -> module |> apply(function, args) |> of_type(type)
       fun when is_function(fun, 1) -> fun.(type)
     end
   end
+
+  defp of_type(services, type) when is_list(services) do
+    Enum.filter(services, &(&1.type == type))
+  end
+
+  defp of_type(_services, _type), do: []
 end

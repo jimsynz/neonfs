@@ -477,6 +477,14 @@ defmodule NeonFS.Core.NamespaceCoordinator do
     # happens in this process's context.
     attach_release_telemetry(self())
 
+    # A holder's monitor lives in whichever coordinator took the claim,
+    # which is almost always the holder's own node — so when that node
+    # dies, the monitor dies with it and nothing is left to notice. Every
+    # coordinator therefore watches node departures too, and releases the
+    # departed node's claims from the replicated state. The command is
+    # idempotent, so every surviving coordinator running it is harmless.
+    :ok = :net_kernel.monitor_nodes(true)
+
     # `holders` maps `pid -> %{ref: monitor_ref, claim_ids: MapSet.t()}`.
     # The MapSet is purely optimistic; the Ra side is the authority,
     # but tracking ids locally lets us short-circuit the bulk-release
@@ -638,6 +646,32 @@ defmodule NeonFS.Core.NamespaceCoordinator do
   end
 
   @impl true
+  def handle_info({:nodeup, _node}, state), do: {:noreply, state}
+
+  def handle_info({:nodedown, node}, state) do
+    case ra_command({:release_namespace_claims_for_node, node}) do
+      {:ok, 0} ->
+        :ok
+
+      {:ok, count} ->
+        Logger.info("Released claims held on a departed node",
+          node: inspect(node),
+          count: count
+        )
+
+      {:error, reason} ->
+        # The next node to notice runs the same command, and a claim whose
+        # holder is gone stays releasable, so this is worth reporting
+        # rather than retrying here.
+        Logger.warning("Failed to release claims for departed node",
+          node: inspect(node),
+          reason: inspect(reason)
+        )
+    end
+
+    {:noreply, drop_waits_for_node(node, state)}
+  end
+
   def handle_info({:DOWN, _ref, :process, pid, _reason}, state) do
     # A dying pid can be both a holder (had at least one claim) and
     # a waiter (was queued on another claim) — drop both, in either
@@ -912,6 +946,16 @@ defmodule NeonFS.Core.NamespaceCoordinator do
 
   # Drop every wait entry owned by `pid`. Called from the DOWN
   # handler — the waiter is gone, no point retrying their claims.
+  # A waiter on a departed node is never coming back to be signalled, and
+  # leaving it queued keeps a wait token alive against a claim it can no
+  # longer take.
+  defp drop_waits_for_node(node, state) do
+    state.waiter_monitors
+    |> Map.keys()
+    |> Enum.filter(&(:erlang.node(&1) == node))
+    |> Enum.reduce(state, &drop_waits_for_pid/2)
+  end
+
   defp drop_waits_for_pid(pid, state) do
     case Map.pop(state.waiter_monitors, pid) do
       {nil, _} ->
