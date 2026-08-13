@@ -109,8 +109,14 @@ defmodule NeonFS.CSI.ControllerServer do
   CSI `Controller.CreateVolume` — provisions a NeonFS volume from the
   Kubernetes PVC. Maps the CSI request name into the volume name and
   forwards user-supplied `parameters` (`replication_factor`, `tier`,
-  `type`) to `NeonFS.Core.create_volume/2`. A `type` of `block` needs a
-  `capacity_range` — a block volume's size is the device's size.
+  `type`) to `NeonFS.Core.create_volume/2`.
+
+  A `volumeMode: Block` PVC arrives as a block access type on the volume
+  capability, which is what selects a block volume — the `type` parameter
+  is the equivalent for a StorageClass that wants to say so directly. Either
+  way a block volume needs a `capacity_range`, because a block volume's size
+  is its device's size, and core provisions that device as part of the
+  create.
   """
   @spec create_volume(CreateVolumeRequest.t(), term()) :: CreateVolumeResponse.t()
   def create_volume(
@@ -125,7 +131,9 @@ defmodule NeonFS.CSI.ControllerServer do
   def create_volume(%CreateVolumeRequest{name: name} = req, _stream)
       when is_binary(name) and name != "" do
     require_volume_capabilities!(req)
-    opts = parse_create_opts(req) ++ max_size_opt(req)
+    opts = req |> parse_create_opts() |> then(&volume_type_opt(req, &1))
+    :ok = require_capacity_for_block!(req, opts)
+    opts = opts ++ max_size_opt(req)
 
     case core_call(NeonFS.Core, :create_volume, [name, opts]) do
       {:ok, volume} ->
@@ -338,8 +346,8 @@ defmodule NeonFS.CSI.ControllerServer do
         _stream
       ) do
     case core_call(NeonFS.Core, :get_volume, [volume_id]) do
-      {:ok, _volume} ->
-        if all_capabilities_supported?(caps) do
+      {:ok, volume} ->
+        if all_capabilities_supported?(caps) and capabilities_match_volume?(caps, volume) do
           %ValidateVolumeCapabilitiesResponse{
             confirmed: %ValidateVolumeCapabilitiesResponse.Confirmed{volume_capabilities: caps}
           }
@@ -754,8 +762,8 @@ defmodule NeonFS.CSI.ControllerServer do
   end
 
   # Supported access modes mirror the NeonFS data plane: a single
-  # node can write while many nodes read. Block volumes aren't
-  # supported (NeonFS exposes a filesystem, not a raw device).
+  # node can write while many nodes read. Both access types are served:
+  # `mount` by the FUSE path, `block` by a device over NBD.
   @supported_modes [
     :SINGLE_NODE_WRITER,
     :MULTI_NODE_READER_ONLY,
@@ -768,12 +776,68 @@ defmodule NeonFS.CSI.ControllerServer do
 
   defp all_capabilities_supported?(_), do: false
 
-  defp capability_supported?(%{access_type: {:block, _}}), do: false
-
   defp capability_supported?(%{access_mode: %{mode: mode}}) when mode in @supported_modes,
     do: true
 
   defp capability_supported?(_), do: false
+
+  # A block capability against a filesystem volume, or a mount capability
+  # against a block one, is not a capability this volume has — whatever the
+  # access mode says. The CO uses this answer to decide whether a PV can be
+  # bound, so confirming a mismatch hands it a volume it cannot use.
+  defp capabilities_match_volume?(caps, volume) do
+    Enum.all?(caps, &capability_matches_type?(&1, Map.get(volume, :type, :fs)))
+  end
+
+  defp capability_matches_type?(%{access_type: {:block, _}}, type), do: type == :block
+  defp capability_matches_type?(%{access_type: {:mount, _}}, type), do: type != :block
+  defp capability_matches_type?(_capability, _type), do: true
+
+  # `volumeMode: Block` reaches the driver as a block access type on the
+  # capability rather than as a StorageClass parameter, so the capability
+  # is what decides the volume's type. A `type` parameter that disagrees
+  # with it is a misconfiguration worth naming rather than silently
+  # resolving one way.
+  defp volume_type_opt(req, parsed_opts) do
+    from_parameter = Keyword.get(parsed_opts, :type)
+    from_capability = if block_capability?(req), do: :block
+
+    case {from_capability, from_parameter} do
+      {nil, _any} ->
+        parsed_opts
+
+      {:block, nil} ->
+        Keyword.put(parsed_opts, :type, :block)
+
+      {:block, :block} ->
+        parsed_opts
+
+      {:block, other} ->
+        raise GRPC.RPCError,
+          status: :invalid_argument,
+          message: "block volume_capability conflicts with type=#{other} parameter"
+    end
+  end
+
+  defp block_capability?(%CreateVolumeRequest{volume_capabilities: caps}) when is_list(caps) do
+    Enum.any?(caps, &match?(%{access_type: {:block, _}}, &1))
+  end
+
+  defp block_capability?(_req), do: false
+
+  # A block volume is its device, and the device is sized by the request:
+  # there is no size to fall back on, and creating one without a size fails
+  # inside core after the volume exists. Refusing here names the missing
+  # field instead.
+  defp require_capacity_for_block!(req, opts) do
+    if Keyword.get(opts, :type) == :block and requested_capacity(req) == 0 do
+      raise GRPC.RPCError,
+        status: :invalid_argument,
+        message: "capacity_range is required for a block volume — it is the device size"
+    end
+
+    :ok
+  end
 
   # A non-empty `starting_token` must name a volume we know about (it's
   # the name of the last entry from a prior page). An unrecognised token

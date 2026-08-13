@@ -71,6 +71,15 @@ defmodule NeonFS.CSI.ControllerServerTest do
 
   defp caps, do: [sample_capability()]
 
+  defp block_caps do
+    [
+      %VolumeCapability{
+        access_type: {:block, %VolumeCapability.BlockVolume{}},
+        access_mode: %VolumeCapability.AccessMode{mode: :SINGLE_NODE_WRITER}
+      }
+    ]
+  end
+
   describe "ControllerGetCapabilities" do
     test "advertises CREATE_DELETE_VOLUME, LIST_VOLUMES, GET_CAPACITY" do
       reply =
@@ -143,6 +152,48 @@ defmodule NeonFS.CSI.ControllerServerTest do
       }
 
       assert ControllerServer.create_volume(req, nil).volume.volume_id == "pvc-blk"
+    end
+
+    # `volumeMode: Block` reaches the driver as a block access type on the
+    # capability, not as a StorageClass parameter, so the capability is what
+    # has to select a block volume.
+    test "a block volume_capability asks core for a block volume" do
+      put_core(fn NeonFS.Core, :create_volume, [_name, opts] ->
+        assert opts == [type: :block, max_size: 4096]
+        {:ok, sample_volume("pvc-blk", %{type: :block, max_size: 4096})}
+      end)
+
+      req = %CreateVolumeRequest{
+        name: "pvc-blk",
+        capacity_range: %CapacityRange{required_bytes: 4096, limit_bytes: 0},
+        volume_capabilities: block_caps()
+      }
+
+      assert ControllerServer.create_volume(req, nil).volume.volume_id == "pvc-blk"
+    end
+
+    test "refuses a block volume with no capacity, since the size is the device" do
+      req = %CreateVolumeRequest{
+        name: "pvc-blk",
+        volume_capabilities: block_caps()
+      }
+
+      assert_raise GRPC.RPCError, ~r/capacity_range is required for a block volume/, fn ->
+        ControllerServer.create_volume(req, nil)
+      end
+    end
+
+    test "refuses a block capability that contradicts the type parameter" do
+      req = %CreateVolumeRequest{
+        name: "pvc-blk",
+        capacity_range: %CapacityRange{required_bytes: 4096, limit_bytes: 0},
+        parameters: %{"type" => "fs"},
+        volume_capabilities: block_caps()
+      }
+
+      assert_raise GRPC.RPCError, ~r/conflicts with type=fs/, fn ->
+        ControllerServer.create_volume(req, nil)
+      end
     end
 
     test "an unknown type parameter is dropped rather than guessed at" do
@@ -273,12 +324,63 @@ defmodule NeonFS.CSI.ControllerServerTest do
       assert reply.confirmed.volume_capabilities == caps
     end
 
-    test "refuses block volumes" do
-      caps = [%VolumeCapability{access_type: {:block, %VolumeCapability.BlockVolume{}}}]
+    test "confirms a block capability against a block volume" do
+      put_core(fn NeonFS.Core, :get_volume, _ ->
+        {:ok, sample_volume("pvc-blk", %{type: :block, max_size: 4096})}
+      end)
+
+      caps = [
+        %VolumeCapability{
+          access_type: {:block, %VolumeCapability.BlockVolume{}},
+          access_mode: %VolumeCapability.AccessMode{mode: :SINGLE_NODE_WRITER}
+        }
+      ]
+
+      reply =
+        ControllerServer.validate_volume_capabilities(
+          %ValidateVolumeCapabilitiesRequest{volume_id: "pvc-blk", volume_capabilities: caps},
+          nil
+        )
+
+      assert reply.confirmed
+      assert reply.confirmed.volume_capabilities == caps
+    end
+
+    # A mismatch in either direction hands the CO a volume it cannot use,
+    # so it is refused rather than confirmed.
+    test "refuses a block capability against a filesystem volume" do
+      caps = [
+        %VolumeCapability{
+          access_type: {:block, %VolumeCapability.BlockVolume{}},
+          access_mode: %VolumeCapability.AccessMode{mode: :SINGLE_NODE_WRITER}
+        }
+      ]
 
       reply =
         ControllerServer.validate_volume_capabilities(
           %ValidateVolumeCapabilitiesRequest{volume_id: "pvc-vc", volume_capabilities: caps},
+          nil
+        )
+
+      assert reply.confirmed == nil
+      assert reply.message =~ "not supported"
+    end
+
+    test "refuses a mount capability against a block volume" do
+      put_core(fn NeonFS.Core, :get_volume, _ ->
+        {:ok, sample_volume("pvc-blk", %{type: :block, max_size: 4096})}
+      end)
+
+      caps = [
+        %VolumeCapability{
+          access_type: {:mount, %VolumeCapability.MountVolume{}},
+          access_mode: %VolumeCapability.AccessMode{mode: :SINGLE_NODE_WRITER}
+        }
+      ]
+
+      reply =
+        ControllerServer.validate_volume_capabilities(
+          %ValidateVolumeCapabilitiesRequest{volume_id: "pvc-blk", volume_capabilities: caps},
           nil
         )
 
