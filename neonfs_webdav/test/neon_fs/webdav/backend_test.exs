@@ -346,12 +346,15 @@ defmodule NeonFS.WebDAV.BackendTest do
       assert Enum.into(stream, <<>>) == "56789"
     end
 
-    test "returns content from offset to end for open-ended range" do
+    # Davy resolves `bytes=6-` against the resource's content_length before
+    # calling the backend, so what arrives is the closed range — the
+    # backend never sees an open bound.
+    test "reads a resolved open-ended range to the end of the file" do
       MockCore.create_volume("docs")
       MockCore.write_file("docs", "/open.txt", "0123456789")
       {:ok, resource} = Backend.resolve(@auth, ["docs", "open.txt"])
 
-      assert {:ok, stream} = Backend.get_content(@auth, resource, %{range: {6, nil}})
+      assert {:ok, stream} = Backend.get_content(@auth, resource, %{range: {6, 9}})
       assert Enum.into(stream, <<>>) == "6789"
     end
 
@@ -401,18 +404,18 @@ defmodule NeonFS.WebDAV.BackendTest do
       assert Enum.into(stream, <<>>) == "56789"
     end
 
-    test "forwards open-ended range requests as :offset only" do
+    test "forwards a resolved range as offset and length" do
       MockCore.create_volume("docs")
       MockCore.write_file("docs", "/open.bin", "0123456789")
       {:ok, resource} = Backend.resolve(@auth, ["docs", "open.bin"])
 
       expect(ChunkReader, :read_file_stream, fn "docs", "/open.bin", opts ->
         assert Keyword.get(opts, :offset) == 6
-        refute Keyword.has_key?(opts, :length)
+        assert Keyword.get(opts, :length) == 4
         MockCore.read_file_stream("docs", "/open.bin", opts)
       end)
 
-      assert {:ok, stream} = Backend.get_content(@auth, resource, %{range: {6, nil}})
+      assert {:ok, stream} = Backend.get_content(@auth, resource, %{range: {6, 9}})
       assert Enum.into(stream, <<>>) == "6789"
     end
 
@@ -920,7 +923,7 @@ defmodule NeonFS.WebDAV.BackendTest do
       assert resource.content_length == 12
 
       refute LockStore.lock_null?(path)
-      assert [lock] = LockStore.get_locks(path)
+      assert {:ok, [lock]} = LockStore.get_locks(path)
       assert lock.scope == :exclusive
     end
 
@@ -968,7 +971,7 @@ defmodule NeonFS.WebDAV.BackendTest do
 
       assert :ok = Backend.delete(@auth, resource)
       refute LockStore.lock_null?(path)
-      assert LockStore.get_locks(path) == []
+      assert LockStore.get_locks(path) == {:ok, []}
     end
 
     test "resolve returns real resource after lock-null is promoted" do

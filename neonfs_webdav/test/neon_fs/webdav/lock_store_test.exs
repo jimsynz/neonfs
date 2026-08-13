@@ -23,6 +23,14 @@ defmodule NeonFS.WebDAV.LockStoreTest do
     :ok
   end
 
+  # Every read of the lock index goes through this, so a store that answers
+  # nothing but errors is what an unreachable KV cluster looks like from here.
+  defp setup_kv_unavailable do
+    Application.put_env(:neonfs_webdav, :kv_call_fn, fn _function, _args ->
+      {:error, :all_nodes_unreachable}
+    end)
+  end
+
   defp backdate_lock!(token) do
     key = "webdav_lock:" <> token
     {:ok, lock_info} = FakeKV.call(:get, [key])
@@ -116,7 +124,7 @@ defmodule NeonFS.WebDAV.LockStoreTest do
     test "stores lock info in ETS" do
       {:ok, token} = LockStore.lock(@file_path, :exclusive, :write, 0, "user-a", 300)
 
-      assert [lock] = LockStore.get_locks(@file_path)
+      assert {:ok, [lock]} = LockStore.get_locks(@file_path)
       assert lock.token == token
       assert lock.scope == :exclusive
       assert lock.type == :write
@@ -135,7 +143,7 @@ defmodule NeonFS.WebDAV.LockStoreTest do
       assert {:ok, token} = LockStore.lock(@file_path, :exclusive, :write, 0, "user-a", 300)
       assert is_binary(token)
 
-      assert [lock] = LockStore.get_locks(@file_path)
+      assert {:ok, [lock]} = LockStore.get_locks(@file_path)
       assert lock.token == token
     end
 
@@ -155,7 +163,9 @@ defmodule NeonFS.WebDAV.LockStoreTest do
       assert {:ok, _} = LockStore.lock(@file_path, :shared, :write, 0, "user-a", 300)
       assert {:ok, _} = LockStore.lock(@file_path, :shared, :write, 0, "user-b", 300)
 
-      assert length(LockStore.get_locks(@file_path)) == 2
+      assert {:ok, locks} = LockStore.get_locks(@file_path)
+
+      assert length(locks) == 2
     end
 
     test "exclusive conflicts with existing shared" do
@@ -193,7 +203,7 @@ defmodule NeonFS.WebDAV.LockStoreTest do
       file_id = @file_id
       assert_received {:lock_manager, :unlock, [^file_id, ^token, {0, _}]}
 
-      assert LockStore.get_locks(@file_path) == []
+      assert LockStore.get_locks(@file_path) == {:ok, []}
     end
 
     test "returns not_found for unknown token" do
@@ -206,7 +216,7 @@ defmodule NeonFS.WebDAV.LockStoreTest do
       {:ok, token} = LockStore.lock(@file_path, :exclusive, :write, 0, "user-a", 300)
       assert :ok = LockStore.unlock(token)
 
-      assert LockStore.get_locks(@file_path) == []
+      assert LockStore.get_locks(@file_path) == {:ok, []}
     end
   end
 
@@ -242,7 +252,7 @@ defmodule NeonFS.WebDAV.LockStoreTest do
       backdate_lock!(token)
 
       assert {:error, :not_found} = LockStore.refresh(token, 600)
-      assert LockStore.get_locks(@file_path) == []
+      assert LockStore.get_locks(@file_path) == {:ok, []}
     end
 
     test "refreshes local-only lock without DLM call" do
@@ -256,7 +266,7 @@ defmodule NeonFS.WebDAV.LockStoreTest do
 
   describe "get_locks/1" do
     test "returns empty list for unlocked path" do
-      assert LockStore.get_locks(@file_path) == []
+      assert LockStore.get_locks(@file_path) == {:ok, []}
     end
 
     test "returns active locks on path" do
@@ -265,7 +275,7 @@ defmodule NeonFS.WebDAV.LockStoreTest do
       {:ok, _} = LockStore.lock(@file_path, :shared, :write, 0, "user-a", 300)
       {:ok, _} = LockStore.lock(@file_path, :shared, :write, 0, "user-b", 300)
 
-      locks = LockStore.get_locks(@file_path)
+      {:ok, locks} = LockStore.get_locks(@file_path)
       assert length(locks) == 2
       assert Enum.all?(locks, &(&1.scope == :shared))
     end
@@ -277,7 +287,7 @@ defmodule NeonFS.WebDAV.LockStoreTest do
 
       backdate_lock!(token)
 
-      assert LockStore.get_locks(@file_path) == []
+      assert LockStore.get_locks(@file_path) == {:ok, []}
     end
 
     test "does not return locks from different paths" do
@@ -287,8 +297,11 @@ defmodule NeonFS.WebDAV.LockStoreTest do
       {:ok, _} = LockStore.lock(@file_path, :exclusive, :write, 0, "user-a", 300)
       {:ok, _} = LockStore.lock(other_path, :exclusive, :write, 0, "user-b", 300)
 
-      assert length(LockStore.get_locks(@file_path)) == 1
-      assert length(LockStore.get_locks(other_path)) == 1
+      assert {:ok, locks} = LockStore.get_locks(@file_path)
+
+      assert length(locks) == 1
+      assert {:ok, locks} = LockStore.get_locks(other_path)
+      assert length(locks) == 1
     end
 
     test "does not expose internal fields in returned lock info" do
@@ -297,7 +310,7 @@ defmodule NeonFS.WebDAV.LockStoreTest do
 
       {:ok, _} = LockStore.lock(@file_path, :exclusive, :write, 0, "user-a", 300)
 
-      [lock] = LockStore.get_locks(@file_path)
+      {:ok, [lock]} = LockStore.get_locks(@file_path)
       refute Map.has_key?(lock, :file_id)
       refute Map.has_key?(lock, :lock_null)
     end
@@ -343,7 +356,7 @@ defmodule NeonFS.WebDAV.LockStoreTest do
       assert {:error, :conflict} =
                LockStore.lock(@file_path, :exclusive, :write, 0, "user-a", 300)
 
-      assert LockStore.get_locks(@file_path) == []
+      assert LockStore.get_locks(@file_path) == {:ok, []}
     end
   end
 
@@ -352,10 +365,11 @@ defmodule NeonFS.WebDAV.LockStoreTest do
       setup_core_unavailable()
 
       {:ok, _} = LockStore.lock(@file_path, :exclusive, :write, 0, "user-a", 300)
-      assert length(LockStore.get_locks(@file_path)) == 1
+      assert {:ok, locks} = LockStore.get_locks(@file_path)
+      assert length(locks) == 1
 
       LockStore.reset()
-      assert LockStore.get_locks(@file_path) == []
+      assert LockStore.get_locks(@file_path) == {:ok, []}
     end
   end
 
@@ -538,7 +552,7 @@ defmodule NeonFS.WebDAV.LockStoreTest do
       refute_received {:lock_manager, :unlock, _}
 
       refute LockStore.lock_null?(@file_path)
-      assert [lock] = LockStore.get_locks(@file_path)
+      assert {:ok, [lock]} = LockStore.get_locks(@file_path)
       assert lock.token == token
     end
 
@@ -552,7 +566,7 @@ defmodule NeonFS.WebDAV.LockStoreTest do
       assert_received {:lock_manager, :lock, [^real_file_id, ^token, {0, _}, :exclusive, _]}
 
       refute LockStore.lock_null?(@file_path)
-      assert [lock] = LockStore.get_locks(@file_path)
+      assert {:ok, [lock]} = LockStore.get_locks(@file_path)
       assert lock.token == token
     end
 
@@ -586,7 +600,7 @@ defmodule NeonFS.WebDAV.LockStoreTest do
       {:ok, _token} =
         LockStore.lock(@collection_path, :exclusive, :write, :infinity, "user-a", 300)
 
-      [lock] = LockStore.get_locks(@collection_path)
+      {:ok, [lock]} = LockStore.get_locks(@collection_path)
       assert lock.depth == :infinity
     end
 
@@ -594,7 +608,7 @@ defmodule NeonFS.WebDAV.LockStoreTest do
       {:ok, token} =
         LockStore.lock(@child_path, :exclusive, :write, 0, "user-a", 300)
 
-      [lock] = LockStore.get_locks_covering(@child_path)
+      {:ok, [lock]} = LockStore.get_locks_covering(@child_path)
       assert lock.token == token
     end
 
@@ -602,24 +616,24 @@ defmodule NeonFS.WebDAV.LockStoreTest do
       {:ok, token} =
         LockStore.lock(@collection_path, :exclusive, :write, :infinity, "user-a", 300)
 
-      [lock] = LockStore.get_locks_covering(@child_path)
+      {:ok, [lock]} = LockStore.get_locks_covering(@child_path)
       assert lock.token == token
 
-      [lock] = LockStore.get_locks_covering(@nested_path)
+      {:ok, [lock]} = LockStore.get_locks_covering(@nested_path)
       assert lock.token == token
     end
 
     test "get_locks_covering excludes ancestor depth:0 locks" do
       {:ok, _} = LockStore.lock(@collection_path, :exclusive, :write, 0, "user-a", 300)
 
-      assert LockStore.get_locks_covering(@child_path) == []
+      assert LockStore.get_locks_covering(@child_path) == {:ok, []}
     end
 
     test "get_locks_covering excludes sibling directory locks" do
       {:ok, _} =
         LockStore.lock(["my-volume", "other"], :exclusive, :write, :infinity, "user-a", 300)
 
-      assert LockStore.get_locks_covering(@child_path) == []
+      assert LockStore.get_locks_covering(@child_path) == {:ok, []}
     end
 
     test "check_token accepts descendant path under depth:infinity lock" do
@@ -689,7 +703,7 @@ defmodule NeonFS.WebDAV.LockStoreTest do
       {:ok, _} =
         LockStore.lock(@collection_path, :exclusive, :write, :infinity, "user-a", 300)
 
-      assert LockStore.get_locks(@child_path) == []
+      assert LockStore.get_locks(@child_path) == {:ok, []}
     end
 
     test "get_locks_covering excludes expired ancestor locks" do
@@ -698,7 +712,7 @@ defmodule NeonFS.WebDAV.LockStoreTest do
 
       backdate_lock!(token)
 
-      assert LockStore.get_locks_covering(@child_path) == []
+      assert LockStore.get_locks_covering(@child_path) == {:ok, []}
     end
 
     test "get_locks_covering does not expose internal fields" do
@@ -708,7 +722,7 @@ defmodule NeonFS.WebDAV.LockStoreTest do
       {:ok, _} =
         LockStore.lock(@collection_path, :exclusive, :write, :infinity, "user-a", 300)
 
-      [lock] = LockStore.get_locks_covering(@child_path)
+      {:ok, [lock]} = LockStore.get_locks_covering(@child_path)
       refute Map.has_key?(lock, :file_id)
       refute Map.has_key?(lock, :lock_null)
     end
@@ -729,11 +743,8 @@ defmodule NeonFS.WebDAV.LockStoreTest do
       {:ok, child} = LockStore.lock(@child_path, :exclusive, :write, 0, "user-a", 300)
       {:ok, nested} = LockStore.lock(@nested_path, :exclusive, :write, 0, "user-b", 300)
 
-      tokens =
-        @collection_path
-        |> LockStore.get_descendant_locks()
-        |> Enum.map(& &1.token)
-        |> Enum.sort()
+      {:ok, locks} = LockStore.get_descendant_locks(@collection_path)
+      tokens = locks |> Enum.map(& &1.token) |> Enum.sort()
 
       assert tokens == Enum.sort([child, nested])
     end
@@ -742,13 +753,13 @@ defmodule NeonFS.WebDAV.LockStoreTest do
       {:ok, _} =
         LockStore.lock(@collection_path, :exclusive, :write, :infinity, "user-a", 300)
 
-      assert LockStore.get_descendant_locks(@collection_path) == []
+      assert LockStore.get_descendant_locks(@collection_path) == {:ok, []}
     end
 
     test "excludes sibling paths" do
       {:ok, _} = LockStore.lock(@sibling_path, :exclusive, :write, 0, "user-a", 300)
 
-      assert LockStore.get_descendant_locks(@collection_path) == []
+      assert LockStore.get_descendant_locks(@collection_path) == {:ok, []}
     end
 
     test "excludes expired descendant locks" do
@@ -756,13 +767,13 @@ defmodule NeonFS.WebDAV.LockStoreTest do
 
       backdate_lock!(token)
 
-      assert LockStore.get_descendant_locks(@collection_path) == []
+      assert LockStore.get_descendant_locks(@collection_path) == {:ok, []}
     end
 
     test "does not expose internal fields" do
       {:ok, _} = LockStore.lock(@child_path, :exclusive, :write, 0, "user-a", 300)
 
-      [lock] = LockStore.get_descendant_locks(@collection_path)
+      {:ok, [lock]} = LockStore.get_descendant_locks(@collection_path)
       refute Map.has_key?(lock, :file_id)
       refute Map.has_key?(lock, :lock_null)
       refute Map.has_key?(lock, :namespace_claim_id)
@@ -869,6 +880,53 @@ defmodule NeonFS.WebDAV.LockStoreTest do
                LockStore.lock(@collection_path, :exclusive, :write, :infinity, "user-b", 300)
 
       assert_received {:namespace_coordinator, :release, ["ns-claim-21"]}
+    end
+  end
+
+  describe "an unreachable lock index" do
+    # The fail-open this closes: `Davy.Helpers.check_lock/3` reads an empty
+    # list as "not locked" and lets the write through, so a PUT or DELETE
+    # against a resource under someone else's exclusive lock succeeded
+    # whenever the KV store was down. Reporting the outage is what makes
+    # davy refuse the write instead.
+    test "reports service unavailability rather than an empty lock list" do
+      setup_mock_core()
+      setup_mock_lock_manager()
+      {:ok, _token} = LockStore.lock(@file_path, :exclusive, :write, 0, "user-a", 300)
+
+      setup_kv_unavailable()
+
+      assert {:error, %Davy.Error{code: :service_unavailable}} =
+               LockStore.get_locks(@file_path)
+
+      assert {:error, %Davy.Error{code: :service_unavailable}} =
+               LockStore.get_locks_covering(@file_path)
+
+      assert {:error, %Davy.Error{code: :service_unavailable}} =
+               LockStore.get_descendant_locks(["my-volume"])
+    end
+
+    test "refuses a LOCK rather than granting one it cannot check for conflicts" do
+      setup_mock_core()
+      setup_mock_lock_manager()
+      setup_kv_unavailable()
+
+      assert {:error, %Davy.Error{code: :service_unavailable}} =
+               LockStore.lock(@file_path, :exclusive, :write, 0, "user-b", 300)
+    end
+
+    test "reports an UNLOCK, refresh and token check as unavailable, not absent" do
+      setup_mock_core()
+      setup_mock_lock_manager()
+      {:ok, token} = LockStore.lock(@file_path, :exclusive, :write, 0, "user-a", 300)
+
+      setup_kv_unavailable()
+
+      assert {:error, %Davy.Error{code: :service_unavailable}} = LockStore.unlock(token)
+      assert {:error, %Davy.Error{code: :service_unavailable}} = LockStore.refresh(token, 300)
+
+      assert {:error, %Davy.Error{code: :service_unavailable}} =
+               LockStore.check_token(@file_path, token)
     end
   end
 end

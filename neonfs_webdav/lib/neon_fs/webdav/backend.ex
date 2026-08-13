@@ -307,13 +307,18 @@ defmodule NeonFS.WebDAV.Backend do
   def delete(_auth, %{backend_data: %{lock_null: true}} = resource) do
     path = resource.path
 
-    locks = LockStore.get_locks(path)
+    # Deleting a lock-null resource is deleting its locks — there is
+    # nothing else to it. An unreadable lock index means we cannot know
+    # which those are, so say so rather than report a delete that removed
+    # nothing.
+    case LockStore.get_locks(path) do
+      {:ok, locks} ->
+        Enum.each(locks, &LockStore.unlock(&1.token))
+        :ok
 
-    Enum.each(locks, fn lock ->
-      LockStore.unlock(lock.token)
-    end)
-
-    :ok
+      {:error, _reason} = error ->
+        error
+    end
   end
 
   def delete(_auth, resource) do
@@ -479,8 +484,11 @@ defmodule NeonFS.WebDAV.Backend do
     end
   end
 
-  defp range_to_read_opts(%{range: {start_byte, nil}}), do: [offset: start_byte]
-
+  # Davy resolves a byte range against the resource's `content_length`
+  # before it gets here, so what arrives is always absolute, closed and in
+  # bounds: `first <= last < content_length`. Suffix ranges, open-ended
+  # ranges and the 416 for an unsatisfiable one are the handler's job now,
+  # which is why there is no open-bound clause to write.
   defp range_to_read_opts(%{range: {start_byte, end_byte}}) do
     [offset: start_byte, length: end_byte - start_byte + 1]
   end
@@ -697,15 +705,24 @@ defmodule NeonFS.WebDAV.Backend do
   #
   # It is also a 500, not a 400. These are our failures, not malformed
   # requests, and the distinction is what tells a WebDAV client whether
-  # retrying is worth anything. `Davy.Error.status_code/1` has no
-  # `:internal_server_error` entry and falls back to 500 for unknown codes,
-  # which is the status we want.
+  # retrying is worth anything. A cluster that cannot be reached is the
+  # exception: that is a 503, which says "later", where a 500 says "this
+  # request is broken".
   defp internal_error(operation, reason) do
     Logger.warning("WebDAV backend operation failed",
       operation: operation,
       reason: inspect(reason)
     )
 
-    %Davy.Error{code: :internal_server_error, message: "Internal error"}
+    if unreachable?(reason) do
+      %Davy.Error{code: :service_unavailable, message: "Cluster unavailable"}
+    else
+      %Davy.Error{code: :internal_error, message: "Internal error"}
+    end
   end
+
+  defp unreachable?(:all_nodes_unreachable), do: true
+  defp unreachable?({:badrpc, _reason}), do: true
+  defp unreachable?(%NeonFS.Error.Unavailable{}), do: true
+  defp unreachable?(_reason), do: false
 end

@@ -113,9 +113,28 @@ defmodule NeonFS.S3.Backend do
   @impl true
   def get_object(_ctx, bucket, key, opts) do
     with :ok <- ensure_bucket_exists(bucket),
-         {:ok, meta} <- fetch_object_meta(bucket, key) do
-      read_opts = range_to_read_opts(opts.range, meta.size)
+         {:ok, meta} <- fetch_object_meta(bucket, key),
+         {:ok, read_opts} <- resolve_range(opts.range, meta.size) do
       build_object(bucket, key, meta, read_opts)
+    end
+  end
+
+  # `Firkin.GetOpts.range` carries the request's own form: `{first, last}`,
+  # `{first, nil}` for "to the end", or `{nil, suffix}` for the last N
+  # bytes. Resolving it against the object's size is firkin's job, so this
+  # asks rather than doing the arithmetic — the suffix form in particular
+  # has no offset to compute from, and doing it here produced an
+  # `ArithmeticError` and a 500 where the answer is 206 or 416.
+  defp resolve_range(range, size) do
+    case Firkin.GetOpts.resolve_range(range, size) do
+      :none ->
+        {:ok, []}
+
+      {:ok, {first, last}} ->
+        {:ok, [offset: first, length: last - first + 1]}
+
+      :unsatisfiable ->
+        {:error, %Firkin.Error{code: :invalid_range}}
     end
   end
 
@@ -602,13 +621,11 @@ defmodule NeonFS.S3.Backend do
     }
   end
 
+  # The resolved range already sits inside the object, so its length is the
+  # content length — re-clamping here would only hide a resolver that got
+  # it wrong.
   defp stream_content_length(file_size, []), do: file_size
-
-  defp stream_content_length(file_size, opts) do
-    offset = Keyword.get(opts, :offset, 0)
-    length = Keyword.get(opts, :length, file_size - offset)
-    min(length, file_size - offset)
-  end
+  defp stream_content_length(_file_size, opts), do: Keyword.fetch!(opts, :length)
 
   defp call_core(function, args) do
     case Application.get_env(:neonfs_s3, :core_call_fn) do
@@ -724,13 +741,6 @@ defmodule NeonFS.S3.Backend do
       {:error, :not_found} -> :ok
       {:error, reason} -> {:error, internal_error(reason)}
     end
-  end
-
-  defp range_to_read_opts(nil, _file_size), do: []
-
-  defp range_to_read_opts({start_byte, end_byte}, file_size) do
-    clamped_end = min(end_byte, file_size - 1)
-    [offset: start_byte, length: clamped_end - start_byte + 1]
   end
 
   defp fetch_object_meta(bucket, key) do
@@ -930,8 +940,25 @@ defmodule NeonFS.S3.Backend do
 
   defp internal_error(reason) do
     Logger.error("S3 backend error", reason: inspect(reason))
-    %Firkin.Error{code: :internal_error}
+
+    # A cluster this node cannot reach is not an internal error: it is a
+    # 503, and the S3 code string is what an AWS SDK's retry classifier
+    # keys off — `ServiceUnavailable` gets retried as a transient failure
+    # where a 500 is treated as an ordinary error.
+    if unreachable?(reason) do
+      %Firkin.Error{code: :service_unavailable}
+    else
+      %Firkin.Error{code: :internal_error}
+    end
   end
+
+  # `:no_available_locations` is deliberately absent: no node holding a
+  # chunk is not the same as no node answering, and telling a client to
+  # retry a chunk that may simply be gone is worse than a 500.
+  defp unreachable?(:all_nodes_unreachable), do: true
+  defp unreachable?({:badrpc, _reason}), do: true
+  defp unreachable?(%NeonFS.Error.Unavailable{}), do: true
+  defp unreachable?(_reason), do: false
 
   defp content_type_write_opts(%{content_type: ct}) when is_binary(ct), do: [content_type: ct]
   defp content_type_write_opts(_meta), do: []

@@ -333,6 +333,41 @@ defmodule NeonFS.S3.BackendTest do
       assert object.total_size == 5
     end
 
+    test "serves a suffix range as the last N bytes" do
+      Backend.create_bucket(@ctx, "my-bucket")
+      Backend.put_object(@ctx, "my-bucket", "suffix.txt", "0123456789", %Firkin.PutOpts{})
+
+      # `Range: bytes=-4`. This used to compute an offset from a nil first
+      # byte and raise an ArithmeticError, which Plug rendered as a 500.
+      opts = %Firkin.GetOpts{range: {nil, 4}}
+
+      assert {:ok, object} = Backend.get_object(@ctx, "my-bucket", "suffix.txt", opts)
+      assert Enum.into(object.body, <<>>) == "6789"
+      assert object.content_length == 4
+      assert object.total_size == 10
+    end
+
+    test "serves an open-ended range to the end of the object" do
+      Backend.create_bucket(@ctx, "my-bucket")
+      Backend.put_object(@ctx, "my-bucket", "open.txt", "0123456789", %Firkin.PutOpts{})
+
+      opts = %Firkin.GetOpts{range: {7, nil}}
+
+      assert {:ok, object} = Backend.get_object(@ctx, "my-bucket", "open.txt", opts)
+      assert Enum.into(object.body, <<>>) == "789"
+      assert object.content_length == 3
+    end
+
+    test "refuses a range that starts past the end of the object" do
+      Backend.create_bucket(@ctx, "my-bucket")
+      Backend.put_object(@ctx, "my-bucket", "small.txt", "hello", %Firkin.PutOpts{})
+
+      opts = %Firkin.GetOpts{range: {99, 200}}
+
+      assert {:error, %Firkin.Error{code: :invalid_range}} =
+               Backend.get_object(@ctx, "my-bucket", "small.txt", opts)
+    end
+
     test "full request without range returns complete content" do
       Backend.create_bucket(@ctx, "my-bucket")
       Backend.put_object(@ctx, "my-bucket", "full.txt", "all content", %Firkin.PutOpts{})
@@ -682,6 +717,21 @@ defmodule NeonFS.S3.BackendTest do
       end)
 
       assert {:error, %Firkin.Error{code: :internal_error}} =
+               Backend.get_object(@ctx, "my-bucket", "exists.txt", %Firkin.GetOpts{})
+    end
+
+    test "maps an unreachable cluster to service_unavailable" do
+      Backend.create_bucket(@ctx, "my-bucket")
+      Backend.put_object(@ctx, "my-bucket", "exists.txt", "hi", %Firkin.PutOpts{})
+
+      expect(ChunkReader, :read_file_stream, fn _, _, _ ->
+        {:error, :all_nodes_unreachable}
+      end)
+
+      # 503 with `ServiceUnavailable` rather than 500: an AWS SDK's retry
+      # classifier keys off the S3 code string, and a 500 is retried as an
+      # ordinary error rather than a transient one.
+      assert {:error, %Firkin.Error{code: :service_unavailable}} =
                Backend.get_object(@ctx, "my-bucket", "exists.txt", %Firkin.GetOpts{})
     end
 

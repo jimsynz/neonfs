@@ -100,13 +100,19 @@ defmodule NeonFS.WebDAV.LockStore do
         # or :not_applicable; either way we still need the KV-scan
         # pre-check (it covers depth=0 LOCKs on existing files that
         # don't take a namespace claim).
-        if conflict?(path, depth, scope) do
-          maybe_release_claim(result)
-          {:error, :conflict}
-        else
-          claim_id = claim_id_from(result)
+        case conflict?(path, depth, scope) do
+          true ->
+            maybe_release_claim(result)
+            {:error, :conflict}
 
-          do_lock(resolution, path, scope, type, depth, owner, timeout, claim_id)
+          :unavailable ->
+            maybe_release_claim(result)
+            {:error, unavailable("lock index unreachable")}
+
+          false ->
+            claim_id = claim_id_from(result)
+
+            do_lock(resolution, path, scope, type, depth, owner, timeout, claim_id)
         end
     end
   end
@@ -165,6 +171,9 @@ defmodule NeonFS.WebDAV.LockStore do
 
       :error ->
         {:error, :not_found}
+
+      :unavailable ->
+        {:error, unavailable("lock index unreachable")}
     end
   end
 
@@ -179,7 +188,7 @@ defmodule NeonFS.WebDAV.LockStore do
 
         case store_lock(updated) do
           :ok -> {:ok, public_lock_info(updated)}
-          {:error, _reason} -> {:error, :not_found}
+          {:error, _reason} -> {:error, unavailable("lock index unreachable")}
         end
 
       {:ok, _expired} ->
@@ -188,28 +197,26 @@ defmodule NeonFS.WebDAV.LockStore do
 
       :error ->
         {:error, :not_found}
+
+      :unavailable ->
+        {:error, unavailable("lock index unreachable")}
     end
   end
 
   @impl true
-  def get_locks(path) do
-    active_locks()
-    |> Enum.filter(&(&1.path == path))
-    |> Enum.map(&public_lock_info/1)
-  end
+  def get_locks(path), do: filtered_locks(&(&1.path == path))
 
   @impl true
-  def get_locks_covering(path) do
-    active_locks()
-    |> Enum.filter(&covers?(&1, path))
-    |> Enum.map(&public_lock_info/1)
-  end
+  def get_locks_covering(path), do: filtered_locks(&covers?(&1, path))
 
   @impl true
-  def get_descendant_locks(path) do
-    active_locks()
-    |> Enum.filter(&descendant?(&1.path, path))
-    |> Enum.map(&public_lock_info/1)
+  def get_descendant_locks(path), do: filtered_locks(&descendant?(&1.path, path))
+
+  defp filtered_locks(filter) do
+    case active_locks() do
+      {:ok, locks} -> {:ok, locks |> Enum.filter(filter) |> Enum.map(&public_lock_info/1)}
+      {:error, _reason} -> {:error, unavailable("lock index unreachable")}
+    end
   end
 
   # --- Lock-null resource queries ---
@@ -219,8 +226,10 @@ defmodule NeonFS.WebDAV.LockStore do
   """
   @spec lock_null?(Davy.LockStore.path()) :: boolean()
   def lock_null?(path) do
-    active_locks()
-    |> Enum.any?(&(&1.path == path and &1.lock_null == true))
+    case active_locks() do
+      {:ok, locks} -> Enum.any?(locks, &(&1.path == path and &1.lock_null == true))
+      {:error, _reason} -> false
+    end
   end
 
   @doc """
@@ -235,14 +244,20 @@ defmodule NeonFS.WebDAV.LockStore do
   def get_lock_null_paths(parent_path) do
     parent_len = length(parent_path)
 
-    active_locks()
-    |> Enum.filter(fn info ->
-      info.lock_null == true and
-        length(info.path) == parent_len + 1 and
-        List.starts_with?(info.path, parent_path)
-    end)
-    |> Enum.map(& &1.path)
-    |> Enum.uniq()
+    case active_locks() do
+      {:ok, locks} ->
+        locks
+        |> Enum.filter(fn info ->
+          info.lock_null == true and
+            length(info.path) == parent_len + 1 and
+            List.starts_with?(info.path, parent_path)
+        end)
+        |> Enum.map(& &1.path)
+        |> Enum.uniq()
+
+      {:error, _reason} ->
+        []
+    end
   end
 
   @doc """
@@ -255,33 +270,35 @@ defmodule NeonFS.WebDAV.LockStore do
   def promote_lock_null(path, real_file_id) do
     now = System.system_time(:second)
 
-    active_locks()
-    |> Enum.filter(&(&1.path == path and &1.lock_null == true))
-    |> Enum.each(fn info ->
-      remaining_ttl_ms = max((info.expires_at - now) * 1000, 1000)
-      lock_type = scope_to_lock_type(info.scope)
-
-      case call_lock_manager(:lock, [
-             real_file_id,
-             info.token,
-             @full_file_range,
-             lock_type,
-             [ttl: remaining_ttl_ms]
-           ]) do
-        :ok ->
-          maybe_release_claim_id(info.namespace_claim_id)
-          updated = %{info | file_id: real_file_id, lock_null: false, namespace_claim_id: nil}
-          _ = store_lock(updated)
-          :ok
-
-        {:error, reason} ->
-          Logger.warning(
-            "Failed to promote lock-null to file #{real_file_id}: #{inspect(reason)}"
-          )
-      end
-    end)
+    with {:ok, locks} <- active_locks() do
+      locks
+      |> Enum.filter(&(&1.path == path and &1.lock_null == true))
+      |> Enum.each(&promote_one(&1, real_file_id, now))
+    end
 
     :ok
+  end
+
+  defp promote_one(info, real_file_id, now) do
+    remaining_ttl_ms = max((info.expires_at - now) * 1000, 1000)
+    lock_type = scope_to_lock_type(info.scope)
+
+    case call_lock_manager(:lock, [
+           real_file_id,
+           info.token,
+           @full_file_range,
+           lock_type,
+           [ttl: remaining_ttl_ms]
+         ]) do
+      :ok ->
+        maybe_release_claim_id(info.namespace_claim_id)
+        updated = %{info | file_id: real_file_id, lock_null: false, namespace_claim_id: nil}
+        _ = store_lock(updated)
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("Failed to promote lock-null to file #{real_file_id}: #{inspect(reason)}")
+    end
   end
 
   @impl true
@@ -298,7 +315,17 @@ defmodule NeonFS.WebDAV.LockStore do
 
       :error ->
         {:error, :invalid_token}
+
+      :unavailable ->
+        {:error, unavailable("lock index unreachable")}
     end
+  end
+
+  # An availability failure, not a conflict: 503 tells a client to retry,
+  # while the 423 this used to answer tells it someone else holds a lock —
+  # a claim we cannot make when the thing that would know is unreachable.
+  defp unavailable(message) do
+    %Davy.Error{code: :service_unavailable, message: message}
   end
 
   # --- KV index ---
@@ -306,8 +333,15 @@ defmodule NeonFS.WebDAV.LockStore do
   @doc """
   All non-expired lock entries from the cluster KV index. Also used by
   the `Cleaner` to find expired entries (with `include_expired: true`).
+
+  A failed scan is an error, not an empty list. Reporting "no locks" when
+  the index cannot be read is a fail-open: `Davy.Helpers.check_lock/3` reads
+  it as "not locked" and lets a PUT or DELETE through against a resource
+  someone else holds an exclusive lock on. Callers that can report
+  unavailability must; the few that genuinely cannot say so where they
+  swallow it.
   """
-  @spec active_locks(keyword()) :: [map()]
+  @spec active_locks(keyword()) :: {:ok, [map()]} | {:error, term()}
   def active_locks(opts \\ []) do
     now = System.system_time(:second)
     include_expired? = Keyword.get(opts, :include_expired, false)
@@ -317,18 +351,14 @@ defmodule NeonFS.WebDAV.LockStore do
         infos = Enum.map(entries, fn {_key, info} -> info end)
 
         if include_expired? do
-          infos
+          {:ok, infos}
         else
-          Enum.filter(infos, &(&1.expires_at > now))
+          {:ok, Enum.filter(infos, &(&1.expires_at > now))}
         end
 
       {:error, reason} ->
-        # A failed scan must not grant conflicting locks by reporting
-        # "no locks" — but every conflict that matters is arbitrated by
-        # the DLM or the namespace coordinator, which are queried on
-        # the lock path regardless. Degrade to an empty view.
         Logger.warning("WebDAV lock index scan failed: #{inspect(reason)}")
-        []
+        {:error, reason}
     end
   end
 
@@ -341,10 +371,15 @@ defmodule NeonFS.WebDAV.LockStore do
     :ok
   end
 
+  # `:error` means the lock is not there; `:unavailable` means we could not
+  # find out. Collapsing the second into the first reports an unreachable
+  # index as "no such lock" — a 409 or 412 on UNLOCK and refresh, and a 423
+  # on a token check, none of which is true.
   defp fetch_lock(token) when is_binary(token) do
     case kv(:get, [lock_key(token)]) do
       {:ok, info} -> {:ok, info}
-      {:error, _} -> :error
+      {:error, :not_found} -> :error
+      {:error, _reason} -> :unavailable
     end
   end
 
@@ -372,13 +407,20 @@ defmodule NeonFS.WebDAV.LockStore do
           maybe_unlock_dlm(%{file_id: file_id, token: token})
         end)
 
-      {:error, _reason} ->
-        # `:timeout` and any other DLM rejection collapse into a WebDAV
-        # `:conflict`. Release the namespace claim we may already hold.
+      {:error, reason} ->
+        # A DLM `:timeout` is a genuine conflict — someone else holds the
+        # lock and did not let go — so it stays a 423. An unreachable DLM
+        # is not a statement about locks at all, and answering 423 for it
+        # tells the client something we do not know.
         maybe_release_claim_id(attrs.namespace_claim_id)
-        {:error, :conflict}
+        dlm_error(reason)
     end
   end
+
+  defp dlm_error(:timeout), do: {:error, :conflict}
+  defp dlm_error(%NeonFS.Error.Conflict{}), do: {:error, :conflict}
+  defp dlm_error(:conflict), do: {:error, :conflict}
+  defp dlm_error(_reason), do: {:error, unavailable("lock manager unreachable")}
 
   defp lock_lock_null(attrs) do
     token = generate_token()
@@ -399,10 +441,13 @@ defmodule NeonFS.WebDAV.LockStore do
         {:ok, info.token}
 
       {:error, reason} ->
+        # The lock was not recorded, so it does not exist — but that is an
+        # outage rather than a competing lock, and 423 would send the client
+        # looking for a holder that is not there.
         Logger.warning("Failed to persist WebDAV lock in KV index: #{inspect(reason)}")
         rollback.()
         maybe_release_claim_id(info.namespace_claim_id)
-        {:error, :conflict}
+        {:error, unavailable("lock index unreachable")}
     end
   end
 
@@ -496,11 +541,19 @@ defmodule NeonFS.WebDAV.LockStore do
     List.starts_with?(lock_path, ancestor_path) and length(lock_path) > length(ancestor_path)
   end
 
+  # The pre-check that decides whether a LOCK may proceed. An unreadable
+  # index cannot answer "no conflict" — that is the fail-open — so it
+  # answers unavailable and the caller reports 503.
   defp conflict?(path, depth, scope) do
-    active_locks()
-    |> Enum.any?(fn info ->
-      overlaps?(info, path, depth) and scope_conflicts?(info.scope, scope)
-    end)
+    case active_locks() do
+      {:ok, locks} ->
+        Enum.any?(locks, fn info ->
+          overlaps?(info, path, depth) and scope_conflicts?(info.scope, scope)
+        end)
+
+      {:error, _reason} ->
+        :unavailable
+    end
   end
 
   defp overlaps?(%{path: existing_path, depth: existing_depth}, path, depth) do
