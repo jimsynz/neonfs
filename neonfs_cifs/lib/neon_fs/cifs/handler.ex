@@ -137,6 +137,11 @@ defmodule NeonFS.CIFS.Handler do
 
   defp identity_from(_other), do: [uid: @nobody_uid, gids: [@nobody_gid]]
 
+  # Appended to the opts of every core call that accepts them, so core
+  # evaluates the request against the session rather than against nothing.
+  # `NeonFS.Core.Authorise.check/4` reads `:uid` and `:gids`.
+  defp identity_opts(state), do: Map.get(state, :identity, [])
+
   ## Lifecycle
 
   defp do_handle(:connect, %{"volume" => volume}, state) when is_binary(volume) do
@@ -170,7 +175,7 @@ defmodule NeonFS.CIFS.Handler do
 
   defp do_handle(:fstat, %{"handle" => handle}, state) do
     with_any_handle(handle, state, fn target ->
-      with {:ok, file} <- fetch_meta(target),
+      with {:ok, file} <- fetch_meta(target, identity_opts(state)),
            {:ok, stat} <- stat_term(file) do
         {{:ok, %{stat: stat}}, state}
       else
@@ -182,7 +187,7 @@ defmodule NeonFS.CIFS.Handler do
   defp do_handle(:fchmod, %{"handle" => handle, "mode" => mode}, state)
        when is_integer(mode) do
     with_any_handle(handle, state, fn target ->
-      case set_attrs(target, mode: mode) do
+      case set_attrs(target, [mode: mode], identity_opts(state)) do
         {:ok, _meta} -> {{:ok, %{}}, state}
         {:error, reason} -> {{:error, errno_for(reason)}, state}
       end
@@ -205,7 +210,7 @@ defmodule NeonFS.CIFS.Handler do
         modified_at: DateTime.from_unix!(mtime)
       ]
 
-      case set_attrs(target, updates) do
+      case set_attrs(target, updates, identity_opts(state)) do
         {:ok, _meta} -> {{:ok, %{}}, state}
         {:error, reason} -> {{:error, errno_for(reason)}, state}
       end
@@ -218,7 +223,7 @@ defmodule NeonFS.CIFS.Handler do
     create_mode = Map.get(args, "mode", 0o644)
 
     with_volume(state, fn volume, state ->
-      with {:ok, file} <- open_or_create(volume, path, flags, create_mode),
+      with {:ok, file} <- open_or_create(volume, path, flags, create_mode, identity_opts(state)),
            {:ok, claim_id} <- pin_file(volume, path),
            {:ok, handle} <-
              HandleRegistry.open(volume, handle_identity(file), path, flags, claim_id, self()) do
@@ -239,7 +244,9 @@ defmodule NeonFS.CIFS.Handler do
   defp do_handle(:pread, %{"handle" => handle, "offset" => offset, "size" => size}, state)
        when is_integer(offset) and is_integer(size) and size >= 0 do
     with_handle(handle, state, fn %{volume: volume, file_id: file_id} ->
-      case ChunkReader.read_file_by_id(volume, file_id, offset: offset, length: size) do
+      read_opts = [offset: offset, length: size] ++ identity_opts(state)
+
+      case ChunkReader.read_file_by_id(volume, file_id, read_opts) do
         {:ok, data} -> {{:ok, %{data: data}}, state}
         {:error, reason} -> {{:error, errno_for(reason)}, state}
       end
@@ -249,7 +256,13 @@ defmodule NeonFS.CIFS.Handler do
   defp do_handle(:pwrite, %{"handle" => handle, "offset" => offset, "data" => data}, state)
        when is_integer(offset) and is_binary(data) do
     with_handle(handle, state, fn %{volume: volume, file_id: file_id} ->
-      case core_call(NeonFS.Core, :write_file_at_by_id, [volume, file_id, offset, data]) do
+      case core_call(NeonFS.Core, :write_file_at_by_id, [
+             volume,
+             file_id,
+             offset,
+             data,
+             identity_opts(state)
+           ]) do
         {:ok, _file} -> {{:ok, %{written: byte_size(data)}}, state}
         {:error, reason} -> {{:error, errno_for(reason)}, state}
       end
@@ -268,7 +281,13 @@ defmodule NeonFS.CIFS.Handler do
   defp do_handle(:ftruncate, %{"handle" => handle, "size" => size}, state)
        when is_integer(size) and size >= 0 do
     with_handle(handle, state, fn %{volume: volume, file_id: file_id} ->
-      case core_call(NeonFS.Core, :truncate_file_by_id, [volume, file_id, size]) do
+      case core_call(NeonFS.Core, :truncate_file_by_id, [
+             volume,
+             file_id,
+             size,
+             [],
+             identity_opts(state)
+           ]) do
         {:ok, _} -> {{:ok, %{}}, state}
         {:error, reason} -> {{:error, errno_for(reason)}, state}
       end
@@ -284,7 +303,11 @@ defmodule NeonFS.CIFS.Handler do
   # for an n-entry directory.)
   defp do_handle(:fdopendir, %{"path" => path}, state) do
     with_volume(state, fn volume, state ->
-      with {:ok, _file} <- core_call(NeonFS.Core, :get_file_meta, [volume, path]),
+      # The directory itself is authorised above; the listing is not.
+      # `NeonFS.Core.list_dir/2` accepts no identity, so there is nothing to
+      # pass — the same gap the NFS backend has, tracked separately.
+      with {:ok, _file} <-
+             core_call(NeonFS.Core, :get_file_meta, [volume, path, identity_opts(state)]),
            {:ok, children} <- core_call(NeonFS.Core, :list_dir, [volume, path]) do
         {handle, state} = mint_handle(state)
 
@@ -325,7 +348,11 @@ defmodule NeonFS.CIFS.Handler do
     mode = Map.get(args, "mode", 0o755)
 
     with_volume(state, fn volume, state ->
-      case core_call(NeonFS.Core, :mkdir, [volume, path, [mode: mode]]) do
+      case core_call(NeonFS.Core, :mkdir, [
+             volume,
+             path,
+             [mode: mode] ++ identity_opts(state)
+           ]) do
         {:ok, _} -> {{:ok, %{}}, state}
         {:error, reason} -> {{:error, errno_for(reason)}, state}
       end
@@ -338,7 +365,7 @@ defmodule NeonFS.CIFS.Handler do
   # `rmdir` share the one op (the same entry point NFS REMOVE/RMDIR use).
   defp do_handle(:unlinkat, %{"path" => path}, state) do
     with_volume(state, fn volume, state ->
-      case core_call(NeonFS.Core, :delete_file, [volume, path]) do
+      case core_call(NeonFS.Core, :delete_file, [volume, path, identity_opts(state)]) do
         :ok -> {{:ok, %{}}, state}
         {:error, reason} -> {{:error, errno_for(reason)}, state}
       end
@@ -358,7 +385,7 @@ defmodule NeonFS.CIFS.Handler do
   # anyway.
   defp do_handle(:renameat, %{"old_path" => old, "new_path" => new}, state) do
     with_volume(state, fn volume, state ->
-      case core_call(NeonFS.Core, :rename_file, [volume, old, new]) do
+      case core_call(NeonFS.Core, :rename_file, [volume, old, new, identity_opts(state)]) do
         :ok -> {{:ok, %{}}, state}
         {:error, reason} -> {{:error, errno_for(reason)}, state}
       end
@@ -459,28 +486,28 @@ defmodule NeonFS.CIFS.Handler do
   # and answers an error that surfaces to smbd as EIO. It resolves by name
   # instead. This clause has to come first — an entry carries both keys, so
   # the `file_id` clause below would otherwise match with a nil id.
-  defp set_attrs(%{volume: volume, file_id: nil, path: path}, updates) do
-    core_call(NeonFS.Core, :update_file_meta, [volume, path, updates])
+  defp set_attrs(%{volume: volume, file_id: nil, path: path}, updates, identity) do
+    core_call(NeonFS.Core, :update_file_meta, [volume, path, updates, identity])
   end
 
-  defp set_attrs(%{volume: volume, file_id: file_id}, updates) do
-    core_call(NeonFS.Core, :update_file_meta_by_id, [volume, file_id, updates])
+  defp set_attrs(%{volume: volume, file_id: file_id}, updates, identity) do
+    core_call(NeonFS.Core, :update_file_meta_by_id, [volume, file_id, updates, identity])
   end
 
-  defp set_attrs(%{volume: volume, path: path}, updates) do
-    core_call(NeonFS.Core, :update_file_meta, [volume, path, updates])
+  defp set_attrs(%{volume: volume, path: path}, updates, identity) do
+    core_call(NeonFS.Core, :update_file_meta, [volume, path, updates, identity])
   end
 
-  defp fetch_meta(%{volume: volume, file_id: nil, path: path}) do
-    core_call(NeonFS.Core, :get_file_meta, [volume, path])
+  defp fetch_meta(%{volume: volume, file_id: nil, path: path}, identity) do
+    core_call(NeonFS.Core, :get_file_meta, [volume, path, identity])
   end
 
-  defp fetch_meta(%{volume: volume, file_id: file_id}) do
-    core_call(NeonFS.Core, :get_file_meta_by_id, [volume, file_id])
+  defp fetch_meta(%{volume: volume, file_id: file_id}, identity) do
+    core_call(NeonFS.Core, :get_file_meta_by_id, [volume, file_id, identity])
   end
 
-  defp fetch_meta(%{volume: volume, path: path}) do
-    core_call(NeonFS.Core, :get_file_meta, [volume, path])
+  defp fetch_meta(%{volume: volume, path: path}, identity) do
+    core_call(NeonFS.Core, :get_file_meta, [volume, path, identity])
   end
 
   # Resolves a handle to whatever can act on it: a file handle carries a
@@ -510,7 +537,8 @@ defmodule NeonFS.CIFS.Handler do
   end
 
   defp fetch_stat(volume, path, state) do
-    with {:ok, file} <- core_call(NeonFS.Core, :get_file_meta, [volume, path]),
+    with {:ok, file} <-
+           core_call(NeonFS.Core, :get_file_meta, [volume, path, identity_opts(state)]),
          {:ok, stat} <- stat_term(file) do
       {{:ok, %{stat: stat}}, state}
     else
@@ -529,20 +557,27 @@ defmodule NeonFS.CIFS.Handler do
   # namespace coordinator's `claim_create` primitive lets
   # exactly one through and surfaces `{:error, :exists}` to the
   # other, which we map back to `:eexist`.
-  defp open_or_create(volume, path, flags, mode) do
+  defp open_or_create(volume, path, flags, mode, identity) do
     o_creat = Bitwise.band(flags, 0o100) != 0
     o_excl = Bitwise.band(flags, 0o200) != 0
 
-    case core_call(NeonFS.Core, :get_file_meta, [volume, path]) do
-      {:ok, _file} when o_excl -> {:error, :eexist}
-      {:ok, file} -> {:ok, file}
-      {:error, %{class: :not_found}} when o_creat -> create_file(volume, path, mode, o_excl)
-      {:error, _} = err -> err
+    case core_call(NeonFS.Core, :get_file_meta, [volume, path, identity]) do
+      {:ok, _file} when o_excl ->
+        {:error, :eexist}
+
+      {:ok, file} ->
+        {:ok, file}
+
+      {:error, %{class: :not_found}} when o_creat ->
+        create_file(volume, path, mode, o_excl, identity)
+
+      {:error, _} = err ->
+        err
     end
   end
 
-  defp create_file(volume, path, mode, exclusive?) do
-    base_opts = [mode: mode]
+  defp create_file(volume, path, mode, exclusive?, identity) do
+    base_opts = [mode: mode] ++ identity
     opts = if exclusive?, do: [{:create_only, true} | base_opts], else: base_opts
 
     case core_call(NeonFS.Core, :write_file_at, [volume, path, 0, <<>>, opts]) do
