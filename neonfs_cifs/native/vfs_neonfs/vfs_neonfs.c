@@ -21,6 +21,11 @@
 #include "includes.h"
 #include "smbd/smbd.h"
 #include "system/filesys.h"
+/* `struct auth_session_info` is only forward-declared by the headers above,
+ * and this module dereferences it for the session's Unix token. Every in-tree
+ * module that reads `session_info->unix_token` includes this (see
+ * `vfs_fake_perms.c`, `vfs_gpfs.c`). */
+#include "auth.h"
 #include "lib/util/tevent_unix.h"
 
 #include "wire.h"
