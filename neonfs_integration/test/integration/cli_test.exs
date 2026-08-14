@@ -162,11 +162,15 @@ defmodule NeonFS.Integration.CLITest do
   # the CLI reads the *host's* production material and fails on its
   # permissions — the test's result then depends on what else is on the
   # box. The CLI enables TLS distribution only when `ssl_dist.conf` is in
-  # this directory; with none it dials plainly, which is what it already
-  # does in CI (where the default path does not exist) and therefore what
-  # these tests have always covered. Pointing it at the peer's own `tls/`
-  # would not work either: the cluster CA there issues node certs, not the
-  # `cli.crt`/`cli.key`/`local-ca.crt` triple the CLI wants.
+  # this directory; with none it dials plainly.
+  #
+  # So this file covers the plain path, and it keeps covering it rather than
+  # being converted: a cluster without TLS material is a configuration NeonFS
+  # supports, and these are the cheapest CLI tests there are — a TLS peer
+  # costs a CA and a handshake per cluster. The path an operator actually
+  # takes is covered alongside, in `cli_tls_test.exs`, which drives the same
+  # binary against a TLS-only cluster and asserts both that it connects with a
+  # client identity and that it cannot without one.
   defp cli_tls_dir(node_info) do
     dir = Path.join(node_info.data_dir, "cli-tls")
     File.mkdir_p!(dir)

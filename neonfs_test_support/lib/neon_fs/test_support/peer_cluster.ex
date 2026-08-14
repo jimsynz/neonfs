@@ -447,10 +447,44 @@ defmodule NeonFS.TestSupport.PeerCluster do
 
   Point `NEONFS_TLS_DIR` at it: the CLI turns TLS on when it finds
   `ssl_dist.conf`, and needs this identity to complete the handshake.
+
+  **If the cluster has been initialised, call `trust_cluster_ca!/2` as well.**
+  A node presents the cluster-signed certificate alone once it has one, so
+  this identity stops being enough on its own.
   """
   @spec cli_tls_dir(cluster() | String.t()) :: String.t()
   def cli_tls_dir(%{data_dir: data_dir}), do: cli_tls_dir(data_dir)
   def cli_tls_dir(data_dir) when is_binary(data_dir), do: Path.join(data_dir, "cli-tls")
+
+  @doc """
+  Adds the cluster's CA to the CLI's trust store, after `cluster init`.
+
+  Call this once the cluster is initialised and before running the CLI
+  against it. Until then the node presents the certificate the harness minted
+  and `cli_tls_dir/1`'s material is sufficient on its own; afterwards the node
+  presents a cluster-signed one, and a CLI that has not been given the cluster
+  CA fails the handshake with `UnknownIssuer`. See
+  `NeonFS.TestSupport.PeerTLS.add_cluster_ca/2` for why a real install never
+  has to do this.
+
+  Raises rather than returning an error: a test that calls this has decided the
+  cluster is initialised, and a missing CA means it is not — which is worth
+  failing on here rather than as a handshake error several steps later.
+  """
+  @spec trust_cluster_ca!(cluster(), atom()) :: :ok
+  def trust_cluster_ca!(cluster, node_name \\ :node1) do
+    node_tls_dir = Path.join(get_node!(cluster, node_name).data_dir, "tls")
+
+    case PeerTLS.add_cluster_ca(node_tls_dir, cli_tls_dir(cluster)) do
+      :ok ->
+        :ok
+
+      {:error, :no_cluster_ca} ->
+        raise ArgumentError,
+              "#{node_name} has no cluster CA at #{node_tls_dir}/ca.crt — " <>
+                "initialise or join the cluster before granting the CLI its trust"
+    end
+  end
 
   # These four reach a peer directly rather than through `rpc/6`, because
   # each is probing distribution itself — who is connected, connecting two
