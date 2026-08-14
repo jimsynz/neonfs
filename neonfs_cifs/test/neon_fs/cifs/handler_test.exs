@@ -151,6 +151,8 @@ defmodule NeonFS.CIFS.HandlerTest do
          file_meta("/foo",
            id: @file_id,
            size: 13,
+           uid: 1000,
+           gid: 1001,
            accessed_at: 100,
            modified_at: 200,
            changed_at: 300
@@ -166,12 +168,43 @@ defmodule NeonFS.CIFS.HandlerTest do
                   ino: 0x957C881D9661B59D,
                   size: 13,
                   mode: 0o100644,
+                  uid: 1000,
+                  gid: 1001,
                   atime: 100,
                   mtime: 200,
                   ctime: 300,
                   kind: :file
                 }
               }} = reply
+    end
+
+    # smbd runs its own access check against the stat before dispatching a
+    # create to any VFS hook, so ownership omitted here denies every non-root
+    # session at `smb2_create` — which reads as the module never being
+    # consulted, when in fact it answered and said root.
+    test "stat reports the file's real ownership rather than root" do
+      stub(NeonFS.Client, :core_call, fn NeonFS.Core, :get_file_meta, ["vol-a", "/foo"] ->
+        {:ok, file_meta("/foo", id: @file_id, uid: 65_534, gid: 65_533)}
+      end)
+
+      {{:ok, %{stat: stat}}, _} = Handler.handle({:stat, %{"path" => "/foo"}}, connected())
+
+      assert stat.uid == 65_534
+      assert stat.gid == 65_533
+    end
+
+    # A `FileMeta` predating ownership on the wire has no uid to report, and
+    # root is the only defensible default — but it is a default, not a fact,
+    # so it must not be mistaken for ownership the volume actually recorded.
+    test "stat falls back to root when the metadata carries no ownership" do
+      stub(NeonFS.Client, :core_call, fn NeonFS.Core, :get_file_meta, ["vol-a", "/foo"] ->
+        {:ok, %{id: @file_id, volume_id: @volume_id, path: "/foo", size: 0, mode: 0o100644}}
+      end)
+
+      {{:ok, %{stat: stat}}, _} = Handler.handle({:stat, %{"path" => "/foo"}}, connected())
+
+      assert stat.uid == 0
+      assert stat.gid == 0
     end
 
     test "stat rejects metadata without stable object identity" do

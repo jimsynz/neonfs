@@ -181,7 +181,7 @@ static void reply_stat(ei_x_buff *x) {
   ei_x_encode_atom(x, "ok");
   ei_x_encode_map_header(x, 1);
   ei_x_encode_atom(x, "stat");
-  ei_x_encode_map_header(x, 8);
+  ei_x_encode_map_header(x, 10);
   ei_x_encode_atom(x, "dev");
   ei_x_encode_ulonglong(x, UINT64_C(0xfedcba9876543210));
   ei_x_encode_atom(x, "ino");
@@ -190,6 +190,12 @@ static void reply_stat(ei_x_buff *x) {
   ei_x_encode_longlong(x, 1234);
   ei_x_encode_atom(x, "mode");
   ei_x_encode_longlong(x, 0100644);
+  /* Not 0: root:root is what the module reported before ownership was on
+   * the wire, so a test fixture of 0 would pass either way. */
+  ei_x_encode_atom(x, "uid");
+  ei_x_encode_longlong(x, 65534);
+  ei_x_encode_atom(x, "gid");
+  ei_x_encode_longlong(x, 65533);
   ei_x_encode_atom(x, "atime");
   ei_x_encode_longlong(x, 111);
   ei_x_encode_atom(x, "mtime");

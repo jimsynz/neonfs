@@ -523,6 +523,12 @@ defmodule NeonFS.CIFS.Handler do
     end
   end
 
+  # Ownership is not decoration here: `smbd` runs its own access check against
+  # the `SMB_STRUCT_STAT` this fills before dispatching a create to any VFS
+  # hook. Omitting `uid`/`gid` left every file reporting root:root, so a
+  # non-root session had no write bit and was refused at `smb2_create` — which
+  # reads as the module never being consulted, when in fact it answered and
+  # said root.
   defp stat_term(file) do
     with {:ok, device, inode} <- stat_identity(file) do
       {:ok,
@@ -531,6 +537,8 @@ defmodule NeonFS.CIFS.Handler do
          ino: inode,
          size: Map.get(file, :size, 0),
          mode: Map.get(file, :mode, 0o644),
+         uid: Map.get(file, :uid, 0),
+         gid: Map.get(file, :gid, 0),
          atime: time_to_unix(Map.get(file, :accessed_at)),
          mtime: time_to_unix(Map.get(file, :modified_at)),
          ctime: time_to_unix(Map.get(file, :changed_at)),

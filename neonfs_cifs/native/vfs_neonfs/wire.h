@@ -45,6 +45,11 @@ typedef struct {
   uint64_t ino;
   uint64_t size;
   uint32_t mode;
+  /* Ownership as NeonFS holds it. smbd runs its own access check against
+   * these before dispatching a create to any VFS hook, so a stat that omits
+   * them denies every non-root session at smb2_create. */
+  uint32_t uid;
+  uint32_t gid;
   int64_t atime;
   int64_t mtime;
   int64_t ctime;

@@ -70,14 +70,24 @@ same snippet is shipped as a reference in `/etc/neonfs/cifs.conf`.
 
 ## Share ownership and permissions
 
-NeonFS does not model POSIX uid/gid ownership — the VFS `fchown` is `:enosys`
-([#135](https://harton.dev/project-neon/neonfs/issues/135)) and access control
-rides on IAM/ACLs, not file-mode bits. The volume root reports a fixed
-`uid=0, gid=0, mode=0o40755`, so an SMB client authenticating as any non-root
-user falls into POSIX "other", which `0o40755` grants only `r-x`. smbd applies
-that check itself — in its own NT-ACL/POSIX access layer, before it ever calls
-the VFS — and refuses a create in the share root with
-`NT_STATUS_ACCESS_DENIED`.
+NeonFS does model POSIX uid/gid ownership: `FileMeta` carries `uid`, `gid` and
+`mode`, and `NeonFS.Core.Authorise.check/4` evaluates mode bits and POSIX.1e
+extended ACL entries against a caller's uid and supplementary groups. `stat`
+reports a file's real ownership, so smbd's own access check sees it.
+
+Two pieces are still missing, and together they are why a share needs the
+`admin users` recipe below. The VFS `fchown` returns `:enosys`, so ownership
+cannot be changed over SMB — and any file created before ownership reached the
+wire carries `uid: 0`, which there is currently no way to correct. More
+importantly the bridge does not yet send the SMB session's identity with a
+request, so core cannot check one against it; every operation arrives
+unattributed.
+
+Until both land, a volume root reporting `uid=0, gid=0, mode=0o40755` puts an
+SMB client authenticating as any non-root user in POSIX "other", which
+`0o40755` grants only `r-x`. smbd applies that check itself — in its own
+NT-ACL/POSIX access layer, before it ever calls the VFS — and refuses a create
+in the share root with `NT_STATUS_ACCESS_DENIED`.
 
 The trust boundary for a NeonFS share is the bridge socket plus the share's own
 SMB authentication, **not** smbd's POSIX layer, so the share tells smbd to skip
@@ -92,8 +102,12 @@ List the SMB principal(s) that connect to the share (e.g. the user in
 bypassing the POSIX permission check while still requiring authentication to
 Samba. This matches how NeonFS treats every interface: the interface node is
 fully trusted once connected, and external access is gated at the interface's
-own auth layer (here, Samba's `security = user`) rather than by POSIX mode bits
-the backend does not maintain.
+own auth layer — here, Samba's `security = user`.
+
+It is a deliberate escape hatch rather than the end state. Because it makes
+every listed principal share-admin, no per-user access control inside the share
+survives it: a share is all-or-nothing per user. That is the cost of the bridge
+not yet carrying the session identity core would check.
 
 ## Omnibus deployment
 
