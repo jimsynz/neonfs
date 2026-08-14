@@ -118,12 +118,61 @@ static void neonfs_disconnect(struct vfs_handle_struct *handle)
 
 /* ---- fsp extension helpers ---- */
 
+/*
+ * The connection for this operation, stamped with the identity performing it.
+ *
+ * Identity is re-read here, on every hook entry, rather than captured once at
+ * tree connect: a connection's effective identity is not fixed for its
+ * lifetime (`force user`, share-level overrides, multiple sessions on one
+ * connection), and a stale identity authorises the wrong principal without
+ * ever looking like an error.
+ *
+ * This is the only way a hook reaches the connection, which is what makes the
+ * stamping impossible to skip — an identity passed as a parameter to each
+ * `nw_*` call could be forgotten at one call site, and that site would then
+ * send whatever the previous operation used.
+ *
+ * A missing token is refused rather than defaulted. Every caller already
+ * treats NULL as `EBADF`, so failing closed here costs nothing and avoids the
+ * alternative: falling back to uid 0, which core authorises for everything.
+ * Samba populates `session_info` at tree connect, so this is a guard against
+ * a future path that does not, not an expected case.
+ */
 static struct neonfs_config *neonfs_cfg(struct vfs_handle_struct *handle)
 {
 	struct neonfs_config *cfg = NULL;
+	const struct security_unix_token *tok = NULL;
+	uint32_t groups[NW_MAX_GROUPS];
+	uint32_t ngroups = 0, i;
 
 	SMB_VFS_HANDLE_GET_DATA(handle, cfg, struct neonfs_config,
 				return NULL);
+
+	if (handle->conn->session_info == NULL ||
+	    handle->conn->session_info->unix_token == NULL) {
+		DBG_ERR("neonfs: no unix token for this operation\n");
+		return NULL;
+	}
+
+	tok = handle->conn->session_info->unix_token;
+
+	/* Copied rather than passed through, because `gid_t` is not uint32_t
+	 * everywhere and the excess beyond NW_MAX_GROUPS is dropped here where
+	 * the bound is visible. Dropping groups can only deny access a group
+	 * would have granted, never grant any. */
+	ngroups = (uint32_t)tok->ngroups;
+	if (ngroups > NW_MAX_GROUPS) {
+		DBG_NOTICE("neonfs: truncating %u supplementary groups to %u\n",
+			   ngroups, (unsigned)NW_MAX_GROUPS);
+		ngroups = NW_MAX_GROUPS;
+	}
+	for (i = 0; i < ngroups; i++) {
+		groups[i] = (uint32_t)tok->groups[i];
+	}
+
+	nw_set_ident(&cfg->conn, (uint32_t)tok->uid, (uint32_t)tok->gid,
+		     groups, ngroups);
+
 	return cfg;
 }
 

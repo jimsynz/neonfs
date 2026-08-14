@@ -28,9 +28,37 @@
 extern "C" {
 #endif
 
-/* An open connection to a neonfs_cifs listener. */
+/*
+ * The Unix identity an operation is performed as.
+ *
+ * Sent with every request so core can evaluate it against the file's mode
+ * bits and ACL entries. `NW_MAX_GROUPS` bounds what a request will carry; a
+ * session in more groups than that has the excess dropped, which can only
+ * ever deny access that a group would have granted — never grant access.
+ * Silently widening a token is the failure that must not happen here.
+ */
+#define NW_MAX_GROUPS 32
+typedef struct {
+  uint32_t uid;
+  uint32_t gid;
+  uint32_t ngroups;
+  uint32_t groups[NW_MAX_GROUPS];
+} nw_ident_t;
+
+/*
+ * An open connection to a neonfs_cifs listener.
+ *
+ * `ident` is the identity the *next* request will carry. It is part of the
+ * connection rather than a parameter of every call because the VFS shim
+ * re-stamps it from `handle->conn->session_info` on each hook entry, and
+ * making it a parameter would let a hook omit it — which sends the previous
+ * operation's identity, a wrong answer rather than a missing one, in a path
+ * that decides access. It defaults to root with no supplementary groups,
+ * which is what `nw_connect` runs as before any session exists.
+ */
 typedef struct {
   int fd;
+  nw_ident_t ident;
 } nw_conn;
 
 /* File kind, decoded from the reply's `:kind` atom. */
@@ -76,6 +104,14 @@ typedef struct {
  * connection owns the fd; release it with nw_disconnect()/nw_close_conn().
  */
 int nw_dial(nw_conn *conn, const char *path);
+
+/*
+ * Set the identity subsequent requests on `conn` are made as. Callers
+ * re-stamp this per operation; see `nw_conn.ident`. Groups beyond
+ * `NW_MAX_GROUPS` are dropped.
+ */
+void nw_set_ident(nw_conn *conn, uint32_t uid, uint32_t gid,
+                  const uint32_t *groups, uint32_t ngroups);
 
 /* Wrap an already-connected stream fd (used by the test harness). */
 void nw_attach(nw_conn *conn, int fd);

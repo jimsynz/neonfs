@@ -28,6 +28,14 @@ int nw_probe_run(nw_conn *conn) {
 
   PCHECK(nw_connect(conn, "vol1") == 0, "connect");
 
+  /* From here on every request must carry this identity. The responder
+   * checks it on each op, so an op that stopped sending it fails there
+   * rather than needing an assertion per op here. */
+  {
+    const uint32_t groups[2] = {1001, 1002};
+    nw_set_ident(conn, 1000, 1001, groups, 2);
+  }
+
   PCHECK(nw_stat(conn, "/a.txt", &st) == 0, "stat");
   PCHECK(st.dev == UINT64_C(0xfedcba9876543210), "stat.dev");
   PCHECK(st.ino == UINT64_C(0x957c881d9661b59d), "stat.ino");

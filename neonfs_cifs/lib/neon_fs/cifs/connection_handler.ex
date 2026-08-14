@@ -52,7 +52,11 @@ defmodule NeonFS.CIFS.ConnectionHandler do
        volume: nil,
        next_handle: 1,
        files: %{},
-       dirs: %{}
+       dirs: %{},
+       # Replaced per request from the request's own `identity` field. Starts
+       # as `nobody` rather than root so a request that arrives without one is
+       # never treated as privileged.
+       identity: [uid: 65_534, gids: [65_533]]
      }}
   end
 

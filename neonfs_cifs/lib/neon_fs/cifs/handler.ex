@@ -52,6 +52,13 @@ defmodule NeonFS.CIFS.Handler do
 
   @stat_identity_domain "neonfs-cifs-stat-v1"
 
+  # The identity a request with no usable one is performed as. Deliberately not
+  # 0: uid 0 satisfies every check core makes, so defaulting to it would turn a
+  # lost identity into full access. 65534/65533 are the conventional
+  # `nobody`/`nogroup`, which is the identity that can do least.
+  @nobody_uid 65_534
+  @nobody_gid 65_533
+
   @typedoc "Per-connection state — see `NeonFS.CIFS.ConnectionHandler`."
   @type state :: %{
           required(:volume) => String.t() | nil,
@@ -59,7 +66,8 @@ defmodule NeonFS.CIFS.Handler do
           required(:files) => %{non_neg_integer() => term()},
           required(:dirs) => %{
             non_neg_integer() => [{String.t(), String.t(), non_neg_integer()}]
-          }
+          },
+          required(:identity) => keyword()
         }
 
   @typedoc "Wire-encoded reply."
@@ -71,7 +79,7 @@ defmodule NeonFS.CIFS.Handler do
   """
   @spec handle({atom(), map()}, state()) :: {reply(), state()}
   def handle({op, args}, state) when is_atom(op) and is_map(args),
-    do: do_handle(op, normalise_paths(args), state)
+    do: do_handle(op, normalise_paths(args), put_identity(state, args))
 
   def handle(_, state), do: {{:error, :einval}, state}
 
@@ -108,6 +116,26 @@ defmodule NeonFS.CIFS.Handler do
 
     "/" <> (segments |> Enum.reverse() |> Enum.join("/"))
   end
+
+  # The shim re-reads the SMB session's Unix identity on every hook entry and
+  # sends it with the request, so it is taken per request here rather than
+  # remembered from the tree connect. A connection's effective identity is not
+  # fixed for its lifetime, and a stale one authorises the wrong principal
+  # without looking like an error.
+  #
+  # An absent identity is *not* defaulted to root: uid 0 passes every check
+  # core makes, so a request that lost its identity in transit would be granted
+  # everything. It becomes `nobody`, which is the identity that can do least.
+  defp put_identity(state, args) do
+    Map.put(state, :identity, identity_from(Map.get(args, "identity")))
+  end
+
+  defp identity_from(%{"uid" => uid, "gid" => gid, "gids" => gids})
+       when is_integer(uid) and is_integer(gid) and is_list(gids) do
+    [uid: uid, gids: Enum.uniq([gid | gids])]
+  end
+
+  defp identity_from(_other), do: [uid: @nobody_uid, gids: [@nobody_gid]]
 
   ## Lifecycle
 

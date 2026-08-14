@@ -47,6 +47,8 @@ defmodule NeonFS.CIFS.HandlerTest do
 
   defp not_found(path), do: FileNotFound.exception(file_path: path, volume_id: "vol-a")
 
+  defp ident(uid, gid, gids), do: %{"uid" => uid, "gid" => gid, "gids" => gids}
+
   # Opening the share root, the way smbd's pathref open does: the path
   # already exists, so there is no create, and `get_file_meta` answers a
   # directory whose id is nil.
@@ -141,6 +143,58 @@ defmodule NeonFS.CIFS.HandlerTest do
       {_reply, reset} = Handler.handle({:disconnect, %{}}, connected())
 
       assert :ok = ConnectionHandler.handle_close(nil, reset)
+    end
+  end
+
+  describe "session identity" do
+    # The shim re-reads the SMB session's identity on every hook entry, so it
+    # is taken per request rather than remembered from the tree connect: a
+    # connection's effective identity is not fixed for its lifetime.
+    test "is taken from the request rather than the connection" do
+      state = connected()
+
+      {_, after_first} =
+        Handler.handle({:fsync, %{"handle" => 1, "identity" => ident(1000, 1001, [1002])}}, state)
+
+      assert after_first.identity == [uid: 1000, gids: [1001, 1002]]
+
+      {_, after_second} =
+        Handler.handle(
+          {:fsync, %{"handle" => 1, "identity" => ident(2000, 2001, [])}},
+          after_first
+        )
+
+      assert after_second.identity == [uid: 2000, gids: [2001]]
+    end
+
+    test "keeps the primary group in the group list without duplicating it" do
+      {_, state} =
+        Handler.handle(
+          {:fsync, %{"handle" => 1, "identity" => ident(1000, 1001, [1001, 1002])}},
+          connected()
+        )
+
+      assert state.identity == [uid: 1000, gids: [1001, 1002]]
+    end
+
+    # uid 0 satisfies every check core makes, so a request whose identity did
+    # not survive must not be treated as root. `nobody` can do least.
+    test "falls back to nobody rather than root when the identity is missing" do
+      for args <- [
+            %{"handle" => 1},
+            %{"handle" => 1, "identity" => nil},
+            %{"handle" => 1, "identity" => %{"uid" => 0}},
+            %{"handle" => 1, "identity" => %{"uid" => 1, "gid" => 2, "gids" => "nope"}}
+          ] do
+        {_, state} = Handler.handle({:fsync, args}, connected())
+
+        assert state.identity == [uid: 65_534, gids: [65_533]],
+               "expected nobody for #{inspect(args)}"
+      end
+    end
+
+    test "a fresh connection starts as nobody" do
+      assert blank_state().identity == [uid: 65_534, gids: [65_533]]
     end
   end
 
