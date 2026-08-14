@@ -408,6 +408,16 @@ defmodule NeonFS.CLI.Handler do
   defdelegate get_volume(name), to: VolumesHandler
 
   @doc """
+  Which node each attached block volume is attached to.
+
+  ## Returns
+  - `{:ok, map}` - Volume id to node name, one entry per attached volume
+  - `{:error, reason}` - Error tuple
+  """
+  @spec block_attachments() :: {:ok, %{optional(String.t()) => String.t()}} | {:error, term()}
+  defdelegate block_attachments(), to: VolumesHandler
+
+  @doc """
   Mounts a volume at the specified path.
 
   Requires the neonfs_fuse application to be running on the local node.

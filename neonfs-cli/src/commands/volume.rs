@@ -3,7 +3,7 @@
 use crate::daemon::DaemonConnection;
 use crate::error::Result;
 use crate::output::{json, table, OutputFormat};
-use crate::term::types::{RotationStatus, VolumeInfo};
+use crate::term::types::{Attachment, RotationStatus, VolumeInfo};
 use crate::term::{
     extract_error, term_to_list, term_to_map, term_to_string, term_to_u64, unwrap_ok_tuple,
 };
@@ -884,7 +884,8 @@ impl VolumeCommand {
             .into_iter()
             .map(VolumeInfo::from_term)
             .collect();
-        let volumes = volumes?;
+        let mut volumes = volumes?;
+        Self::resolve_attachments(&mut volumes);
 
         match format {
             OutputFormat::Json => {
@@ -894,32 +895,100 @@ impl VolumeCommand {
                 let mut tbl = table::Table::new(vec![
                     "NAME".to_string(),
                     "SIZE".to_string(),
+                    "STORED".to_string(),
                     "USAGE".to_string(),
                     "FILES".to_string(),
                     "CHUNKS".to_string(),
+                    "ATTACHED".to_string(),
                     "DURABILITY".to_string(),
                     "ENCRYPTION".to_string(),
                 ]);
                 for vol in &volumes {
-                    let usage = match vol.max_size {
-                        Some(max) => VolumeInfo::usage_percent(vol.logical_size, max),
-                        None => "-".to_string(),
-                    };
-
-                    tbl.add_row(vec![
-                        vol.name.clone(),
-                        VolumeInfo::format_size(vol.logical_size),
-                        usage,
-                        vol.file_count.to_string(),
-                        vol.chunk_count.to_string(),
-                        vol.durability_string(),
-                        vol.encryption_mode.clone(),
-                    ]);
+                    tbl.add_row(Self::list_row(vol));
                 }
                 print!("{}", tbl.render()?);
             }
         }
         Ok(())
+    }
+
+    /// One `volume list` row.
+    ///
+    /// A block volume's usage, file count and chunk count are suppressed:
+    /// its device is sized to the volume's maximum and provisioned on
+    /// creation, so the percentage reads 100% for the volume's whole life
+    /// and the two counts describe the one device. `STORED` carries what the
+    /// cluster actually holds, which for a thin device is the figure worth
+    /// reading.
+    fn list_row(vol: &VolumeInfo) -> Vec<String> {
+        let (size, usage) = if vol.is_block() {
+            (vol.device_size(), "-".to_string())
+        } else {
+            let usage = match vol.max_size {
+                Some(max) => VolumeInfo::usage_percent(vol.logical_size, max),
+                None => "-".to_string(),
+            };
+            (vol.logical_size, usage)
+        };
+
+        vec![
+            vol.name.clone(),
+            VolumeInfo::format_size(size),
+            VolumeInfo::format_size(vol.physical_size),
+            usage,
+            VolumeInfo::counter(vol.file_count),
+            VolumeInfo::counter(vol.chunk_count),
+            vol.attachment
+                .as_ref()
+                .map_or("-", Attachment::label)
+                .to_string(),
+            vol.durability_string(),
+            vol.encryption_mode.clone(),
+        ]
+    }
+
+    /// Fill in each block volume's attachment state.
+    ///
+    /// The attachment is an exclusive namespace claim rather than a field of
+    /// the volume record, so reading it is a second round trip. It is made
+    /// only when the output contains a block volume, and a failure renders
+    /// as `unknown` rather than failing the command — a volume's identity
+    /// and size are still worth printing when the claim lookup is
+    /// unavailable.
+    fn resolve_attachments(volumes: &mut [VolumeInfo]) {
+        if !volumes.iter().any(VolumeInfo::is_block) {
+            return;
+        }
+
+        let attachments = Self::block_attachments();
+
+        for vol in volumes.iter_mut().filter(|vol| vol.is_block()) {
+            vol.attachment = Some(match attachments.as_ref() {
+                Err(_) => Attachment::Unknown,
+                Ok(nodes) => match nodes.get(&vol.id) {
+                    Some(node) => Attachment::AttachedTo(node.clone()),
+                    None => Attachment::Detached,
+                },
+            });
+        }
+    }
+
+    /// The node each attached block volume is attached to, keyed by volume id.
+    fn block_attachments() -> Result<HashMap<String, String>> {
+        let result = smol::block_on(async {
+            let mut conn = DaemonConnection::connect().await?;
+            conn.call("Elixir.NeonFS.CLI.Handler", "block_attachments", vec![])
+                .await
+        })?;
+
+        if let Some(err) = extract_error(&result) {
+            return Err(err);
+        }
+
+        term_to_map(&unwrap_ok_tuple(result)?)?
+            .into_iter()
+            .map(|(volume_id, node)| Ok((volume_id, term_to_string(&node)?)))
+            .collect()
     }
 
     fn durability_err() -> crate::error::CliError {
@@ -1841,73 +1910,118 @@ impl VolumeCommand {
 
         let data = unwrap_ok_tuple(result)?;
         let volume = VolumeInfo::from_term(data)?;
+        let mut volumes = vec![volume];
+        Self::resolve_attachments(&mut volumes);
+        let volume = &volumes[0];
 
         match format {
             OutputFormat::Json => {
-                println!("{}", json::format(&volume)?);
+                println!("{}", json::format(volume)?);
             }
             OutputFormat::Table => {
                 let mut tbl = table::Table::new(vec!["Property".to_string(), "Value".to_string()]);
-                tbl.add_row(vec!["Name".to_string(), volume.name.clone()]);
-                tbl.add_row(vec!["ID".to_string(), volume.id.clone()]);
-                tbl.add_row(vec!["Type".to_string(), volume.volume_type.clone()]);
-                tbl.add_row(vec![
-                    "Logical Size".to_string(),
-                    VolumeInfo::format_size(volume.logical_size),
-                ]);
-                if let Some(max) = volume.max_size {
-                    tbl.add_row(vec![
-                        "Size Quota".to_string(),
-                        format!(
-                            "{} ({} used)",
-                            VolumeInfo::format_size(max),
-                            VolumeInfo::usage_percent(volume.logical_size, max)
-                        ),
-                    ]);
-                }
-                tbl.add_row(vec![
-                    "Physical Size".to_string(),
-                    VolumeInfo::format_size(volume.physical_size),
-                ]);
-                tbl.add_row(vec!["Chunks".to_string(), volume.chunk_count.to_string()]);
-                tbl.add_row(vec!["Files".to_string(), volume.file_count.to_string()]);
-                if let Some(max) = volume.max_files {
-                    tbl.add_row(vec![
-                        "File Quota".to_string(),
-                        format!(
-                            "{} ({} used)",
-                            max,
-                            VolumeInfo::usage_percent(volume.file_count, max)
-                        ),
-                    ]);
-                }
-                tbl.add_row(vec!["Durability".to_string(), volume.durability_string()]);
-                tbl.add_row(vec![
-                    "Encryption".to_string(),
-                    volume.encryption_mode.clone(),
-                ]);
-                if volume.encryption_key_version > 0 {
-                    tbl.add_row(vec![
-                        "Key Version".to_string(),
-                        volume.encryption_key_version.to_string(),
-                    ]);
-                }
-                if let Some(ref rotation) = volume.rotation {
-                    tbl.add_row(vec![
-                        "Rotation".to_string(),
-                        format!(
-                            "v{} -> v{} ({}/{})",
-                            rotation.from_version,
-                            rotation.to_version,
-                            rotation.migrated,
-                            rotation.total_chunks
-                        ),
-                    ]);
+                for row in Self::show_rows(volume) {
+                    tbl.add_row(row);
                 }
                 print!("{}", tbl.render()?);
             }
         }
         Ok(())
+    }
+
+    /// The `Property`/`Value` rows `volume show` prints.
+    ///
+    /// A block volume is described in its own terms — the guest-visible
+    /// device size, what the cluster physically holds, and which node has it
+    /// attached. Its usage percentage, file count and chunk count are
+    /// suppressed because each can only ever read one value.
+    fn show_rows(volume: &VolumeInfo) -> Vec<Vec<String>> {
+        let mut rows = vec![
+            vec!["Name".to_string(), volume.name.clone()],
+            vec!["ID".to_string(), volume.id.clone()],
+            vec!["Type".to_string(), volume.volume_type.clone()],
+        ];
+
+        if volume.is_block() {
+            // Two size figures that differ wildly on a fresh device: the
+            // device is thin, so a 64 MB one costs a single deduped chunk
+            // until the guest writes to it.
+            rows.push(vec![
+                "Device Size".to_string(),
+                VolumeInfo::format_size(volume.device_size()),
+            ]);
+            rows.push(vec![
+                "Stored In Cluster".to_string(),
+                VolumeInfo::format_size(volume.physical_size),
+            ]);
+            rows.push(vec![
+                "Attached".to_string(),
+                volume
+                    .attachment
+                    .as_ref()
+                    .map_or("-", Attachment::label)
+                    .to_string(),
+            ]);
+        } else {
+            rows.push(vec![
+                "Logical Size".to_string(),
+                VolumeInfo::format_size(volume.logical_size),
+            ]);
+            if let Some(max) = volume.max_size {
+                rows.push(vec![
+                    "Size Quota".to_string(),
+                    format!(
+                        "{} ({} used)",
+                        VolumeInfo::format_size(max),
+                        VolumeInfo::usage_percent(volume.logical_size, max)
+                    ),
+                ]);
+            }
+            rows.push(vec![
+                "Physical Size".to_string(),
+                VolumeInfo::format_size(volume.physical_size),
+            ]);
+            rows.push(vec![
+                "Chunks".to_string(),
+                VolumeInfo::counter(volume.chunk_count),
+            ]);
+            rows.push(vec![
+                "Files".to_string(),
+                VolumeInfo::counter(volume.file_count),
+            ]);
+            if let (Some(max), Some(used)) = (volume.max_files, volume.file_count) {
+                rows.push(vec![
+                    "File Quota".to_string(),
+                    format!("{} ({} used)", max, VolumeInfo::usage_percent(used, max)),
+                ]);
+            }
+        }
+
+        rows.push(vec!["Durability".to_string(), volume.durability_string()]);
+        rows.push(vec![
+            "Encryption".to_string(),
+            volume.encryption_mode.clone(),
+        ]);
+        if volume.encryption_key_version > 0 {
+            rows.push(vec![
+                "Key Version".to_string(),
+                volume.encryption_key_version.to_string(),
+            ]);
+        }
+        if let Some(ref rotation) = volume.rotation {
+            rows.push(vec![
+                "Rotation".to_string(),
+                format!(
+                    "v{} -> v{} ({}/{})",
+                    rotation.from_version,
+                    rotation.to_version,
+                    rotation.migrated,
+                    rotation.total_chunks
+                ),
+            ]);
+        }
+
+        rows
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3099,5 +3213,165 @@ mod tests {
         } else {
             panic!("bool_val(false) should produce Atom(false)");
         }
+    }
+
+    fn volume(volume_type: &str) -> VolumeInfo {
+        VolumeInfo {
+            id: "vol_1".to_string(),
+            name: "blk64".to_string(),
+            volume_type: volume_type.to_string(),
+            logical_size: 64 * 1024 * 1024,
+            physical_size: 128 * 1024,
+            chunk_count: Some(512),
+            file_count: Some(1),
+            max_size: Some(64 * 1024 * 1024),
+            max_files: None,
+            durability_type: "replicate".to_string(),
+            durability_factor: 1,
+            encryption_mode: "none".to_string(),
+            encryption_key_version: 0,
+            rotation: None,
+            attachment: None,
+        }
+    }
+
+    fn block_volume() -> VolumeInfo {
+        let mut vol = volume("block");
+        vol.chunk_count = None;
+        vol.file_count = None;
+        vol
+    }
+
+    fn show_value(volume: &VolumeInfo, property: &str) -> Option<String> {
+        VolumeCommand::show_rows(volume)
+            .into_iter()
+            .find(|row| row[0] == property)
+            .map(|row| row[1].clone())
+    }
+
+    #[test]
+    fn list_row_suppresses_a_block_volume_s_usage_and_counters() {
+        let mut vol = block_volume();
+        vol.attachment = Some(Attachment::AttachedTo("neonfs_core@a".to_string()));
+
+        assert_eq!(
+            VolumeCommand::list_row(&vol),
+            vec![
+                "blk64".to_string(),
+                "64.0 MB".to_string(),
+                "128.0 KB".to_string(),
+                "-".to_string(),
+                "-".to_string(),
+                "-".to_string(),
+                "neonfs_core@a".to_string(),
+                "replicate:1".to_string(),
+                "none".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn list_row_still_reports_a_filesystem_volume_s_usage_and_counters() {
+        let vol = volume("fs");
+
+        assert_eq!(
+            VolumeCommand::list_row(&vol),
+            vec![
+                "blk64".to_string(),
+                "64.0 MB".to_string(),
+                "128.0 KB".to_string(),
+                "100%".to_string(),
+                "1".to_string(),
+                "512".to_string(),
+                "-".to_string(),
+                "replicate:1".to_string(),
+                "none".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn list_row_reports_an_unattached_block_volume_as_detached() {
+        let mut vol = block_volume();
+        vol.attachment = Some(Attachment::Detached);
+
+        assert_eq!(VolumeCommand::list_row(&vol)[6], "detached");
+    }
+
+    #[test]
+    fn list_row_reports_a_failed_attachment_lookup_as_unknown() {
+        let mut vol = block_volume();
+        vol.attachment = Some(Attachment::Unknown);
+
+        assert_eq!(VolumeCommand::list_row(&vol)[6], "unknown");
+    }
+
+    #[test]
+    fn show_describes_a_block_volume_by_device_size_stored_bytes_and_attachment() {
+        let mut vol = block_volume();
+        vol.attachment = Some(Attachment::AttachedTo("neonfs_core@a".to_string()));
+
+        assert_eq!(show_value(&vol, "Device Size").as_deref(), Some("64.0 MB"));
+        assert_eq!(
+            show_value(&vol, "Stored In Cluster").as_deref(),
+            Some("128.0 KB")
+        );
+        assert_eq!(
+            show_value(&vol, "Attached").as_deref(),
+            Some("neonfs_core@a")
+        );
+
+        for suppressed in [
+            "Size Quota",
+            "Logical Size",
+            "Physical Size",
+            "Chunks",
+            "Files",
+        ] {
+            assert_eq!(
+                show_value(&vol, suppressed),
+                None,
+                "expected {suppressed} to be suppressed for a block volume"
+            );
+        }
+    }
+
+    #[test]
+    fn show_leaves_a_filesystem_volume_s_rows_alone() {
+        let vol = volume("fs");
+
+        assert_eq!(
+            show_value(&vol, "Size Quota").as_deref(),
+            Some("64.0 MB (100% used)")
+        );
+        assert_eq!(show_value(&vol, "Chunks").as_deref(), Some("512"));
+        assert_eq!(show_value(&vol, "Files").as_deref(), Some("1"));
+        assert_eq!(show_value(&vol, "Device Size"), None);
+        assert_eq!(show_value(&vol, "Attached"), None);
+    }
+
+    #[test]
+    fn json_omits_a_block_volume_s_counters_and_names_its_attachment() {
+        let mut vol = block_volume();
+        vol.attachment = Some(Attachment::Detached);
+
+        let json: serde_json::Value = serde_json::from_str(&json::format(&vol).unwrap()).unwrap();
+
+        assert!(json.get("chunk_count").is_none());
+        assert!(json.get("file_count").is_none());
+        assert_eq!(json["attachment"], "detached");
+        assert_eq!(json["max_size"], 64 * 1024 * 1024);
+        assert_eq!(json["physical_size"], 128 * 1024);
+    }
+
+    #[test]
+    fn json_keeps_a_filesystem_volume_s_counters_and_omits_attachment() {
+        let vol = volume("fs");
+
+        let json: serde_json::Value = serde_json::from_str(&json::format(&vol).unwrap()).unwrap();
+
+        assert_eq!(json["chunk_count"], 512);
+        assert_eq!(json["file_count"], 1);
+        assert!(json.get("attachment").is_none());
     }
 }

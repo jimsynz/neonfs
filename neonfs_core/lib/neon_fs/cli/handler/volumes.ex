@@ -20,11 +20,13 @@ defmodule NeonFS.CLI.Handler.Volumes do
     ACLManager,
     AuditLog,
     Authorise,
+    BlockAttachment,
     BlockBacking,
     DriveRegistry,
     KeyManager,
     KeyRotation,
     MetadataStateMachine,
+    NamespaceCoordinator,
     RaSupervisor,
     Volume,
     VolumeACL,
@@ -254,6 +256,33 @@ defmodule NeonFS.CLI.Handler.Volumes do
   end
 
   @doc """
+  Which node each attached block volume is attached to, keyed by volume id.
+
+  A volume with no entry is unattached. The attachment record is an
+  exclusive claim on `NeonFS.Core.BlockAttachment.path/1`, held by a pid on
+  the attached node, so the holder's node is the answer.
+
+  ## Returns
+  - `{:ok, map}` - Volume id to node name, one entry per attached volume
+  - `{:error, reason}` - Error tuple
+  """
+  @spec block_attachments() :: {:ok, %{optional(String.t()) => String.t()}} | {:error, term()}
+  def block_attachments do
+    set_cli_metadata()
+
+    with :ok <- require_cluster(),
+         {:ok, claims} <-
+           NamespaceCoordinator.list_claims(
+             NamespaceCoordinator,
+             BlockAttachment.path_prefix()
+           ) do
+      {:ok, claims |> Enum.flat_map(&attachment_entry/1) |> Map.new()}
+    else
+      {:error, reason} -> {:error, wrap_error(reason)}
+    end
+  end
+
+  @doc """
   Starts key rotation for a volume.
 
   ## Parameters
@@ -328,6 +357,16 @@ defmodule NeonFS.CLI.Handler.Volumes do
   end
 
   # Private
+
+  # The coordinator's prefix scan can return a claim whose path merely
+  # starts with the prefix, so a path that is not an attachment is dropped
+  # rather than reported under a truncated volume id.
+  defp attachment_entry({_claim_id, %{path: path, holder: holder}}) when is_pid(holder) do
+    case BlockAttachment.volume_id(path) do
+      {:ok, volume_id} -> [{volume_id, Atom.to_string(node(holder))}]
+      :error -> []
+    end
+  end
 
   defp volume_to_map(%Volume{} = volume) do
     %{

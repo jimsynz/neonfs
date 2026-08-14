@@ -540,7 +540,49 @@ impl CordonReason {
     }
 }
 
+/// Whether a block volume is attached, and to which node.
+///
+/// Only block volumes have one — a filesystem volume is served by every
+/// interface node at once and has nothing to attach.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Attachment {
+    /// No node holds the volume's attachment claim.
+    Detached,
+    /// The named node holds it.
+    AttachedTo(String),
+    /// The claim lookup itself failed, so attachment is not known. Reported
+    /// rather than guessed at: rendering an unavailable lookup as "detached"
+    /// would invite a second attachment of a volume that already has one.
+    Unknown,
+}
+
+impl Attachment {
+    /// One-word rendering, shared by the table and JSON output.
+    pub fn label(&self) -> &str {
+        match self {
+            Attachment::Detached => "detached",
+            Attachment::AttachedTo(node) => node,
+            Attachment::Unknown => "unknown",
+        }
+    }
+}
+
+impl Serialize for Attachment {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.label())
+    }
+}
+
 /// Volume information response
+///
+/// A block volume's device is sized to the volume's maximum and provisioned
+/// on creation, so its logical size, usage percentage, file count and chunk
+/// count can only ever read one value each. Those that carry no information
+/// are left unset, and the CLI renders the absence rather than a figure an
+/// operator would read as a warning.
 #[derive(Debug, Serialize)]
 pub struct VolumeInfo {
     pub id: String,
@@ -550,8 +592,12 @@ pub struct VolumeInfo {
     pub volume_type: String,
     pub logical_size: u64,
     pub physical_size: u64,
-    pub chunk_count: u64,
-    pub file_count: u64,
+    /// Unset for a block volume, whose chunks are its device's.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chunk_count: Option<u64>,
+    /// Unset for a block volume, whose only file is its device.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_count: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_size: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -562,6 +608,10 @@ pub struct VolumeInfo {
     pub encryption_key_version: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rotation: Option<RotationInfo>,
+    /// Set for block volumes only, and filled in after decoding — the
+    /// attachment lives in a namespace claim rather than the volume record.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attachment: Option<Attachment>,
 }
 
 /// Embedded rotation info within a volume
@@ -577,6 +627,13 @@ impl VolumeInfo {
     /// Parse from Erlang term (map)
     pub fn from_term(term: Term) -> Result<Self> {
         let map = term_to_map(&term)?;
+
+        let volume_type = map
+            .get("type")
+            .map(term_to_string)
+            .transpose()?
+            .unwrap_or_else(|| "fs".to_string());
+        let is_block = volume_type == "block";
 
         // Extract durability config
         let durability = term_to_map(map.get("durability").ok_or_else(|| {
@@ -606,22 +663,27 @@ impl VolumeInfo {
             physical_size: term_to_u64(map.get("physical_size").ok_or_else(|| {
                 CliError::TermConversionError("Missing 'physical_size' field".to_string())
             })?)?,
-            chunk_count: term_to_u64(map.get("chunk_count").ok_or_else(|| {
-                CliError::TermConversionError("Missing 'chunk_count' field".to_string())
-            })?)?,
+            chunk_count: if is_block {
+                None
+            } else {
+                Some(term_to_u64(map.get("chunk_count").ok_or_else(|| {
+                    CliError::TermConversionError("Missing 'chunk_count' field".to_string())
+                })?)?)
+            },
             // `file_count` is absent from older core nodes; default to 0.
-            file_count: map
-                .get("file_count")
-                .map(term_to_u64)
-                .transpose()?
-                .unwrap_or(0),
+            file_count: if is_block {
+                None
+            } else {
+                Some(
+                    map.get("file_count")
+                        .map(term_to_u64)
+                        .transpose()?
+                        .unwrap_or(0),
+                )
+            },
+            volume_type,
             // Quotas are omitted from the term when unlimited (nil), so an
             // absent key decodes as `None` = no limit.
-            volume_type: map
-                .get("type")
-                .map(term_to_string)
-                .transpose()?
-                .unwrap_or_else(|| "fs".to_string()),
             max_size: map.get("max_size").map(term_to_u64).transpose()?,
             max_files: map.get("max_files").map(term_to_u64).transpose()?,
             durability_type: term_to_string(durability.get("type").ok_or_else(|| {
@@ -633,7 +695,29 @@ impl VolumeInfo {
             encryption_mode,
             encryption_key_version,
             rotation,
+            attachment: None,
         })
+    }
+
+    /// Whether this volume is a single fixed-size device rather than a
+    /// filesystem namespace.
+    pub fn is_block(&self) -> bool {
+        self.volume_type == "block"
+    }
+
+    /// The guest-visible capacity of a block volume's device.
+    ///
+    /// The device is sized to the volume's maximum, so the quota *is* the
+    /// device size; `logical_size` is the fallback for a daemon that served
+    /// the volume without one.
+    pub fn device_size(&self) -> u64 {
+        self.max_size.unwrap_or(self.logical_size)
+    }
+
+    /// A counter the daemon reported, or `-` where it carries no
+    /// information for this volume's type.
+    pub fn counter(value: Option<u64>) -> String {
+        value.map_or_else(|| "-".to_string(), |count| count.to_string())
     }
 
     /// Format size in human-readable format
@@ -1346,8 +1430,8 @@ mod tests {
             volume_type: "fs".to_string(),
             logical_size: 0,
             physical_size: 0,
-            chunk_count: 0,
-            file_count: 0,
+            chunk_count: Some(0),
+            file_count: Some(0),
             max_size: None,
             max_files: None,
             durability_type: "replicate".to_string(),
@@ -1355,6 +1439,7 @@ mod tests {
             encryption_mode: "none".to_string(),
             encryption_key_version: 0,
             rotation: None,
+            attachment: None,
         };
         assert_eq!(volume.durability_string(), "replicate:3");
     }
