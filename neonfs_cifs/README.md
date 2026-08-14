@@ -75,19 +75,24 @@ NeonFS does model POSIX uid/gid ownership: `FileMeta` carries `uid`, `gid` and
 extended ACL entries against a caller's uid and supplementary groups. `stat`
 reports a file's real ownership, so smbd's own access check sees it.
 
-Two pieces are still missing, and together they are why a share needs the
-`admin users` recipe below. The VFS `fchown` returns `:enosys`, so ownership
-cannot be changed over SMB — and any file created before ownership reached the
-wire carries `uid: 0`, which there is currently no way to correct. More
-importantly the bridge does not yet send the SMB session's identity with a
-request, so core cannot check one against it; every operation arrives
-unattributed.
+The bridge sends the SMB session's Unix identity with every request — re-read
+from the session on each operation, not cached at tree connect — so core
+evaluates each one against the uid and groups that made it. `fchown` is
+implemented, so ownership can be changed over SMB.
 
-Until both land, a volume root reporting `uid=0, gid=0, mode=0o40755` puts an
-SMB client authenticating as any non-root user in POSIX "other", which
-`0o40755` grants only `r-x`. smbd applies that check itself — in its own
-NT-ACL/POSIX access layer, before it ever calls the VFS — and refuses a create
-in the share root with `NT_STATUS_ACCESS_DENIED`.
+One thing to know when adopting this on an existing volume: any file created
+before ownership reached the wire carries `uid: 0`, so it reads as root-owned
+until chowned. A volume root left at `uid=0, gid=0, mode=0o40755` puts an SMB
+client authenticating as any non-root user in POSIX "other", which `0o40755`
+grants only `r-x`. smbd applies that check itself — in its own NT-ACL/POSIX
+access layer, before it ever calls the VFS — and refuses a create in the share
+root with `NT_STATUS_ACCESS_DENIED`. Chown the volume root to the principal that
+should own it, or grant the group write access.
+
+Two calls still reach core without an identity, so they are not authorised
+per-user: listing a directory (`NeonFS.Core.list_dir/2` takes no identity — the
+directory itself is authorised, its listing is not) and taking a pin when opening
+a file. The NFS interface has the same gap for directory listings.
 
 The trust boundary for a NeonFS share is the bridge socket plus the share's own
 SMB authentication, **not** smbd's POSIX layer, so the share tells smbd to skip

@@ -46,7 +46,7 @@ defmodule NeonFS.CIFS.LiveListenerTest do
     defp reply_for({:fstat, %{"handle" => _}}, state), do: {{:ok, %{stat: stat()}}, state}
 
     defp reply_for({:fchmod, %{"handle" => _, "mode" => _}}, state), do: {{:ok, %{}}, state}
-    defp reply_for({:fchown, _}, state), do: {{:error, :enosys}, state}
+    defp reply_for({:fchown, _}, state), do: {{:ok, %{}}, state}
     defp reply_for({:fntimes, _}, state), do: {{:ok, %{}}, state}
 
     defp reply_for({:openat, %{"path" => "__eexist__"}}, state), do: {{:error, :eexist}, state}

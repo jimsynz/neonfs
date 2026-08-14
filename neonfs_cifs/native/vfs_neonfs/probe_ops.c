@@ -57,9 +57,11 @@ int nw_probe_run(nw_conn *conn) {
   PCHECK(nw_fchmod(conn, handle, 0755) == 0, "fchmod");
   PCHECK(nw_fntimes(conn, handle, 10, 20) == 0, "fntimes");
 
-  /* fchown is :enosys on the server side. */
-  PCHECK(nw_fchown(conn, handle, 0, 0) == -1, "fchown returns -1");
-  PCHECK(errno == ENOSYS, "fchown errno ENOSYS");
+  PCHECK(nw_fchown(conn, handle, 1000, 1001) == 0, "fchown");
+  /* `-1` in both fields is POSIX for "change neither", and is what smbd sends
+   * when it is only setting one of them. It must still succeed. */
+  PCHECK(nw_fchown(conn, handle, (uint32_t)-1, (uint32_t)-1) == 0,
+         "fchown leaves both unchanged");
 
   PCHECK(nw_pread(conn, handle, 0, 5, rbuf, sizeof(rbuf), &rlen) == 0, "pread");
   PCHECK(rlen == 5 && memcmp(rbuf, "hello", 5) == 0, "pread.data");

@@ -203,6 +203,85 @@ defmodule NeonFS.CIFS.HandlerTest do
   # it arrives, on one op per shape of core call — path-keyed, id-keyed, and one
   # where it is merged into an existing opts list rather than appended as an
   # argument.
+  describe "fchown" do
+    test "sets ownership through the same path fchmod uses" do
+      {handle, state} = open_file(connected(), "/p")
+
+      expect(NeonFS.Client, :core_call, fn NeonFS.Core,
+                                           :update_file_meta_by_id,
+                                           ["vol-a", "object:/p", updates, identity] ->
+        assert Keyword.get(updates, :uid) == 1000
+        assert Keyword.get(updates, :gid) == 1001
+        assert identity == [uid: 7, gids: [8]]
+        {:ok, %{}}
+      end)
+
+      {reply, _} =
+        Handler.handle(
+          {:fchown,
+           %{"handle" => handle, "uid" => 1000, "gid" => 1001, "identity" => ident(7, 8, [])}},
+          state
+        )
+
+      assert {:ok, %{}} == reply
+    end
+
+    # `-1` is POSIX for "leave this one alone", and arrives unsigned. Writing it
+    # through would set ownership to 4294967295.
+    test "drops a field the request leaves unchanged" do
+      {handle, state} = open_file(connected(), "/p")
+
+      expect(NeonFS.Client, :core_call, fn NeonFS.Core,
+                                           :update_file_meta_by_id,
+                                           ["vol-a", "object:/p", updates | _] ->
+        assert updates == [gid: 1001]
+        {:ok, %{}}
+      end)
+
+      {reply, _} =
+        Handler.handle(
+          {:fchown, %{"handle" => handle, "uid" => 0xFFFFFFFF, "gid" => 1001}},
+          state
+        )
+
+      assert {:ok, %{}} == reply
+    end
+
+    # smbd sends this when it is setting neither field. Reaching core with an
+    # empty update would be a write that changes nothing.
+    test "changing neither field succeeds without calling core" do
+      {handle, state} = open_file(connected(), "/p")
+
+      {reply, _} =
+        Handler.handle(
+          {:fchown, %{"handle" => handle, "uid" => 0xFFFFFFFF, "gid" => 0xFFFFFFFF}},
+          state
+        )
+
+      assert {:ok, %{}} == reply
+    end
+
+    test "reports a core refusal as an errno" do
+      {handle, state} = open_file(connected(), "/p")
+
+      expect(NeonFS.Client, :core_call, fn NeonFS.Core, :update_file_meta_by_id, _args ->
+        {:error, NeonFS.Error.PermissionDenied.exception(operation: :write, uid: 7)}
+      end)
+
+      {reply, _} =
+        Handler.handle({:fchown, %{"handle" => handle, "uid" => 1000, "gid" => 1001}}, state)
+
+      assert {:error, :eacces} == reply
+    end
+
+    test "an unknown handle is ebadf" do
+      {reply, _} =
+        Handler.handle({:fchown, %{"handle" => 9999, "uid" => 1, "gid" => 2}}, connected())
+
+      assert {:error, :ebadf} == reply
+    end
+  end
+
   describe "identity reaches core" do
     test "on a path-keyed lookup" do
       expect(NeonFS.Client, :core_call, fn NeonFS.Core, :get_file_meta, ["vol-a", "/foo", opts] ->
@@ -529,18 +608,6 @@ defmodule NeonFS.CIFS.HandlerTest do
       {reply, _} = Handler.handle({:fstat, %{"handle" => handle}}, state)
 
       assert {:ok, %{stat: _}} = reply
-    end
-
-    test "fchown is :enosys until the IAM bridge lands" do
-      {handle, state} = open_file(connected(), "/p")
-
-      {reply, _} =
-        Handler.handle(
-          {:fchown, %{"handle" => handle, "uid" => 1000, "gid" => 1000}},
-          state
-        )
-
-      assert {:error, :enosys} == reply
     end
 
     test "fntimes updates atime+mtime via update_file_meta" do

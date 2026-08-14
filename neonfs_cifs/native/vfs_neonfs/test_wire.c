@@ -395,8 +395,6 @@ static int run_responder(int fd) {
       reply_readdir(&x);
     } else if (strcmp(op, "disk_free") == 0 || strcmp(op, "fstatvfs") == 0) {
       reply_statvfs(&x);
-    } else if (strcmp(op, "fchown") == 0) {
-      reply_error(&x, "enosys");
     } else {
       reply_ok_empty(&x);
     }

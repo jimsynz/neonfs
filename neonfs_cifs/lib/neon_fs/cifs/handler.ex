@@ -59,6 +59,10 @@ defmodule NeonFS.CIFS.Handler do
   @nobody_uid 65_534
   @nobody_gid 65_533
 
+  # POSIX `chown` uses `-1` for "leave this field alone"; the wire carries
+  # unsigned values, so it arrives as this.
+  @chown_unchanged 0xFFFFFFFF
+
   @typedoc "Per-connection state — see `NeonFS.CIFS.ConnectionHandler`."
   @type state :: %{
           required(:volume) => String.t() | nil,
@@ -194,13 +198,16 @@ defmodule NeonFS.CIFS.Handler do
     end)
   end
 
-  defp do_handle(:fchown, _args, state) do
-    # NeonFS volumes do not yet honour POSIX uid/gid ownership; ACLs
-    # ride on the IAM principal model. Returning `:enosys`
-    # keeps Samba from mis-applying inherited ACLs based on a
-    # spoofed uid/gid until the IAM bridge lands.
-    {{:error, :enosys}, state}
-  end
+  # Routed through the same `set_attrs` path `fchmod` uses, so ownership and
+  # mode changes are authorised and applied identically.
+  #
+  # `-1` means "leave this one alone" in POSIX `chown`, and arrives here as
+  # `0xFFFFFFFF` because the wire carries unsigned values. Sending it through as
+  # a uid would set ownership to 4294967295 — so an unchanged field is dropped
+  # from the update rather than written. A request that changes neither is
+  # answered without touching core at all.
+  defp do_handle(:fchown, %{"handle" => handle} = args, state),
+    do: with_any_handle(handle, state, &apply_chown(&1, chown_updates(args), state))
 
   defp do_handle(:fntimes, %{"handle" => handle, "atime" => atime, "mtime" => mtime}, state)
        when is_integer(atime) and is_integer(mtime) do
@@ -435,6 +442,26 @@ defmodule NeonFS.CIFS.Handler do
     end
   catch
     :exit, _ -> {:ok, nil}
+  end
+
+  # `-1` means "leave this one alone" in POSIX `chown`, and arrives as
+  # `0xFFFFFFFF` because the wire carries unsigned values. Passing it through as
+  # a uid would set ownership to 4294967295, so an unchanged field is dropped
+  # from the update rather than written.
+  defp chown_updates(args) do
+    [uid: Map.get(args, "uid"), gid: Map.get(args, "gid")]
+    |> Enum.reject(fn {_key, value} -> not is_integer(value) or value == @chown_unchanged end)
+  end
+
+  # A request that changes neither field succeeds without reaching core: an
+  # empty update is a write that changes nothing.
+  defp apply_chown(_target, [], state), do: {{:ok, %{}}, state}
+
+  defp apply_chown(target, updates, state) do
+    case set_attrs(target, updates, identity_opts(state)) do
+      {:ok, _meta} -> {{:ok, %{}}, state}
+      {:error, reason} -> {{:error, errno_for(reason)}, state}
+    end
   end
 
   defp with_volume(%{volume: nil} = state, _fun), do: {{:error, :enotconn}, state}
