@@ -39,6 +39,13 @@ defmodule NeonFS.TestSupport.Smbd do
   # test's `private dir` and never touching the system passdb.
   @smb_password "neonfs-test-pw"
 
+  @doc """
+  The password the server's account was created with, so a test can present a
+  deliberately wrong one against a known-good baseline.
+  """
+  @spec password() :: String.t()
+  def password, do: @smb_password
+
   @typedoc """
   A running server. `port` is where `smbclient` should dial;
   `os_pid` is the process group `stop/1` signals.
@@ -201,6 +208,14 @@ defmodule NeonFS.TestSupport.Smbd do
   Returns `{:ok, output}` when `smbclient` exits zero and
   `{:error, {status, output}}` otherwise; several tests are about the
   failure, so a non-zero exit is a result rather than a raise.
+
+  ## Options
+
+    * `:share` — connect to a different share on the same server.
+    * `:credentials` — a `user%password` string, for asserting what an
+      unauthenticated or wrongly-authenticated client gets. Defaults to the
+      account the server was started with.
+    * `:extra_args` — appended to the `smbclient` argv.
   """
   @spec client(t(), String.t(), keyword()) ::
           {:ok, String.t()} | {:error, {non_neg_integer(), String.t()}}
@@ -213,7 +228,7 @@ defmodule NeonFS.TestSupport.Smbd do
         "-p",
         Integer.to_string(server.port),
         "-U",
-        "#{server.user}%#{@smb_password}",
+        Keyword.get(opts, :credentials, "#{server.user}%#{@smb_password}"),
         "-c",
         commands
       ] ++ Keyword.get(opts, :extra_args, [])
