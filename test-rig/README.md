@@ -283,6 +283,25 @@ mode the replication step exercises multi-node formation. Steps whose
 preconditions aren't met (e.g. replication on a
 single node, or a volume that failed to create) are reported `SKIP`.
 
+### In CI
+
+The `rig_acceptance` job in `.forgejo/workflows/e2e-nightly.yml` boots a
+three-node cluster on the KVM-capable `jeb` runner and runs `./acceptance multi
+3` nightly. It is not a required check and does not run per push — a failure
+there is a signal to investigate rather than a merge blocker, which is the same
+posture the other end-to-end jobs carry.
+
+Two things follow from the suite being CI-visible. **Step ordering is
+load-bearing**: `s_block_fio_verify` writes random data across the device
+including its superblock, so it runs before the filesystem step, and a
+reordering surfaces as a failure in the wrong step. And **the `SKIP` contract
+is what keeps the job honest** rather than green by omission — the CIFS steps
+skip in that job because the VFS module needs a Samba tree it does not build,
+which the `cifs_smbd` job covers instead.
+
+Per-VM serial consoles are uploaded as a `rig-acceptance-<sha>` artifact, since
+a node that never came up says why there and nowhere else.
+
 ## Benchmarks
 
 `./neonfs-rig bench` runs a [benchee](https://hex.pm/packages/benchee)-based
