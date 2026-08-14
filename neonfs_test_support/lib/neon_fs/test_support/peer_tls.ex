@@ -57,8 +57,21 @@ defmodule NeonFS.TestSupport.PeerTLS do
 
     File.write!(Path.join(tls_dir, "node-local.crt"), TLS.encode_cert(cert))
     File.write!(Path.join(tls_dir, "node-local.key"), TLS.encode_key(key))
-    File.write!(Path.join(tls_dir, "ca_bundle.crt"), TLS.encode_cert(ca_cert))
     File.write!(Path.join(tls_dir, "ssl_dist.conf"), ssl_dist_conf(tls_dir))
+
+    # `ca_bundle.crt` is what distribution actually verifies against, and
+    # `local-ca.crt` is where it comes from: once the node initialises or
+    # joins, `NeonFS.TLSDistConfig.regenerate_ca_bundle/1` rebuilds the bundle
+    # from `local-ca.crt` + `incoming-ca.crt` + `ca.crt`. Writing only the
+    # bundle would put this CA in the node's trust store until the moment the
+    # cluster forms and then silently drop it — leaving a node that no longer
+    # trusts the CLI certificate issued from the same CA, which surfaces as
+    # `received fatal alert: UnknownCA` on the client side.
+    #
+    # A real install writes both (`packaging/systemd/neonfs-tls-common.sh`),
+    # which is why regeneration is lossless there. Same here.
+    File.write!(Path.join(tls_dir, "local-ca.crt"), TLS.encode_cert(ca_cert))
+    File.write!(Path.join(tls_dir, "ca_bundle.crt"), TLS.encode_cert(ca_cert))
 
     :ok
   end
@@ -90,6 +103,43 @@ defmodule NeonFS.TestSupport.PeerTLS do
     File.write!(Path.join(tls_dir, "ssl_dist.conf"), cli_ssl_dist_conf(tls_dir))
 
     tls_dir
+  end
+
+  @doc """
+  Adds a node's cluster CA to the CLI's trust store, once the cluster has one.
+
+  Needed because a node stops presenting the certificate it booted with.
+  `NeonFS.TLSDistConfig.regenerate_config/1` rewrites `ssl_dist.conf` after
+  `cluster init` to present the cluster-signed `node.crt` *alone* — the local
+  certificate is deliberately not kept as a fallback, because OTP's TLS 1.3
+  `certs_keys` selection cannot be relied on to pick the cluster one. So a
+  CLI that trusts only the CA this module minted can no longer validate the
+  node, and `neonfs-cli` reports:
+
+      Error: TLS handshake failed: invalid peer certificate: UnknownIssuer
+
+  A real install does not hit this because everything lives in one directory
+  (`/var/lib/neonfs/tls`), so the CLI's root store picks up `ca.crt` beside
+  its own `local-ca.crt` — which is exactly what `neonfs-cli/src/tls.rs` means
+  by "also add cluster CA if present". The harness keeps the two apart, so
+  that the CLI cannot read a node's private key, and therefore has to carry
+  the trust anchor across itself.
+
+  Returns `:ok` when the CA was copied and `{:error, :no_cluster_ca}` when the
+  node has not initialised one, rather than succeeding silently — an absent
+  anchor surfaces later as the handshake error above, which is a long way from
+  the cause.
+  """
+  @spec add_cluster_ca(String.t(), String.t()) :: :ok | {:error, :no_cluster_ca}
+  def add_cluster_ca(node_tls_dir, cli_tls_dir) do
+    source = Path.join(node_tls_dir, "ca.crt")
+
+    if File.exists?(source) do
+      File.cp!(source, Path.join(cli_tls_dir, "ca.crt"))
+      :ok
+    else
+      {:error, :no_cluster_ca}
+    end
   end
 
   defp cli_ssl_dist_conf(tls_dir) do
