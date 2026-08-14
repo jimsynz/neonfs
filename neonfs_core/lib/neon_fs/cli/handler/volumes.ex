@@ -256,14 +256,14 @@ defmodule NeonFS.CLI.Handler.Volumes do
   end
 
   @doc """
-  Which node each attached block volume is attached to, keyed by volume id.
+  Which node each attached block volume is attached to, keyed by volume name.
 
   A volume with no entry is unattached. The attachment record is an
   exclusive claim on `NeonFS.Core.BlockAttachment.path/1`, held by a pid on
   the attached node, so the holder's node is the answer.
 
   ## Returns
-  - `{:ok, map}` - Volume id to node name, one entry per attached volume
+  - `{:ok, map}` - Volume name to node name, one entry per attached volume
   - `{:error, reason}` - Error tuple
   """
   @spec block_attachments() :: {:ok, %{optional(String.t()) => String.t()}} | {:error, term()}
@@ -360,10 +360,10 @@ defmodule NeonFS.CLI.Handler.Volumes do
 
   # The coordinator's prefix scan can return a claim whose path merely
   # starts with the prefix, so a path that is not an attachment is dropped
-  # rather than reported under a truncated volume id.
+  # rather than reported under a truncated volume name.
   defp attachment_entry({_claim_id, %{path: path, holder: holder}}) when is_pid(holder) do
-    case BlockAttachment.volume_id(path) do
-      {:ok, volume_id} -> [{volume_id, Atom.to_string(node(holder))}]
+    case BlockAttachment.volume_name(path) do
+      {:ok, volume_name} -> [{volume_name, Atom.to_string(node(holder))}]
       :error -> []
     end
   end

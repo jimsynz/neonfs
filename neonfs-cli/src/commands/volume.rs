@@ -963,17 +963,30 @@ impl VolumeCommand {
         let attachments = Self::block_attachments();
 
         for vol in volumes.iter_mut().filter(|vol| vol.is_block()) {
-            vol.attachment = Some(match attachments.as_ref() {
-                Err(_) => Attachment::Unknown,
-                Ok(nodes) => match nodes.get(&vol.id) {
-                    Some(node) => Attachment::AttachedTo(node.clone()),
-                    None => Attachment::Detached,
-                },
-            });
+            vol.attachment = Some(Self::attachment_for(vol, attachments.as_ref()));
         }
     }
 
-    /// The node each attached block volume is attached to, keyed by volume id.
+    /// `vol`'s attachment, read out of the claim map the daemon returned.
+    ///
+    /// Keyed by volume **name**, not id: the claim is taken by the CSI
+    /// controller under the CSI volume id, and that is the volume's NeonFS
+    /// name. Keying this on the volume's uuid never matches, and the miss is
+    /// indistinguishable from a volume nobody has attached.
+    fn attachment_for(
+        vol: &VolumeInfo,
+        attachments: std::result::Result<&HashMap<String, String>, &crate::error::CliError>,
+    ) -> Attachment {
+        match attachments {
+            Err(_) => Attachment::Unknown,
+            Ok(nodes) => match nodes.get(&vol.name) {
+                Some(node) => Attachment::AttachedTo(node.clone()),
+                None => Attachment::Detached,
+            },
+        }
+    }
+
+    /// The node each attached block volume is attached to, keyed by volume name.
     fn block_attachments() -> Result<HashMap<String, String>> {
         let result = smol::block_on(async {
             let mut conn = DaemonConnection::connect().await?;
@@ -987,7 +1000,7 @@ impl VolumeCommand {
 
         term_to_map(&unwrap_ok_tuple(result)?)?
             .into_iter()
-            .map(|(volume_id, node)| Ok((volume_id, term_to_string(&node)?)))
+            .map(|(volume_name, node)| Ok((volume_name, term_to_string(&node)?)))
             .collect()
     }
 
@@ -3287,6 +3300,37 @@ mod tests {
                 "replicate:1".to_string(),
                 "none".to_string(),
             ]
+        );
+    }
+
+    // The claim is taken under the CSI volume id, which is the volume's
+    // NeonFS name. Keying this on the volume's uuid never matches, and the
+    // miss is indistinguishable from a volume nobody has attached.
+    #[test]
+    fn attachment_is_keyed_on_the_volume_name_not_its_id() {
+        let vol = block_volume();
+        let nodes = HashMap::from([(vol.name.clone(), "neonfs_core@a".to_string())]);
+
+        assert_eq!(
+            VolumeCommand::attachment_for(&vol, Ok(&nodes)),
+            Attachment::AttachedTo("neonfs_core@a".to_string())
+        );
+
+        let by_id = HashMap::from([(vol.id.clone(), "neonfs_core@a".to_string())]);
+        assert_eq!(
+            VolumeCommand::attachment_for(&vol, Ok(&by_id)),
+            Attachment::Detached
+        );
+    }
+
+    #[test]
+    fn a_failed_attachment_lookup_is_unknown_rather_than_detached() {
+        let vol = block_volume();
+        let err = crate::error::CliError::InvalidArgument("boom".to_string());
+
+        assert_eq!(
+            VolumeCommand::attachment_for(&vol, Err(&err)),
+            Attachment::Unknown
         );
     }
 

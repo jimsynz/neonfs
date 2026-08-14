@@ -765,13 +765,15 @@ defmodule NeonFS.CLI.HandlerTest do
       assert attachments == %{}
     end
 
-    test "names the node holding a volume's attachment claim" do
-      volume_id = "vol_#{:rand.uniform(999_999)}"
+    # Keyed by name rather than id, because that is what the CSI controller
+    # takes the claim under — a CSI `volume_id` is the NeonFS volume name.
+    test "names the node holding a volume's attachment claim, keyed by volume name" do
+      volume_name = "blk-#{:rand.uniform(999_999)}"
 
       assert {:ok, _claim_id} =
-               NamespaceCoordinator.claim_path(BlockAttachment.path(volume_id), :exclusive)
+               NamespaceCoordinator.claim_path(BlockAttachment.path(volume_name), :exclusive)
 
-      assert {:ok, %{^volume_id => node_name}} = Handler.block_attachments()
+      assert {:ok, %{^volume_name => node_name}} = Handler.block_attachments()
       assert node_name == Atom.to_string(node())
     end
 
@@ -783,15 +785,15 @@ defmodule NeonFS.CLI.HandlerTest do
     end
 
     test "drops a volume once its claim is released" do
-      volume_id = "vol_#{:rand.uniform(999_999)}"
+      volume_name = "blk-#{:rand.uniform(999_999)}"
 
       {:ok, claim_id} =
-        NamespaceCoordinator.claim_path(BlockAttachment.path(volume_id), :exclusive)
+        NamespaceCoordinator.claim_path(BlockAttachment.path(volume_name), :exclusive)
 
       assert :ok = NamespaceCoordinator.release(claim_id)
 
       assert {:ok, attachments} = Handler.block_attachments()
-      refute Map.has_key?(attachments, volume_id)
+      refute Map.has_key?(attachments, volume_name)
     end
   end
 
