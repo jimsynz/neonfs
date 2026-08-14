@@ -121,13 +121,6 @@ static int recv_frame(nw_conn *conn, char **buf_out, int *len_out) {
 /* ------------------------------------------------------------------ */
 
 /* Open a request: version, `{op, args_map}` tuple head, args-map head. */
-static int req_open(ei_x_buff *x, const char *op, int map_arity) {
-  if (ei_x_new_with_version(x) != 0) return -1;
-  if (ei_x_encode_tuple_header(x, 2) != 0) return -1;
-  if (ei_x_encode_atom(x, op) != 0) return -1;
-  return ei_x_encode_map_header(x, map_arity);
-}
-
 static int put_str(ei_x_buff *x, const char *key, const char *val) {
   if (ei_x_encode_binary(x, key, (long)strlen(key)) != 0) return -1;
   return ei_x_encode_binary(x, val, (long)strlen(val));
@@ -141,6 +134,49 @@ static int put_bin(ei_x_buff *x, const char *key, const void *val, long len) {
 static int put_int(ei_x_buff *x, const char *key, long long val) {
   if (ei_x_encode_binary(x, key, (long)strlen(key)) != 0) return -1;
   return ei_x_encode_longlong(x, val);
+}
+
+/*
+ * Begin a request, and put the connection's identity in it.
+ *
+ * The identity is added here rather than at each call site for the same
+ * reason it lives on the connection: a request that could be built without
+ * it is a request that will be, and an operation arriving with no identity
+ * (or a previous operation's) is an access-control fault rather than a
+ * missing field.
+ *
+ * It goes under a single `identity` key rather than as flat `uid`/`gid`
+ * fields, because `fchown` already carries `uid` and `gid` of its own — the
+ * ones it is setting. Flat identity keys collide with them and produce a
+ * duplicate-key map, which is not a valid ETF map and silently loses one of
+ * the two meanings. Nesting also means no future op's argument can collide
+ * with the identity by picking an unlucky name.
+ */
+static int req_open(ei_x_buff *x, const char *op, int map_arity,
+                    const nw_ident_t *ident) {
+  uint32_t i;
+
+  if (ei_x_new_with_version(x) != 0) return -1;
+  if (ei_x_encode_tuple_header(x, 2) != 0) return -1;
+  if (ei_x_encode_atom(x, op) != 0) return -1;
+  if (ei_x_encode_map_header(x, map_arity + 1) != 0) return -1;
+
+  if (ei_x_encode_binary(x, "identity", 8) != 0) return -1;
+  if (ei_x_encode_map_header(x, 3) != 0) return -1;
+  if (put_int(x, "uid", (long long)ident->uid) != 0) return -1;
+  if (put_int(x, "gid", (long long)ident->gid) != 0) return -1;
+  if (ei_x_encode_binary(x, "gids", 4) != 0) return -1;
+  if (ident->ngroups == 0) {
+    if (ei_x_encode_empty_list(x) != 0) return -1;
+  } else {
+    if (ei_x_encode_list_header(x, (long)ident->ngroups) != 0) return -1;
+    for (i = 0; i < ident->ngroups; i++) {
+      if (ei_x_encode_ulong(x, (unsigned long)ident->groups[i]) != 0) return -1;
+    }
+    if (ei_x_encode_empty_list(x) != 0) return -1;
+  }
+
+  return 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -253,10 +289,27 @@ int nw_dial(nw_conn *conn, const char *path) {
   }
 
   conn->fd = fd;
+  memset(&conn->ident, 0, sizeof(conn->ident));
   return 0;
 }
 
-void nw_attach(nw_conn *conn, int fd) { conn->fd = fd; }
+void nw_attach(nw_conn *conn, int fd) {
+  conn->fd = fd;
+  memset(&conn->ident, 0, sizeof(conn->ident));
+}
+
+void nw_set_ident(nw_conn *conn, uint32_t uid, uint32_t gid,
+                  const uint32_t *groups, uint32_t ngroups) {
+  uint32_t i;
+
+  conn->ident.uid = uid;
+  conn->ident.gid = gid;
+  conn->ident.ngroups = ngroups > NW_MAX_GROUPS ? NW_MAX_GROUPS : ngroups;
+
+  for (i = 0; i < conn->ident.ngroups; i++) {
+    conn->ident.groups[i] = groups[i];
+  }
+}
 
 void nw_close_conn(nw_conn *conn) {
   if (conn->fd >= 0) {
@@ -271,7 +324,7 @@ void nw_close_conn(nw_conn *conn) {
 
 int nw_connect(nw_conn *conn, const char *volume) {
   ei_x_buff x;
-  if (req_open(&x, "connect", 1) != 0 || put_str(&x, "volume", volume) != 0) {
+  if (req_open(&x, "connect", 1, &conn->ident) != 0 || put_str(&x, "volume", volume) != 0) {
     ei_x_free(&x);
     errno = EPROTO;
     return -1;
@@ -281,7 +334,7 @@ int nw_connect(nw_conn *conn, const char *volume) {
 
 int nw_disconnect(nw_conn *conn) {
   ei_x_buff x;
-  if (req_open(&x, "disconnect", 0) != 0) {
+  if (req_open(&x, "disconnect", 0, &conn->ident) != 0) {
     ei_x_free(&x);
     errno = EPROTO;
     return -1;
@@ -301,7 +354,7 @@ static int do_stat(nw_conn *conn, const char *op, const char *path,
   int saw_dev = 0;
   int saw_ino = 0;
 
-  if (req_open(&x, op, 1) != 0 ||
+  if (req_open(&x, op, 1, &conn->ident) != 0 ||
       (by_handle ? put_int(&x, "handle", (long long)handle)
                  : put_str(&x, "path", path)) != 0) {
     ei_x_free(&x);
@@ -399,7 +452,7 @@ int nw_fstat(nw_conn *conn, uint64_t handle, nw_stat_t *out) {
 
 int nw_fchmod(nw_conn *conn, uint64_t handle, uint32_t mode) {
   ei_x_buff x;
-  if (req_open(&x, "fchmod", 2) != 0 ||
+  if (req_open(&x, "fchmod", 2, &conn->ident) != 0 ||
       put_int(&x, "handle", (long long)handle) != 0 ||
       put_int(&x, "mode", (long long)mode) != 0) {
     ei_x_free(&x);
@@ -411,7 +464,7 @@ int nw_fchmod(nw_conn *conn, uint64_t handle, uint32_t mode) {
 
 int nw_fchown(nw_conn *conn, uint64_t handle, uint32_t uid, uint32_t gid) {
   ei_x_buff x;
-  if (req_open(&x, "fchown", 3) != 0 ||
+  if (req_open(&x, "fchown", 3, &conn->ident) != 0 ||
       put_int(&x, "handle", (long long)handle) != 0 ||
       put_int(&x, "uid", (long long)uid) != 0 ||
       put_int(&x, "gid", (long long)gid) != 0) {
@@ -424,7 +477,7 @@ int nw_fchown(nw_conn *conn, uint64_t handle, uint32_t uid, uint32_t gid) {
 
 int nw_fntimes(nw_conn *conn, uint64_t handle, int64_t atime, int64_t mtime) {
   ei_x_buff x;
-  if (req_open(&x, "fntimes", 3) != 0 ||
+  if (req_open(&x, "fntimes", 3, &conn->ident) != 0 ||
       put_int(&x, "handle", (long long)handle) != 0 ||
       put_int(&x, "atime", (long long)atime) != 0 ||
       put_int(&x, "mtime", (long long)mtime) != 0) {
@@ -468,7 +521,7 @@ static int call_uint_field(nw_conn *conn, ei_x_buff *x, const char *field,
 int nw_openat(nw_conn *conn, const char *path, int32_t flags, uint32_t mode,
               uint64_t *handle_out) {
   ei_x_buff x;
-  if (req_open(&x, "openat", 3) != 0 || put_str(&x, "path", path) != 0 ||
+  if (req_open(&x, "openat", 3, &conn->ident) != 0 || put_str(&x, "path", path) != 0 ||
       put_int(&x, "flags", (long long)flags) != 0 ||
       put_int(&x, "mode", (long long)mode) != 0) {
     ei_x_free(&x);
@@ -480,7 +533,7 @@ int nw_openat(nw_conn *conn, const char *path, int32_t flags, uint32_t mode,
 
 int nw_close(nw_conn *conn, uint64_t handle) {
   ei_x_buff x;
-  if (req_open(&x, "close", 1) != 0 ||
+  if (req_open(&x, "close", 1, &conn->ident) != 0 ||
       put_int(&x, "handle", (long long)handle) != 0) {
     ei_x_free(&x);
     errno = EPROTO;
@@ -500,7 +553,7 @@ int nw_pread(nw_conn *conn, uint64_t handle, int64_t offset, uint64_t size,
   long got = 0;
   char key[MAXATOMLEN + 1];
 
-  if (req_open(&x, "pread", 3) != 0 ||
+  if (req_open(&x, "pread", 3, &conn->ident) != 0 ||
       put_int(&x, "handle", (long long)handle) != 0 ||
       put_int(&x, "offset", (long long)offset) != 0 ||
       put_int(&x, "size", (long long)size) != 0) {
@@ -542,7 +595,7 @@ int nw_pread(nw_conn *conn, uint64_t handle, int64_t offset, uint64_t size,
 int nw_pwrite(nw_conn *conn, uint64_t handle, int64_t offset,
               const uint8_t *data, size_t len, uint64_t *written_out) {
   ei_x_buff x;
-  if (req_open(&x, "pwrite", 3) != 0 ||
+  if (req_open(&x, "pwrite", 3, &conn->ident) != 0 ||
       put_int(&x, "handle", (long long)handle) != 0 ||
       put_int(&x, "offset", (long long)offset) != 0 ||
       put_bin(&x, "data", data, (long)len) != 0) {
@@ -555,7 +608,7 @@ int nw_pwrite(nw_conn *conn, uint64_t handle, int64_t offset,
 
 int nw_ftruncate(nw_conn *conn, uint64_t handle, uint64_t size) {
   ei_x_buff x;
-  if (req_open(&x, "ftruncate", 2) != 0 ||
+  if (req_open(&x, "ftruncate", 2, &conn->ident) != 0 ||
       put_int(&x, "handle", (long long)handle) != 0 ||
       put_int(&x, "size", (long long)size) != 0) {
     ei_x_free(&x);
@@ -567,7 +620,7 @@ int nw_ftruncate(nw_conn *conn, uint64_t handle, uint64_t size) {
 
 int nw_fsync(nw_conn *conn, uint64_t handle) {
   ei_x_buff x;
-  if (req_open(&x, "fsync", 1) != 0 ||
+  if (req_open(&x, "fsync", 1, &conn->ident) != 0 ||
       put_int(&x, "handle", (long long)handle) != 0) {
     ei_x_free(&x);
     errno = EPROTO;
@@ -578,7 +631,7 @@ int nw_fsync(nw_conn *conn, uint64_t handle) {
 
 int nw_fdopendir(nw_conn *conn, const char *path, uint64_t *handle_out) {
   ei_x_buff x;
-  if (req_open(&x, "fdopendir", 1) != 0 || put_str(&x, "path", path) != 0) {
+  if (req_open(&x, "fdopendir", 1, &conn->ident) != 0 || put_str(&x, "path", path) != 0) {
     ei_x_free(&x);
     errno = EPROTO;
     return -1;
@@ -596,7 +649,7 @@ int nw_readdir(nw_conn *conn, uint64_t handle, nw_dirent_t *out, int *eof_out) {
   int eof = 0;
   int have_entry = 0;
 
-  if (req_open(&x, "readdir", 1) != 0 ||
+  if (req_open(&x, "readdir", 1, &conn->ident) != 0 ||
       put_int(&x, "handle", (long long)handle) != 0) {
     ei_x_free(&x);
     errno = EPROTO;
@@ -672,7 +725,7 @@ bad:
 
 int nw_closedir(nw_conn *conn, uint64_t handle) {
   ei_x_buff x;
-  if (req_open(&x, "closedir", 1) != 0 ||
+  if (req_open(&x, "closedir", 1, &conn->ident) != 0 ||
       put_int(&x, "handle", (long long)handle) != 0) {
     ei_x_free(&x);
     errno = EPROTO;
@@ -683,7 +736,7 @@ int nw_closedir(nw_conn *conn, uint64_t handle) {
 
 int nw_mkdirat(nw_conn *conn, const char *path, uint32_t mode) {
   ei_x_buff x;
-  if (req_open(&x, "mkdirat", 2) != 0 || put_str(&x, "path", path) != 0 ||
+  if (req_open(&x, "mkdirat", 2, &conn->ident) != 0 || put_str(&x, "path", path) != 0 ||
       put_int(&x, "mode", (long long)mode) != 0) {
     ei_x_free(&x);
     errno = EPROTO;
@@ -694,7 +747,7 @@ int nw_mkdirat(nw_conn *conn, const char *path, uint32_t mode) {
 
 int nw_unlinkat(nw_conn *conn, const char *path) {
   ei_x_buff x;
-  if (req_open(&x, "unlinkat", 1) != 0 || put_str(&x, "path", path) != 0) {
+  if (req_open(&x, "unlinkat", 1, &conn->ident) != 0 || put_str(&x, "path", path) != 0) {
     ei_x_free(&x);
     errno = EPROTO;
     return -1;
@@ -704,7 +757,7 @@ int nw_unlinkat(nw_conn *conn, const char *path) {
 
 int nw_renameat(nw_conn *conn, const char *old_path, const char *new_path) {
   ei_x_buff x;
-  if (req_open(&x, "renameat", 2) != 0 ||
+  if (req_open(&x, "renameat", 2, &conn->ident) != 0 ||
       put_str(&x, "old_path", old_path) != 0 ||
       put_str(&x, "new_path", new_path) != 0) {
     ei_x_free(&x);
@@ -721,7 +774,7 @@ static int do_statvfs(nw_conn *conn, const char *op, nw_statvfs_t *out) {
   int arity = 0;
   int i;
 
-  if (req_open(&x, op, 0) != 0) {
+  if (req_open(&x, op, 0, &conn->ident) != 0) {
     ei_x_free(&x);
     errno = EPROTO;
     return -1;

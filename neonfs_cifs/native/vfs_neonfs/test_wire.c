@@ -99,6 +99,13 @@ typedef struct {
   char vals[8][512];
   long vlens[8];
   int n;
+  /* Identity, which every request must carry. Tracked per request so the
+   * responder can fail an op that omits it rather than the harness checking
+   * one op and assuming the other eighteen. */
+  int saw_uid, saw_gid, saw_gids;
+  long uid, gid;
+  int ngids;
+  long gid0;
 } strargs;
 
 static const char *arg_str(const strargs *a, const char *key) {
@@ -124,6 +131,11 @@ static int decode_request(const char *buf, char *op, strargs *a) {
   if (ei_decode_atom(buf, &idx, op) != 0) return -1;
   if (ei_decode_map_header(buf, &idx, &marity) != 0) return -1;
 
+  a->saw_uid = a->saw_gid = a->saw_gids = 0;
+  a->uid = a->gid = -1;
+  a->ngids = 0;
+  a->gid0 = -1;
+
   for (i = 0; i < marity; i++) {
     char key[512];
     long klen = 0;
@@ -131,6 +143,40 @@ static int decode_request(const char *buf, char *op, strargs *a) {
     if (ei_decode_binary(buf, &idx, key, &klen) != 0) return -1;
     key[klen] = '\0';
     if (ei_get_type(buf, &idx, &type, &size) != 0) return -1;
+
+    if (strcmp(key, "identity") == 0) {
+      int iarity = 0, j;
+      if (ei_decode_map_header(buf, &idx, &iarity) != 0) return -1;
+      for (j = 0; j < iarity; j++) {
+        char ik[64];
+        long iklen = 0;
+        if (ei_decode_binary(buf, &idx, ik, &iklen) != 0) return -1;
+        ik[iklen] = '\0';
+        if (strcmp(ik, "uid") == 0) {
+          if (ei_decode_long(buf, &idx, &a->uid) != 0) return -1;
+          a->saw_uid = 1;
+        } else if (strcmp(ik, "gid") == 0) {
+          if (ei_decode_long(buf, &idx, &a->gid) != 0) return -1;
+          a->saw_gid = 1;
+        } else if (strcmp(ik, "gids") == 0) {
+          int n = 0, k;
+          a->saw_gids = 1;
+          /* An empty list arrives as nil; ei reports it as arity 0. */
+          if (ei_decode_list_header(buf, &idx, &n) != 0) return -1;
+          a->ngids = n;
+          for (k = 0; k < n; k++) {
+            long g = 0;
+            if (ei_decode_long(buf, &idx, &g) != 0) return -1;
+            if (k == 0) a->gid0 = g;
+          }
+          if (n > 0 && ei_skip_term(buf, &idx) != 0) return -1; /* tail nil */
+        } else {
+          if (ei_skip_term(buf, &idx) != 0) return -1;
+        }
+      }
+      continue;
+    }
+
     if (type == ERL_BINARY_EXT) {
       if (a->n < 8 && (size_t)klen < sizeof(a->keys[0]) &&
           (size_t)size < sizeof(a->vals[0])) {
@@ -275,6 +321,26 @@ static int run_responder(int fd) {
     if (decode_request(buf, op, &a) != 0) {
       fprintf(stderr, "responder: bad request frame\n");
       return 2;
+    }
+
+    /* Every op, without exception. An operation that reaches core with no
+     * identity has nothing for `Authorise.check/4` to evaluate, so this is
+     * asserted here — once, against all nineteen — rather than op by op. */
+    if (!a.saw_uid || !a.saw_gid || !a.saw_gids) {
+      fprintf(stderr, "responder: %s carried no identity (uid=%d gid=%d gids=%d)\n",
+              op, a.saw_uid, a.saw_gid, a.saw_gids);
+      return 7;
+    }
+
+    /* `connect` is the only op sent before a session exists, so it is the
+     * only one allowed to run as root with no groups. */
+    if (strcmp(op, "connect") != 0 && strcmp(op, "disconnect") != 0) {
+      if (a.uid != 1000 || a.gid != 1001 || a.ngids != 2 || a.gid0 != 1001) {
+        fprintf(stderr,
+                "responder: %s identity mismatch (uid=%ld gid=%ld ngids=%d gid0=%ld)\n",
+                op, a.uid, a.gid, a.ngids, a.gid0);
+        return 8;
+      }
     }
 
     /* Validate a few representative encodings. */
