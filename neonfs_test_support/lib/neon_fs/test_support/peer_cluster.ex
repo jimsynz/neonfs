@@ -20,6 +20,8 @@ defmodule NeonFS.TestSupport.PeerCluster do
 
   require Logger
 
+  alias NeonFS.TestSupport.PeerTLS
+
   # The retry budget is a guard against transient boot failures, not against a
   # slow one: backoff is time *between* attempts and cannot shorten an attempt.
   # That is why the control channel is standard I/O (see `build_peer_opts/4`) —
@@ -91,6 +93,7 @@ defmodule NeonFS.TestSupport.PeerCluster do
           cookie: atom(),
           nodes: [node_info()],
           data_dir: String.t(),
+          dist: :plain | :tls,
           drives_fn: (atom(), String.t() -> [map()]) | nil
         }
 
@@ -266,6 +269,7 @@ defmodule NeonFS.TestSupport.PeerCluster do
     formation_config = Keyword.get(opts, :formation, nil)
     metrics_base_port = Keyword.get(opts, :metrics_port, nil)
     roles = Keyword.get(opts, :roles, %{})
+    dist = Keyword.get(opts, :dist, :plain)
 
     # Ensure controller is distributed
     ensure_distributed!()
@@ -275,6 +279,11 @@ defmodule NeonFS.TestSupport.PeerCluster do
 
     # Use provided base_dir or create a new one
     base_dir = Keyword.get_lazy(opts, :base_dir, fn -> create_cluster_dir(cluster_id) end)
+
+    # One CA per cluster, minted before any peer starts: distribution TLS
+    # reads its certificates at VM boot, so they cannot come from the
+    # cluster the peer is about to form.
+    ca = if dist == :tls, do: PeerTLS.create_ca(cluster_id)
 
     # Pre-compute all peer node names and distribution ports
     # (formation needs the full list before any node starts)
@@ -321,7 +330,16 @@ defmodule NeonFS.TestSupport.PeerCluster do
 
         dist_port = lookup_peer_port(all_peer_info, :"#{peer_name}@localhost")
 
-        {peer_opts, dist_port} = build_peer_opts(peer_name, cookie, data_dir, dist_port)
+        if dist == :tls do
+          PeerTLS.write_node_material(
+            Path.join(data_dir, "tls"),
+            :"#{peer_name}@localhost",
+            ca,
+            i
+          )
+        end
+
+        {peer_opts, dist_port} = build_peer_opts(peer_name, cookie, data_dir, dist_port, dist)
 
         peer_apps = apps_for_peer(roles, alias_name, applications)
         core_peer? = :neonfs_core in peer_apps
@@ -409,14 +427,45 @@ defmodule NeonFS.TestSupport.PeerCluster do
         })
       end)
 
+    if dist == :tls do
+      PeerTLS.write_cli_material(cli_tls_dir(base_dir), ca, node_count + 1)
+    end
+
     %{
       id: cluster_id,
       cookie: cookie,
       nodes: nodes,
       data_dir: base_dir,
+      dist: dist,
       drives_fn: drives_fn
     }
   end
+
+  @doc """
+  The directory holding the `local-ca.crt` / `cli.crt` / `cli.key` triple
+  `neonfs-cli` looks for, for a cluster started with `dist: :tls`.
+
+  Point `NEONFS_TLS_DIR` at it: the CLI turns TLS on when it finds
+  `ssl_dist.conf`, and needs this identity to complete the handshake.
+  """
+  @spec cli_tls_dir(cluster() | String.t()) :: String.t()
+  def cli_tls_dir(%{data_dir: data_dir}), do: cli_tls_dir(data_dir)
+  def cli_tls_dir(data_dir) when is_binary(data_dir), do: Path.join(data_dir, "cli-tls")
+
+  # These four reach a peer directly rather than through `rpc/6`, because
+  # each is probing distribution itself — who is connected, connecting two
+  # peers, reconnecting after a restart, querying Ra locally. On a TLS
+  # cluster the controller cannot complete a peer's handshake at all, so
+  # they cannot work and there is no `:peer.call` equivalent that would
+  # mean the same thing. Refusing by name beats surfacing later as a
+  # mysterious `:nodedown`.
+  defp refuse_on_tls!(%{dist: :tls}, what) do
+    raise ArgumentError,
+          "#{what} is not supported on a TLS cluster: it probes distribution " <>
+            "from the controller, which cannot complete a TLS peer's handshake"
+  end
+
+  defp refuse_on_tls!(_cluster, _what), do: :ok
 
   defp apps_for_peer(roles, alias_name, default_applications) do
     Map.get(roles, alias_name, default_applications)
@@ -625,6 +674,25 @@ defmodule NeonFS.TestSupport.PeerCluster do
   @spec rpc(cluster(), atom(), module(), atom(), [term()], timeout()) :: term()
   def rpc(cluster, node_name, module, function, args, timeout \\ 30_000) do
     node_info = get_node!(cluster, node_name)
+    dispatch_rpc(cluster, node_info, module, function, args, timeout)
+  end
+
+  # A TLS peer does not accept an `:rpc.call` from this node: the controller
+  # runs plain distribution and cannot complete the peer's handshake. The
+  # standard-I/O control channel `:peer.start/1` already gives us reaches it
+  # regardless, and is what drives application startup and the partition
+  # helpers, so a TLS cluster routes through that instead.
+  #
+  # `:peer.call/5` raises where `:rpc.call/5` returns `{:badrpc, reason}`, so
+  # the shapes are reconciled here rather than at every call site.
+  defp dispatch_rpc(%{dist: :tls}, node_info, module, function, args, timeout) do
+    :peer.call(node_info.peer, module, function, args, timeout)
+  catch
+    :error, reason -> {:badrpc, reason}
+    :exit, reason -> {:badrpc, reason}
+  end
+
+  defp dispatch_rpc(_cluster, node_info, module, function, args, timeout) do
     :rpc.call(node_info.node, module, function, args, timeout)
   end
 
@@ -739,6 +807,7 @@ defmodule NeonFS.TestSupport.PeerCluster do
   """
   @spec restart_node(cluster(), atom(), keyword()) :: {:ok, cluster()}
   def restart_node(cluster, node_name, opts \\ []) do
+    refuse_on_tls!(cluster, "restart_node/3")
     applications = Keyword.get(opts, :applications, [:neonfs_core])
     node_info = get_node!(cluster, node_name)
 
@@ -909,6 +978,7 @@ defmodule NeonFS.TestSupport.PeerCluster do
   """
   @spec visible_nodes(cluster(), atom()) :: [node()]
   def visible_nodes(cluster, node_name) do
+    refuse_on_tls!(cluster, "visible_nodes/2")
     node_info = get_node!(cluster, node_name)
     :rpc.call(node_info.node, Node, :list, [])
   end
@@ -949,6 +1019,8 @@ defmodule NeonFS.TestSupport.PeerCluster do
 
     # Get all node atoms
     all_nodes = Enum.map(cluster.nodes, & &1.node)
+
+    refuse_on_tls!(cluster, "connect_nodes/1")
 
     # Have each node connect to all other nodes
     for node_info <- cluster.nodes do
@@ -1108,7 +1180,10 @@ defmodule NeonFS.TestSupport.PeerCluster do
     kind, reason -> %{reachable: false, error: inspect({kind, reason})}
   end
 
-  defp build_peer_opts(node_name, cookie, data_dir, dist_port) do
+  defp build_peer_opts(node_name, cookie, data_dir, dist_port),
+    do: build_peer_opts(node_name, cookie, data_dir, dist_port, :plain)
+
+  defp build_peer_opts(node_name, cookie, data_dir, dist_port, dist) do
     code_paths = build_code_paths()
 
     # Ensure directories exist
@@ -1131,6 +1206,7 @@ defmodule NeonFS.TestSupport.PeerCluster do
         ~c"prevent_overlapping_partitions",
         ~c"false"
       ] ++
+        tls_dist_args(dist, data_dir) ++
         Enum.flat_map(code_paths, fn path ->
           [~c"-pa", path]
         end)
@@ -1281,6 +1357,21 @@ defmodule NeonFS.TestSupport.PeerCluster do
       end
     end)
   end
+
+  # Distribution TLS is a VM start flag: the module that carries it and the
+  # config naming the certificates both have to be in place before the node
+  # boots, which is why the material is minted before `:peer.start/1`
+  # rather than issued by the cluster the peer is about to join.
+  defp tls_dist_args(:tls, data_dir) do
+    [
+      ~c"-proto_dist",
+      ~c"inet_tls",
+      ~c"-ssl_dist_optfile",
+      String.to_charlist(Path.join([data_dir, "tls", "ssl_dist.conf"]))
+    ]
+  end
+
+  defp tls_dist_args(_plain, _data_dir), do: []
 
   defp build_code_paths do
     # Include ALL code paths, not just _build - we need Elixir's stdlib too.
