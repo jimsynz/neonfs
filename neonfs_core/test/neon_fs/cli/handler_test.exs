@@ -10,11 +10,13 @@ defmodule NeonFS.CLI.HandlerTest do
 
   alias NeonFS.Core.{
     AuditLog,
+    BlockAttachment,
     BlockBacking,
     CertificateAuthority,
     ClusterMode,
     Drive,
     DriveRegistry,
+    NamespaceCoordinator,
     NodeRegistry,
     RaServer,
     ServiceRegistry,
@@ -743,6 +745,91 @@ defmodule NeonFS.CLI.HandlerTest do
       assert found.max_size == 1000
       assert found.max_files == 5
       assert found.file_count == 0
+    end
+  end
+
+  describe "block_attachments/0" do
+    setup %{tmp_dir: tmp_dir} do
+      configure_test_dirs(tmp_dir)
+      ensure_cluster_state()
+      stop_ra()
+      start_namespace_coordination()
+      start_volume_registry()
+
+      on_exit(fn -> cleanup_test_dirs() end)
+      :ok
+    end
+
+    test "is empty when nothing is attached" do
+      assert {:ok, attachments} = Handler.block_attachments()
+      assert attachments == %{}
+    end
+
+    test "names the node holding a volume's attachment claim" do
+      volume_id = "vol_#{:rand.uniform(999_999)}"
+
+      assert {:ok, _claim_id} =
+               NamespaceCoordinator.claim_path(BlockAttachment.path(volume_id), :exclusive)
+
+      assert {:ok, %{^volume_id => node_name}} = Handler.block_attachments()
+      assert node_name == Atom.to_string(node())
+    end
+
+    test "ignores claims on paths that are not attachments" do
+      assert {:ok, _claim_id} = NamespaceCoordinator.claim_path("/some/file", :exclusive)
+
+      assert {:ok, attachments} = Handler.block_attachments()
+      assert attachments == %{}
+    end
+
+    test "drops a volume once its claim is released" do
+      volume_id = "vol_#{:rand.uniform(999_999)}"
+
+      {:ok, claim_id} =
+        NamespaceCoordinator.claim_path(BlockAttachment.path(volume_id), :exclusive)
+
+      assert :ok = NamespaceCoordinator.release(claim_id)
+
+      assert {:ok, attachments} = Handler.block_attachments()
+      refute Map.has_key?(attachments, volume_id)
+    end
+  end
+
+  describe "get_volume/1 for a block volume" do
+    setup %{tmp_dir: tmp_dir} do
+      configure_test_dirs(tmp_dir)
+      ensure_cluster_state()
+      stop_ra()
+      start_drive_registry()
+      start_blob_store()
+      start_chunk_index()
+      start_file_index()
+      start_stripe_index()
+      start_volume_registry()
+      ensure_chunk_access_tracker()
+
+      on_exit(fn -> cleanup_test_dirs() end)
+      :ok
+    end
+
+    # The CLI suppresses these counters for a block volume, which is exactly
+    # what would hide a stats-accounting bug in the provisioning path, so the
+    # daemon keeps reporting them and this test keeps watching them.
+    test "counts the provisioned device and fills the volume to its quota" do
+      size = 4 * BlockBacking.chunk_bytes()
+      name = "block-stats-#{:rand.uniform(999_999)}"
+
+      {:ok, _vol} =
+        Handler.create_volume(name, %{"type" => "block", "max_size" => size})
+
+      assert {:ok, found} = Handler.get_volume(name)
+      assert found.type == :block
+      assert found.max_size == size
+      assert found.logical_size == size
+      assert found.file_count == 1
+      # The device's chunks are all zeroes, so they dedup to one blob.
+      assert found.chunk_count == 1
+      assert found.physical_size == BlockBacking.chunk_bytes()
     end
   end
 

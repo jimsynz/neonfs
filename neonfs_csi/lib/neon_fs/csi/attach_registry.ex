@@ -15,6 +15,7 @@ defmodule NeonFS.CSI.AttachRegistry do
   """
 
   alias NeonFS.Client.Router
+  alias NeonFS.Core.BlockAttachment
   alias NeonFS.Core.NamespaceCoordinator
   alias NeonFS.CSI.NodeResolver
 
@@ -115,9 +116,7 @@ defmodule NeonFS.CSI.AttachRegistry do
     end
   end
 
-  # One path per volume, so a second node's exclusive claim collides with
-  # the first rather than sitting beside it.
-  defp attach_path(volume_id), do: "csi:attach:#{volume_id}"
+  defp attach_path(volume_id), do: BlockAttachment.path(volume_id)
 
   defp publish_context(node_id), do: %{"neonfs.attached_node" => node_id}
 
