@@ -64,6 +64,7 @@ defmodule NeonFS.Core.ReadOperation do
              chunks: [chunk_ref()],
              hole_bytes: non_neg_integer()
            }}
+          | {:error, {:stripe_refs_unsupported, non_neg_integer() | nil}}
           | {:error, term()}
 
   @doc """
@@ -311,8 +312,12 @@ defmodule NeonFS.Core.ReadOperation do
   each stripe that overlaps the read range. This only applies when every
   data chunk in each relevant stripe is available — if any data chunk is
   missing (i.e. the stripe would require parity-based reconstruction),
-  `{:error, :stripe_refs_unsupported}` is returned so the caller can fall
-  back to `read_file/3`.
+  `{:error, {:stripe_refs_unsupported, bytes}}` is returned so the caller can
+  fall back to `read_file/3`. `bytes` is what that fallback will move off
+  disk — counting the whole chunks a degraded stripe's reconstruction fetches,
+  not the stripe's data byte span — so the caller can report the read's chunk
+  cost without a second round trip. It is `nil` when a stripe could not be
+  sized at all, which the caller must treat as "unknown" rather than zero.
 
   ## Options
 
@@ -324,8 +329,9 @@ defmodule NeonFS.Core.ReadOperation do
   ## Returns
 
     * `{:ok, %{file_size: size, chunks: [ref, ...]}}` on success
-    * `{:error, :stripe_refs_unsupported}` when a relevant stripe requires
-      reconstruction (one or more data chunks are missing)
+    * `{:error, {:stripe_refs_unsupported, bytes | nil}}` when a relevant
+      stripe requires reconstruction (one or more data chunks are missing),
+      carrying the byte cost of the fallback read
     * `{:error, reason}` on auth / lookup failure
   """
   @spec read_file_refs(binary(), String.t(), keyword()) :: refs_result()
@@ -371,11 +377,13 @@ defmodule NeonFS.Core.ReadOperation do
     if offset >= file_meta.size or end_byte <= offset do
       {:ok, %{file_size: file_meta.size, chunks: [], hole_bytes: 0}}
     else
-      stripes
-      |> Enum.filter(fn stripe_ref ->
-        {s, e} = normalise_byte_range(stripe_ref.byte_range)
-        s < end_byte and e > offset
-      end)
+      overlapping =
+        Enum.filter(stripes, fn stripe_ref ->
+          {s, e} = normalise_byte_range(stripe_ref.byte_range)
+          s < end_byte and e > offset
+        end)
+
+      overlapping
       |> build_stripe_refs_list(file_meta.volume_id, offset, end_byte)
       |> case do
         {:ok, refs} ->
@@ -386,8 +394,15 @@ defmodule NeonFS.Core.ReadOperation do
              hole_bytes: stripe_hole_bytes(file_meta, offset, end_byte)
            }}
 
-        {:error, _} = err ->
-          err
+        # The refusal carries the size of the read it is refusing to
+        # describe. The caller's only option is to fall back to a whole-range
+        # core read, and this is the one place that knows what that will
+        # cost — so the client gets it for free rather than paying a
+        # `get_file_meta` round trip to re-derive a worse approximation.
+        {:error, :stripe_refs_unsupported} ->
+          {:error,
+           {:stripe_refs_unsupported,
+            fallback_read_bytes(overlapping, file_meta.volume_id, offset, end_byte)}}
       end
     end
   end
@@ -453,6 +468,55 @@ defmodule NeonFS.Core.ReadOperation do
     |> case do
       {:ok, refs_lists} -> {:ok, refs_lists |> Enum.reverse() |> List.flatten()}
       error -> error
+    end
+  end
+
+  # What the client's fallback read will actually move off disk, counting
+  # parity: a degraded stripe is rebuilt by fetching `data_chunks` *whole*
+  # chunks — whichever of the data and parity chunks are available, see
+  # `read_stripe_degraded/5` — so its cost is that product and not the
+  # stripe's data byte span. The difference is the whole point of the
+  # measurement. It is largest exactly where read amplification is worst: a
+  # file's final stripe can hold a few hundred bytes and still cost every one
+  # of its chunks to reconstruct.
+  #
+  # A healthy stripe in the same read costs only its overlapping chunks, so
+  # the two are summed per stripe rather than one rule applied to all.
+  #
+  # `nil` when any overlapping stripe cannot be sized, rather than a partial
+  # sum: a total that silently omits a stripe is the under-report the
+  # `chunk_bytes` measurement exists to end, and an absent measurement is
+  # handled (`NeonFS.Client.ChunkReader` omits the key) where a wrong one is
+  # not.
+  defp fallback_read_bytes(stripe_refs, volume_id, offset, end_byte) do
+    Enum.reduce_while(stripe_refs, 0, fn stripe_ref, total ->
+      case stripe_fallback_bytes(stripe_ref, volume_id, offset, end_byte) do
+        {:ok, bytes} -> {:cont, total + bytes}
+        :error -> {:halt, nil}
+      end
+    end)
+  end
+
+  defp stripe_fallback_bytes(%{stripe_id: stripe_id} = stripe_ref, volume_id, offset, end_byte) do
+    case StripeIndex.get(volume_id, stripe_id) do
+      {:ok, stripe} ->
+        if Enum.all?(Stripe.data_chunk_hashes(stripe), &chunk_available?(volume_id, &1)) do
+          healthy_stripe_bytes(stripe, stripe_ref, volume_id, offset, end_byte)
+        else
+          {:ok, stripe.config.data_chunks * stripe.config.chunk_size}
+        end
+
+      {:error, :not_found} ->
+        :error
+    end
+  end
+
+  defp healthy_stripe_bytes(stripe, stripe_ref, volume_id, offset, end_byte) do
+    {stripe_start, _} = normalise_byte_range(stripe_ref.byte_range)
+
+    case build_stripe_data_chunk_refs(stripe, volume_id, stripe_start, offset, end_byte) do
+      {:ok, refs} -> {:ok, Enum.sum(Enum.map(refs, & &1.original_size))}
+      {:error, _} -> :error
     end
   end
 

@@ -36,8 +36,10 @@ defmodule NeonFS.Client.ChunkReader do
   Erasure-coded (stripe-based) files return data-chunk refs for each
   overlapping stripe when every data chunk is available. When any data
   chunk is missing and parity-based reconstruction is required, core
-  returns `{:error, :stripe_refs_unsupported}`; this helper then falls
-  back to reading the file **one stripe at a time** via
+  returns `{:error, {:stripe_refs_unsupported, chunk_bytes}}` — carrying what
+  the fallback read will cost, since only core knows which stripes are
+  degraded and a degraded stripe is rebuilt from whole chunks. This helper
+  then falls back to reading the file **one stripe at a time** via
   `NeonFS.Core.read_file/3`, using stripe ranges from `get_file_meta/2`.
   The server does reconstruction per stripe, so the peak working set is
   bounded by the stripe size rather than the file size.
@@ -91,18 +93,18 @@ defmodule NeonFS.Client.ChunkReader do
       any chunk in it needs server-side processing, when no location has
       a data endpoint, or when an erasure-coded file is too degraded for
       chunk refs. `chunk_bytes` is the sum of the covered chunks'
-      `original_size`, or of the covered stripes' byte ranges when the
-      caller already held the file's metadata.
+      `original_size`; on the degraded-erasure path it is the figure core
+      returns with its refusal, which counts a degraded stripe as the whole
+      chunks its reconstruction fetches rather than as its data byte span.
     * `:stripe` — one call per stripe of the degraded-erasure walk.
       `chunk_bytes` is the stripe's whole byte range: core rebuilds the
       stripe from parity to serve any part of it.
 
-  `chunk_bytes` is **absent, not zero**, on the one path that cannot
-  determine it: the buffered API's degraded-erasure read, which has
-  neither chunk refs (the call that would have returned them is the one
-  that refused) nor a stripe layout, and would need a metadata round trip
-  it does not otherwise make. Zero would claim the call moved nothing,
-  which is the under-report this event exists to end.
+  `chunk_bytes` is **absent, not zero**, when the size could not be
+  determined at all — core reports `nil` alongside its refusal when a stripe
+  is missing from the index, so no total over that read is trustworthy. Zero
+  would claim the call moved nothing, which is the under-report this event
+  exists to end, so consumers must go on treating the key as optional.
 
   Both events are per-read-path, not per-file: a single `read_file/3`
   emits either a run of `chunk_fetched` or exactly one `range_fetched`,
@@ -184,8 +186,8 @@ defmodule NeonFS.Client.ChunkReader do
       {:ok, %{chunks: chunks} = result} ->
         dispatch_read(chunks, result.hole_bytes, volume_name, target, opts)
 
-      {:error, :stripe_refs_unsupported} ->
-        degraded_read(volume_name, target, opts)
+      {:error, {:stripe_refs_unsupported, chunk_bytes}} ->
+        degraded_read(volume_name, target, opts, chunk_bytes)
 
       {:error, _} = error ->
         error
@@ -242,8 +244,8 @@ defmodule NeonFS.Client.ChunkReader do
         stream = build_chunk_stream(chunks, hole_bytes, volume_name, target, opts)
         {:ok, %{stream: stream, file_size: file_size}}
 
-      {:error, :stripe_refs_unsupported} ->
-        fallback_stream(volume_name, target, opts)
+      {:error, {:stripe_refs_unsupported, chunk_bytes}} ->
+        fallback_stream(volume_name, target, opts, chunk_bytes)
 
       {:error, _} = error ->
         error
@@ -453,13 +455,13 @@ defmodule NeonFS.Client.ChunkReader do
   end
 
   # The buffered API's degraded-erasure read is one core call spanning many
-  # stripes, and the refs call that would have sized it is the call that
-  # just refused. Sizing it needs a `get_file_meta` round trip this path
-  # does not otherwise make — a cost worth deciding on rather than adding
-  # in passing, so the event goes out without `chunk_bytes` — visible as a
-  # read whose chunk cost is unknown, rather than as no read at all.
-  defp degraded_read(volume_name, target, opts) do
-    buffered_read(volume_name, target, opts, nil)
+  # stripes. Its size comes out on the refusal that sent it here: core is the
+  # only party that knows which stripes are degraded, and a degraded stripe
+  # costs whole chunks to reconstruct rather than its data byte span. Sizing it
+  # here would mean a `get_file_meta` round trip this path does not otherwise
+  # make, and a worse number for it.
+  defp degraded_read(volume_name, target, opts, chunk_bytes) do
+    buffered_read(volume_name, target, opts, chunk_bytes)
   end
 
   # One core call covering many chunks gets one event, not one per chunk:
@@ -490,19 +492,6 @@ defmodule NeonFS.Client.ChunkReader do
     do: Map.put(measurements, :chunk_bytes, chunk_bytes)
 
   defp covered_chunk_bytes(chunks), do: Enum.sum(Enum.map(chunks, & &1.original_size))
-
-  defp covered_stripe_bytes(%{stripes: stripes} = meta, opts) when is_list(stripes) do
-    offset = Keyword.get(opts, :offset, 0)
-    end_byte = compute_end_byte(meta.size, offset, Keyword.get(opts, :length, :all))
-
-    stripes
-    |> Enum.map(&normalise_byte_range(&1.byte_range))
-    |> Enum.filter(fn {start, stop} -> start < end_byte and stop > offset end)
-    |> Enum.map(fn {start, stop} -> stop - start end)
-    |> Enum.sum()
-  end
-
-  defp covered_stripe_bytes(_meta, _opts), do: nil
 
   defp build_chunk_stream(chunks, hole_bytes, volume_name, target, opts) do
     ctx = fetch_ctx(volume_name, opts)
@@ -572,7 +561,7 @@ defmodule NeonFS.Client.ChunkReader do
     end
   end
 
-  defp fallback_stream(volume_name, target, opts) do
+  defp fallback_stream(volume_name, target, opts, chunk_bytes) do
     meta_opts = Keyword.take(opts, [:uid, :gids])
 
     case meta_call(volume_name, target, meta_opts) do
@@ -581,16 +570,17 @@ defmodule NeonFS.Client.ChunkReader do
          %{stream: stripe_fallback_stream(meta, volume_name, target, opts), file_size: meta.size}}
 
       {:ok, meta} ->
-        buffered_fallback_stream(meta, volume_name, target, opts)
+        buffered_fallback_stream(meta, volume_name, target, opts, chunk_bytes)
 
       {:error, _} = err ->
         err
     end
   end
 
-  defp buffered_fallback_stream(meta, volume_name, target, opts) do
-    with {:ok, bytes} <-
-           buffered_read(volume_name, target, opts, covered_stripe_bytes(meta, opts)) do
+  # Sized from core's refusal rather than recomputed here, so the buffered and
+  # streaming paths cannot report different numbers for the same read.
+  defp buffered_fallback_stream(meta, volume_name, target, opts, chunk_bytes) do
+    with {:ok, bytes} <- buffered_read(volume_name, target, opts, chunk_bytes) do
       stream =
         Stream.unfold(bytes, fn
           <<>> -> nil

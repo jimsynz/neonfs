@@ -365,7 +365,7 @@ defmodule NeonFS.Client.ChunkReaderTest do
 
     test "falls back to read_file on :stripe_refs_unsupported" do
       expect(Router, :call, fn NeonFS.Core, :read_file_refs, _ ->
-        {:error, :stripe_refs_unsupported}
+        {:error, {:stripe_refs_unsupported, nil}}
       end)
 
       expect(Router, :call, fn NeonFS.Core, :read_file, _ ->
@@ -407,7 +407,7 @@ defmodule NeonFS.Client.ChunkReaderTest do
 
     test "fallback forwards offset and length" do
       expect(Router, :call, fn NeonFS.Core, :read_file_refs, _ ->
-        {:error, :stripe_refs_unsupported}
+        {:error, {:stripe_refs_unsupported, nil}}
       end)
 
       expect(Router, :call, fn NeonFS.Core, :read_file, [_, _, opts] ->
@@ -609,7 +609,7 @@ defmodule NeonFS.Client.ChunkReaderTest do
 
     test "returns a stream wrapping the buffered read on :stripe_refs_unsupported for non-EC meta" do
       expect(Router, :call, fn NeonFS.Core, :read_file_refs, _ ->
-        {:error, :stripe_refs_unsupported}
+        {:error, {:stripe_refs_unsupported, nil}}
       end)
 
       expect(Router, :call, fn NeonFS.Core, :get_file_meta, ["vol", "/ec.bin" | _] ->
@@ -644,7 +644,7 @@ defmodule NeonFS.Client.ChunkReaderTest do
       ]
 
       expect(Router, :call, fn NeonFS.Core, :read_file_refs, _ ->
-        {:error, :stripe_refs_unsupported}
+        {:error, {:stripe_refs_unsupported, nil}}
       end)
 
       expect(Router, :call, fn NeonFS.Core, :get_file_meta, ["vol", "/ec.bin" | _] ->
@@ -677,7 +677,7 @@ defmodule NeonFS.Client.ChunkReaderTest do
       ]
 
       expect(Router, :call, fn NeonFS.Core, :read_file_refs, _ ->
-        {:error, :stripe_refs_unsupported}
+        {:error, {:stripe_refs_unsupported, nil}}
       end)
 
       expect(Router, :call, fn NeonFS.Core, :get_file_meta, _ ->
@@ -705,7 +705,7 @@ defmodule NeonFS.Client.ChunkReaderTest do
       ]
 
       expect(Router, :call, fn NeonFS.Core, :read_file_refs, _ ->
-        {:error, :stripe_refs_unsupported}
+        {:error, {:stripe_refs_unsupported, nil}}
       end)
 
       expect(Router, :call, fn NeonFS.Core, :get_file_meta, _ ->
@@ -735,7 +735,7 @@ defmodule NeonFS.Client.ChunkReaderTest do
       ]
 
       expect(Router, :call, fn NeonFS.Core, :read_file_refs, _ ->
-        {:error, :stripe_refs_unsupported}
+        {:error, {:stripe_refs_unsupported, nil}}
       end)
 
       expect(Router, :call, fn NeonFS.Core, :get_file_meta, _ ->
@@ -759,7 +759,7 @@ defmodule NeonFS.Client.ChunkReaderTest do
       ]
 
       expect(Router, :call, fn NeonFS.Core, :read_file_refs, _ ->
-        {:error, :stripe_refs_unsupported}
+        {:error, {:stripe_refs_unsupported, nil}}
       end)
 
       expect(Router, :call, fn NeonFS.Core, :get_file_meta, _ ->
@@ -1048,7 +1048,7 @@ defmodule NeonFS.Client.ChunkReaderTest do
       ]
 
       expect(Router, :call, fn NeonFS.Core, :read_file_refs, _ ->
-        {:error, :stripe_refs_unsupported}
+        {:error, {:stripe_refs_unsupported, nil}}
       end)
 
       expect(Router, :call, fn NeonFS.Core, :get_file_meta, ["vol", "/ec.bin" | _] ->
@@ -1074,14 +1074,37 @@ defmodule NeonFS.Client.ChunkReaderTest do
       assert second.chunk_bytes == 100
     end
 
-    # Neither refs nor a stripe layout is in hand here, and a metadata
-    # round trip to get one is a cost this path does not otherwise pay.
-    # Zero would claim the call moved nothing.
-    test "the buffered degraded read omits chunk_bytes rather than claiming zero", %{
+    # The size rides out on the refusal, so this path needs no extra round
+    # trip to report what it moved — which is the whole reason the error
+    # carries a payload. 4096 here stands for a degraded stripe's whole
+    # chunks, which is what core counts.
+    test "the buffered degraded read reports the size core sent with its refusal", %{
       ref_tel: ref_tel
     } do
       expect(Router, :call, fn NeonFS.Core, :read_file_refs, _ ->
-        {:error, :stripe_refs_unsupported}
+        {:error, {:stripe_refs_unsupported, 4096}}
+      end)
+
+      expect(Router, :call, fn NeonFS.Core, :read_file, _ -> {:ok, "ec-file-bytes"} end)
+
+      assert {:ok, "ec-file-bytes"} = ChunkReader.read_file("vol", "/ec.bin")
+
+      assert_received {[:neonfs, :client, :chunk_reader, :range_fetched], ^ref_tel, measurements,
+                       metadata}
+
+      assert measurements.read_length == byte_size("ec-file-bytes")
+      assert measurements.chunk_bytes == 4096
+      assert metadata.source == :buffered
+    end
+
+    # Core reports `nil` when a stripe is missing from the index and no total
+    # over the read is trustworthy. Zero would claim the call moved nothing,
+    # which is the under-report this measurement exists to end.
+    test "an unsizable degraded read omits chunk_bytes rather than claiming zero", %{
+      ref_tel: ref_tel
+    } do
+      expect(Router, :call, fn NeonFS.Core, :read_file_refs, _ ->
+        {:error, {:stripe_refs_unsupported, nil}}
       end)
 
       expect(Router, :call, fn NeonFS.Core, :read_file, _ -> {:ok, "ec-file-bytes"} end)
@@ -1093,6 +1116,30 @@ defmodule NeonFS.Client.ChunkReaderTest do
 
       assert measurements.read_length == byte_size("ec-file-bytes")
       refute Map.has_key?(measurements, :chunk_bytes)
+      assert metadata.source == :buffered
+    end
+
+    # The streaming API's buffered fallback used to recompute this from the
+    # file meta it had just fetched. It takes core's figure now, so the two
+    # APIs cannot report different numbers for the same read.
+    test "the streaming buffered fallback reports core's size too", %{ref_tel: ref_tel} do
+      expect(Router, :call, fn NeonFS.Core, :read_file_refs, _ ->
+        {:error, {:stripe_refs_unsupported, 8192}}
+      end)
+
+      expect(Router, :call, fn NeonFS.Core, :get_file_meta, _ ->
+        {:ok, %{size: 5, stripes: nil}}
+      end)
+
+      expect(Router, :call, fn NeonFS.Core, :read_file, _ -> {:ok, "plain"} end)
+
+      assert {:ok, %{stream: stream}} = ChunkReader.read_file_stream("vol", "/ec.bin")
+      assert Enum.into(stream, <<>>) == "plain"
+
+      assert_received {[:neonfs, :client, :chunk_reader, :range_fetched], ^ref_tel, measurements,
+                       metadata}
+
+      assert measurements.chunk_bytes == 8192
       assert metadata.source == :buffered
     end
 
@@ -1334,7 +1381,7 @@ defmodule NeonFS.Client.ChunkReaderTest do
       ]
 
       expect(Router, :call, fn NeonFS.Core, :read_file_refs_by_id, _ ->
-        {:error, :stripe_refs_unsupported}
+        {:error, {:stripe_refs_unsupported, nil}}
       end)
 
       expect(Router, :call, fn NeonFS.Core, :get_file_meta_by_id, ["vol", "file-1" | _] ->
@@ -1356,7 +1403,7 @@ defmodule NeonFS.Client.ChunkReaderTest do
 
     test "buffers through the by-ID core read when the file has no stripes" do
       expect(Router, :call, fn NeonFS.Core, :read_file_refs_by_id, _ ->
-        {:error, :stripe_refs_unsupported}
+        {:error, {:stripe_refs_unsupported, nil}}
       end)
 
       expect(Router, :call, fn NeonFS.Core, :get_file_meta_by_id, _ ->

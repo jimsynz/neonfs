@@ -408,8 +408,53 @@ defmodule NeonFS.Core.ReadFileRefsTest do
       [missing_hash | _] = stripe_data_hashes_for(file_meta)
       ChunkIndex.delete(missing_hash)
 
-      assert {:error, :stripe_refs_unsupported} =
+      assert {:error, {:stripe_refs_unsupported, _bytes}} =
                ReadOperation.read_file_refs(volume.id, "/degraded.txt")
+    end
+
+    # The refusal has to carry the fallback's cost, or the client has to pay a
+    # round trip to guess at it. The number counts the whole chunks
+    # reconstruction fetches rather than the stripe's data byte span — for a
+    # 13-byte file in a 2+1 stripe that is the difference between a figure that
+    # says the read was nearly free and one that says it moved two whole chunks.
+    test "the refusal carries what the fallback read will cost, counting parity" do
+      {:ok, volume} = create_erasure_volume()
+
+      {:ok, file_meta} =
+        WriteOperation.write_file_at(volume.id, "/degraded.txt", 0, "degraded data")
+
+      [missing_hash | _] = stripe_data_hashes_for(file_meta)
+      ChunkIndex.delete(missing_hash)
+
+      assert {:error, {:stripe_refs_unsupported, bytes}} =
+               ReadOperation.read_file_refs(volume.id, "/degraded.txt")
+
+      expected =
+        file_meta.stripes
+        |> Enum.map(fn %{stripe_id: sid} ->
+          {:ok, stripe} = StripeIndex.get(volume.id, sid)
+          stripe.config.data_chunks * stripe.config.chunk_size
+        end)
+        |> Enum.sum()
+
+      assert bytes == expected
+      assert bytes > file_meta.size
+    end
+
+    # `nil` rather than a partial sum: a total that silently omits a stripe is
+    # the under-report the measurement exists to end, and the client omits the
+    # key entirely rather than emitting a wrong number.
+    test "the refusal reports an unsizable read as nil rather than a partial sum" do
+      {:ok, volume} = create_erasure_volume()
+
+      {:ok, file_meta} =
+        WriteOperation.write_file_at(volume.id, "/unsizable.txt", 0, "degraded data")
+
+      [%{stripe_id: stripe_id} | _] = file_meta.stripes
+      StripeIndex.delete(stripe_id)
+
+      assert {:error, {:stripe_refs_unsupported, nil}} =
+               ReadOperation.read_file_refs(volume.id, "/unsizable.txt")
     end
 
     test "returns refs when only a parity chunk is missing (data chunks intact)" do
