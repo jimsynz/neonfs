@@ -20,7 +20,7 @@ defmodule NeonFS.CIFS.ConnectionHandlerTest do
 
   describe "end-to-end framed ETF round-trip" do
     test "connect then stat round-trips through the listener", %{port: port} do
-      stub(NeonFS.Client, :core_call, fn NeonFS.Core, :get_file_meta, ["vol-a", "/hello"] ->
+      stub(NeonFS.Client, :core_call, fn NeonFS.Core, :get_file_meta, ["vol-a", "/hello" | _] ->
         {:ok,
          %{
            id: @file_id,

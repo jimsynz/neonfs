@@ -53,7 +53,7 @@ defmodule NeonFS.CIFS.HandlerTest do
   # already exists, so there is no create, and `get_file_meta` answers a
   # directory whose id is nil.
   defp open_root(state) do
-    expect(NeonFS.Client, :core_call, fn NeonFS.Core, :get_file_meta, ["vol-a", "/"] ->
+    expect(NeonFS.Client, :core_call, fn NeonFS.Core, :get_file_meta, ["vol-a", "/" | _] ->
       {:ok, file_meta("/", mode: 0o40755)}
     end)
 
@@ -69,7 +69,7 @@ defmodule NeonFS.CIFS.HandlerTest do
 
   # Opening an existing directory, the way smbd does after `mkdirat`.
   defp open_directory(state, path) do
-    expect(NeonFS.Client, :core_call, fn NeonFS.Core, :get_file_meta, ["vol-a", ^path] ->
+    expect(NeonFS.Client, :core_call, fn NeonFS.Core, :get_file_meta, ["vol-a", ^path | _] ->
       {:ok, file_meta(path, id: "object:" <> path, mode: 0o40755)}
     end)
 
@@ -84,13 +84,13 @@ defmodule NeonFS.CIFS.HandlerTest do
   end
 
   defp open_file(state, path, flags \\ 0o100) do
-    expect(NeonFS.Client, :core_call, fn NeonFS.Core, :get_file_meta, ["vol-a", ^path] ->
+    expect(NeonFS.Client, :core_call, fn NeonFS.Core, :get_file_meta, ["vol-a", ^path | _] ->
       {:error, not_found(path)}
     end)
 
     expect(NeonFS.Client, :core_call, fn NeonFS.Core,
                                          :write_file_at,
-                                         ["vol-a", ^path, 0, <<>>, [mode: 420]] ->
+                                         ["vol-a", ^path, 0, <<>>, [{:mode, 420} | _]] ->
       {:ok, file_meta(path)}
     end)
 
@@ -107,7 +107,7 @@ defmodule NeonFS.CIFS.HandlerTest do
 
   defp open_dir(state, path) do
     stub(NeonFS.Client, :core_call, fn
-      NeonFS.Core, :get_file_meta, ["vol-a", ^path] -> {:ok, file_meta(path, mode: 0o040755)}
+      NeonFS.Core, :get_file_meta, ["vol-a", ^path | _] -> {:ok, file_meta(path, mode: 0o040755)}
       NeonFS.Core, :list_dir, ["vol-a", ^path] -> {:ok, []}
     end)
 
@@ -198,9 +198,82 @@ defmodule NeonFS.CIFS.HandlerTest do
     end
   end
 
+  # The point of carrying the identity is that core gets it. Stubs elsewhere
+  # match it with `| _` so they stay about what they were testing; these assert
+  # it arrives, on one op per shape of core call — path-keyed, id-keyed, and one
+  # where it is merged into an existing opts list rather than appended as an
+  # argument.
+  describe "identity reaches core" do
+    test "on a path-keyed lookup" do
+      expect(NeonFS.Client, :core_call, fn NeonFS.Core, :get_file_meta, ["vol-a", "/foo", opts] ->
+        assert opts == [uid: 1000, gids: [1001, 1002]]
+        {:ok, file_meta("/foo", id: @file_id)}
+      end)
+
+      {reply, _} =
+        Handler.handle(
+          {:stat, %{"path" => "/foo", "identity" => ident(1000, 1001, [1002])}},
+          connected()
+        )
+
+      assert {:ok, %{stat: _}} = reply
+    end
+
+    test "on an id-keyed lookup" do
+      {handle, state} = open_file(connected(), "/p")
+
+      expect(NeonFS.Client, :core_call, fn NeonFS.Core,
+                                           :get_file_meta_by_id,
+                                           ["vol-a", "object:/p", opts] ->
+        assert opts == [uid: 7, gids: [8]]
+        {:ok, file_meta("/p")}
+      end)
+
+      {reply, _} =
+        Handler.handle(
+          {:fstat, %{"handle" => handle, "identity" => ident(7, 8, [])}},
+          state
+        )
+
+      assert {:ok, %{stat: _}} = reply
+    end
+
+    # `mkdir` takes one opts list, so the identity is merged into it rather
+    # than appended — a shape that would silently drop it if the merge were
+    # written the other way round.
+    test "merged into an existing opts list" do
+      expect(NeonFS.Client, :core_call, fn NeonFS.Core, :mkdir, ["vol-a", "/d", opts] ->
+        assert Keyword.get(opts, :mode) == 0o755
+        assert Keyword.get(opts, :uid) == 500
+        assert Keyword.get(opts, :gids) == [501]
+        {:ok, %{}}
+      end)
+
+      {reply, _} =
+        Handler.handle(
+          {:mkdirat, %{"path" => "/d", "mode" => 0o755, "identity" => ident(500, 501, [])}},
+          connected()
+        )
+
+      assert {:ok, %{}} == reply
+    end
+
+    # A request with no identity must reach core as `nobody`, not as root and
+    # not as an absent option — an absent `:uid` defaults to 0 inside core.
+    test "as nobody when the request carried none" do
+      expect(NeonFS.Client, :core_call, fn NeonFS.Core, :get_file_meta, ["vol-a", "/foo", opts] ->
+        assert opts == [uid: 65_534, gids: [65_533]]
+        {:ok, file_meta("/foo", id: @file_id)}
+      end)
+
+      {reply, _} = Handler.handle({:stat, %{"path" => "/foo"}}, connected())
+      assert {:ok, %{stat: _}} = reply
+    end
+  end
+
   describe "metadata" do
     test "stat fetches via core_call and translates to the Samba shape" do
-      stub(NeonFS.Client, :core_call, fn NeonFS.Core, :get_file_meta, ["vol-a", "/foo"] ->
+      stub(NeonFS.Client, :core_call, fn NeonFS.Core, :get_file_meta, ["vol-a", "/foo" | _] ->
         {:ok,
          file_meta("/foo",
            id: @file_id,
@@ -237,7 +310,7 @@ defmodule NeonFS.CIFS.HandlerTest do
     # session at `smb2_create` — which reads as the module never being
     # consulted, when in fact it answered and said root.
     test "stat reports the file's real ownership rather than root" do
-      stub(NeonFS.Client, :core_call, fn NeonFS.Core, :get_file_meta, ["vol-a", "/foo"] ->
+      stub(NeonFS.Client, :core_call, fn NeonFS.Core, :get_file_meta, ["vol-a", "/foo" | _] ->
         {:ok, file_meta("/foo", id: @file_id, uid: 65_534, gid: 65_533)}
       end)
 
@@ -251,7 +324,7 @@ defmodule NeonFS.CIFS.HandlerTest do
     # root is the only defensible default — but it is a default, not a fact,
     # so it must not be mistaken for ownership the volume actually recorded.
     test "stat falls back to root when the metadata carries no ownership" do
-      stub(NeonFS.Client, :core_call, fn NeonFS.Core, :get_file_meta, ["vol-a", "/foo"] ->
+      stub(NeonFS.Client, :core_call, fn NeonFS.Core, :get_file_meta, ["vol-a", "/foo" | _] ->
         {:ok, %{id: @file_id, volume_id: @volume_id, path: "/foo", size: 0, mode: 0o100644}}
       end)
 
@@ -262,7 +335,7 @@ defmodule NeonFS.CIFS.HandlerTest do
     end
 
     test "stat rejects metadata without stable object identity" do
-      stub(NeonFS.Client, :core_call, fn NeonFS.Core, :get_file_meta, ["vol-a", "/foo"] ->
+      stub(NeonFS.Client, :core_call, fn NeonFS.Core, :get_file_meta, ["vol-a", "/foo" | _] ->
         {:ok, %{path: "/foo", size: 0, mode: 0o100644}}
       end)
 
@@ -271,7 +344,7 @@ defmodule NeonFS.CIFS.HandlerTest do
     end
 
     test "stat identity follows the object rather than its path" do
-      stub(NeonFS.Client, :core_call, fn NeonFS.Core, :get_file_meta, ["vol-a", path] ->
+      stub(NeonFS.Client, :core_call, fn NeonFS.Core, :get_file_meta, ["vol-a", path | _] ->
         id = if path == "/replacement", do: "replacement-id", else: @file_id
         {:ok, file_meta(path, id: id)}
       end)
@@ -310,7 +383,7 @@ defmodule NeonFS.CIFS.HandlerTest do
 
       expect(NeonFS.Client, :core_call, fn NeonFS.Core,
                                            :get_file_meta_by_id,
-                                           ["vol-a", "object:/foo"] ->
+                                           ["vol-a", "object:/foo" | _] ->
         {:ok, file_meta("/foo", size: 99)}
       end)
 
@@ -327,7 +400,7 @@ defmodule NeonFS.CIFS.HandlerTest do
     test "fstat on the share root resolves by name, since the root has no id" do
       {handle, state} = open_root(connected())
 
-      expect(NeonFS.Client, :core_call, fn NeonFS.Core, :get_file_meta, ["vol-a", "/"] ->
+      expect(NeonFS.Client, :core_call, fn NeonFS.Core, :get_file_meta, ["vol-a", "/" | _] ->
         {:ok, file_meta("/", mode: 0o40755)}
       end)
 
@@ -341,7 +414,7 @@ defmodule NeonFS.CIFS.HandlerTest do
 
       expect(NeonFS.Client, :core_call, fn NeonFS.Core,
                                            :update_file_meta,
-                                           ["vol-a", "/", [mode: 0o40700]] ->
+                                           ["vol-a", "/", [mode: 0o40700] | _] ->
         {:ok, %{}}
       end)
 
@@ -358,7 +431,7 @@ defmodule NeonFS.CIFS.HandlerTest do
       # exception, not the rule.
       expect(NeonFS.Client, :core_call, fn NeonFS.Core,
                                            :get_file_meta_by_id,
-                                           ["vol-a", "object:/keeps-identity.txt"] ->
+                                           ["vol-a", "object:/keeps-identity.txt" | _] ->
         {:ok, file_meta("/keeps-identity.txt", size: 7)}
       end)
 
@@ -375,7 +448,7 @@ defmodule NeonFS.CIFS.HandlerTest do
     test "a directory handle resolves by name even though the directory has an id" do
       {handle, state} = open_directory(connected(), "/adir")
 
-      expect(NeonFS.Client, :core_call, fn NeonFS.Core, :get_file_meta, ["vol-a", "/adir"] ->
+      expect(NeonFS.Client, :core_call, fn NeonFS.Core, :get_file_meta, ["vol-a", "/adir" | _] ->
         {:ok, file_meta("/adir", id: "object:/adir", mode: 0o40755)}
       end)
 
@@ -394,12 +467,16 @@ defmodule NeonFS.CIFS.HandlerTest do
 
       expect(NeonFS.Client, :core_call, fn NeonFS.Core,
                                            :update_file_meta_by_id,
-                                           ["vol-a", "object:/p", [mode: 0o600]] ->
+                                           ["vol-a", "object:/p", [mode: 0o600], identity] ->
+        assert identity == [uid: 1000, gids: [1001]]
         {:ok, %{}}
       end)
 
       {reply, _} =
-        Handler.handle({:fchmod, %{"handle" => handle, "mode" => 0o600}}, state)
+        Handler.handle(
+          {:fchmod, %{"handle" => handle, "mode" => 0o600, "identity" => ident(1000, 1001, [])}},
+          state
+        )
 
       assert {:ok, %{}} == reply
     end
@@ -413,7 +490,7 @@ defmodule NeonFS.CIFS.HandlerTest do
 
       expect(NeonFS.Client, :core_call, fn NeonFS.Core,
                                            :update_file_meta,
-                                           ["vol-a", "/d", [mode: 0o750]] ->
+                                           ["vol-a", "/d", [mode: 0o750] | _] ->
         {:ok, %{}}
       end)
 
@@ -425,7 +502,9 @@ defmodule NeonFS.CIFS.HandlerTest do
     test "fntimes on a directory handle updates by path" do
       {handle, state} = open_dir(connected(), "/d")
 
-      expect(NeonFS.Client, :core_call, fn NeonFS.Core, :update_file_meta, ["vol-a", "/d", ups] ->
+      expect(NeonFS.Client, :core_call, fn NeonFS.Core,
+                                           :update_file_meta,
+                                           ["vol-a", "/d", ups | _] ->
         assert Keyword.has_key?(ups, :accessed_at)
         assert Keyword.has_key?(ups, :modified_at)
         {:ok, %{}}
@@ -443,7 +522,7 @@ defmodule NeonFS.CIFS.HandlerTest do
     test "fstat on a directory handle resolves by path" do
       {handle, state} = open_dir(connected(), "/d")
 
-      expect(NeonFS.Client, :core_call, fn NeonFS.Core, :get_file_meta, ["vol-a", "/d"] ->
+      expect(NeonFS.Client, :core_call, fn NeonFS.Core, :get_file_meta, ["vol-a", "/d" | _] ->
         {:ok, file_meta("/d", mode: 0o040755)}
       end)
 
@@ -469,7 +548,7 @@ defmodule NeonFS.CIFS.HandlerTest do
 
       stub(NeonFS.Client, :core_call, fn NeonFS.Core,
                                          :update_file_meta_by_id,
-                                         ["vol-a", "object:/p", updates] ->
+                                         ["vol-a", "object:/p", updates | _] ->
         send(self(), {:times, updates})
         {:ok, %{}}
       end)
@@ -487,10 +566,10 @@ defmodule NeonFS.CIFS.HandlerTest do
   describe "file I/O" do
     test "openat creates if missing and mints a handle" do
       stub(NeonFS.Client, :core_call, fn
-        NeonFS.Core, :get_file_meta, ["vol-a", "/new"] ->
+        NeonFS.Core, :get_file_meta, ["vol-a", "/new" | _] ->
           {:error, not_found("/new")}
 
-        NeonFS.Core, :write_file_at, ["vol-a", "/new", 0, <<>>, [mode: 420]] ->
+        NeonFS.Core, :write_file_at, ["vol-a", "/new", 0, <<>>, [{:mode, 420} | _]] ->
           {:ok, file_meta("/new")}
 
         NeonFS.Core, :pin_file, ["vol-a", "/new", _holder] ->
@@ -532,10 +611,10 @@ defmodule NeonFS.CIFS.HandlerTest do
       test_pid = self()
 
       stub(NeonFS.Client, :core_call, fn
-        NeonFS.Core, :get_file_meta, ["vol-a", "/atomic"] ->
+        NeonFS.Core, :get_file_meta, ["vol-a", "/atomic" | _] ->
           {:error, not_found("/atomic")}
 
-        NeonFS.Core, :write_file_at, ["vol-a", "/atomic", 0, <<>>, opts] ->
+        NeonFS.Core, :write_file_at, ["vol-a", "/atomic", 0, <<>>, opts | _] ->
           send(test_pid, {:write_opts, opts})
           {:ok, file_meta("/atomic")}
 
@@ -557,10 +636,10 @@ defmodule NeonFS.CIFS.HandlerTest do
 
     test "openat with O_EXCL | O_CREAT maps :exists from core to :eexist" do
       stub(NeonFS.Client, :core_call, fn
-        NeonFS.Core, :get_file_meta, ["vol-a", "/raced"] ->
+        NeonFS.Core, :get_file_meta, ["vol-a", "/raced" | _] ->
           {:error, not_found("/raced")}
 
-        NeonFS.Core, :write_file_at, ["vol-a", "/raced", 0, <<>>, opts] ->
+        NeonFS.Core, :write_file_at, ["vol-a", "/raced", 0, <<>>, opts | _] ->
           # The peer-cluster integration test for the underlying
           # primitive lives elsewhere; here we just verify the
           # interface-level translation.
@@ -581,10 +660,10 @@ defmodule NeonFS.CIFS.HandlerTest do
       test_pid = self()
 
       stub(NeonFS.Client, :core_call, fn
-        NeonFS.Core, :get_file_meta, ["vol-a", "/plain"] ->
+        NeonFS.Core, :get_file_meta, ["vol-a", "/plain" | _] ->
           {:error, not_found("/plain")}
 
-        NeonFS.Core, :write_file_at, ["vol-a", "/plain", 0, <<>>, opts] ->
+        NeonFS.Core, :write_file_at, ["vol-a", "/plain", 0, <<>>, opts | _] ->
           send(test_pid, {:write_opts, opts})
           {:ok, file_meta("/plain")}
 
@@ -635,7 +714,7 @@ defmodule NeonFS.CIFS.HandlerTest do
 
       expect(NeonFS.Client, :core_call, fn NeonFS.Core,
                                            :write_file_at_by_id,
-                                           ["vol-a", "object:/p", 0, "hello"] ->
+                                           ["vol-a", "object:/p", 0, "hello" | _] ->
         {:ok, %{path: "/p", size: 5}}
       end)
 
@@ -650,7 +729,7 @@ defmodule NeonFS.CIFS.HandlerTest do
 
       expect(NeonFS.Client, :core_call, fn NeonFS.Core,
                                            :truncate_file_by_id,
-                                           ["vol-a", "object:/p", 0] ->
+                                           ["vol-a", "object:/p", 0 | _] ->
         {:ok, %{}}
       end)
 
@@ -684,7 +763,7 @@ defmodule NeonFS.CIFS.HandlerTest do
 
   describe "directories" do
     test "fdopendir snapshots the listing; readdir + closedir consume it one entry per call" do
-      expect(NeonFS.Client, :core_call, fn NeonFS.Core, :get_file_meta, ["vol-a", "/dir"] ->
+      expect(NeonFS.Client, :core_call, fn NeonFS.Core, :get_file_meta, ["vol-a", "/dir" | _] ->
         {:ok, %{path: "/dir", mode: 0o040755}}
       end)
 
@@ -721,8 +800,11 @@ defmodule NeonFS.CIFS.HandlerTest do
 
     test "fdopendir surfaces a list_dir failure instead of snapshotting" do
       stub(NeonFS.Client, :core_call, fn
-        NeonFS.Core, :get_file_meta, ["vol-a", "/dir"] -> {:ok, %{path: "/dir", mode: 0o040755}}
-        NeonFS.Core, :list_dir, ["vol-a", "/dir"] -> {:error, :io_error}
+        NeonFS.Core, :get_file_meta, ["vol-a", "/dir" | _] ->
+          {:ok, %{path: "/dir", mode: 0o040755}}
+
+        NeonFS.Core, :list_dir, ["vol-a", "/dir"] ->
+          {:error, :io_error}
       end)
 
       {reply, _} = Handler.handle({:fdopendir, %{"path" => "/dir"}}, connected())
@@ -730,7 +812,9 @@ defmodule NeonFS.CIFS.HandlerTest do
     end
 
     test "mkdirat creates a directory via mkdir with the plain mode bits" do
-      expect(NeonFS.Client, :core_call, fn NeonFS.Core, :mkdir, ["vol-a", "/d", [mode: 0o755]] ->
+      expect(NeonFS.Client, :core_call, fn NeonFS.Core,
+                                           :mkdir,
+                                           ["vol-a", "/d", [{:mode, 0o755} | _]] ->
         {:ok, %{}}
       end)
 
@@ -741,7 +825,9 @@ defmodule NeonFS.CIFS.HandlerTest do
 
   describe "mutations" do
     test "unlinkat deletes via delete_file" do
-      expect(NeonFS.Client, :core_call, fn NeonFS.Core, :delete_file, ["vol-a", "/x"] -> :ok end)
+      expect(NeonFS.Client, :core_call, fn NeonFS.Core, :delete_file, ["vol-a", "/x" | _] ->
+        :ok
+      end)
 
       {reply, _} = Handler.handle({:unlinkat, %{"path" => "/x"}}, connected())
       assert {:ok, %{}} == reply
@@ -750,7 +836,7 @@ defmodule NeonFS.CIFS.HandlerTest do
     test "renameat forwards both paths to rename_file" do
       expect(NeonFS.Client, :core_call, fn NeonFS.Core,
                                            :rename_file,
-                                           ["vol-a", "/dir/a", "/dir/b"] ->
+                                           ["vol-a", "/dir/a", "/dir/b" | _] ->
         :ok
       end)
 
@@ -776,7 +862,7 @@ defmodule NeonFS.CIFS.HandlerTest do
 
       expect(NeonFS.Client, :core_call, fn NeonFS.Core,
                                            :rename_file,
-                                           ["vol-a", "/old.txt", "/new.txt"] ->
+                                           ["vol-a", "/old.txt", "/new.txt" | _] ->
         :ok
       end)
 
@@ -787,7 +873,7 @@ defmodule NeonFS.CIFS.HandlerTest do
 
       expect(NeonFS.Client, :core_call, fn NeonFS.Core,
                                            :get_file_meta_by_id,
-                                           ["vol-a", "object:/old.txt"] ->
+                                           ["vol-a", "object:/old.txt" | _] ->
         {:ok, file_meta("/new.txt", size: 7)}
       end)
 
@@ -800,7 +886,7 @@ defmodule NeonFS.CIFS.HandlerTest do
 
       expect(NeonFS.Client, :core_call, fn NeonFS.Core,
                                            :rename_file,
-                                           ["vol-a", "/dir", "/moved"] ->
+                                           ["vol-a", "/dir", "/moved" | _] ->
         :ok
       end)
 
@@ -813,7 +899,7 @@ defmodule NeonFS.CIFS.HandlerTest do
 
       expect(NeonFS.Client, :core_call, fn NeonFS.Core,
                                            :get_file_meta_by_id,
-                                           ["vol-a", "object:/dir/sub/f.txt"] ->
+                                           ["vol-a", "object:/dir/sub/f.txt" | _] ->
         {:ok, file_meta("/moved/sub/f.txt", size: 3)}
       end)
 
@@ -826,7 +912,7 @@ defmodule NeonFS.CIFS.HandlerTest do
 
       expect(NeonFS.Client, :core_call, fn NeonFS.Core,
                                            :rename_file,
-                                           ["vol-a", "/shared.txt", "/renamed.txt"] ->
+                                           ["vol-a", "/shared.txt", "/renamed.txt" | _] ->
         :ok
       end)
 
@@ -836,7 +922,9 @@ defmodule NeonFS.CIFS.HandlerTest do
           state_a
         )
 
-      expect(NeonFS.Client, :core_call, fn NeonFS.Core, :delete_file, ["vol-a", "/renamed.txt"] ->
+      expect(NeonFS.Client, :core_call, fn NeonFS.Core,
+                                           :delete_file,
+                                           ["vol-a", "/renamed.txt" | _] ->
         :ok
       end)
 
@@ -921,7 +1009,7 @@ defmodule NeonFS.CIFS.HandlerTest do
 
   describe "path normalisation" do
     test "the share root '.' maps to the volume root '/'" do
-      expect(NeonFS.Client, :core_call, fn NeonFS.Core, :get_file_meta, ["vol-a", "/"] ->
+      expect(NeonFS.Client, :core_call, fn NeonFS.Core, :get_file_meta, ["vol-a", "/" | _] ->
         {:ok, file_meta("/", mode: 0o40777, accessed_at: 1, modified_at: 1, changed_at: 1)}
       end)
 
@@ -930,7 +1018,9 @@ defmodule NeonFS.CIFS.HandlerTest do
     end
 
     test "share-relative entries gain a leading slash" do
-      expect(NeonFS.Client, :core_call, fn NeonFS.Core, :get_file_meta, ["vol-a", "/d/a.txt"] ->
+      expect(NeonFS.Client, :core_call, fn NeonFS.Core,
+                                           :get_file_meta,
+                                           ["vol-a", "/d/a.txt" | _] ->
         {:ok, file_meta("/d/a.txt", size: 3, accessed_at: 1, modified_at: 1, changed_at: 1)}
       end)
 
@@ -939,7 +1029,7 @@ defmodule NeonFS.CIFS.HandlerTest do
     end
 
     test "opendir on the root '.' lists the volume root" do
-      expect(NeonFS.Client, :core_call, fn NeonFS.Core, :get_file_meta, ["vol-a", "/"] ->
+      expect(NeonFS.Client, :core_call, fn NeonFS.Core, :get_file_meta, ["vol-a", "/" | _] ->
         {:ok, %{size: 0, mode: 0o40777}}
       end)
 
@@ -955,7 +1045,7 @@ defmodule NeonFS.CIFS.HandlerTest do
       # "d/old.txt" → "/d/old.txt", likewise the destination.
       expect(NeonFS.Client, :core_call, fn NeonFS.Core,
                                            :rename_file,
-                                           ["vol-a", "/d/old.txt", "/d/new.txt"] ->
+                                           ["vol-a", "/d/old.txt", "/d/new.txt" | _] ->
         :ok
       end)
 
@@ -969,7 +1059,7 @@ defmodule NeonFS.CIFS.HandlerTest do
     end
 
     test "already-absolute paths are left unchanged" do
-      expect(NeonFS.Client, :core_call, fn NeonFS.Core, :get_file_meta, ["vol-a", "/foo"] ->
+      expect(NeonFS.Client, :core_call, fn NeonFS.Core, :get_file_meta, ["vol-a", "/foo" | _] ->
         {:ok, file_meta("/foo")}
       end)
 
@@ -981,7 +1071,7 @@ defmodule NeonFS.CIFS.HandlerTest do
     # listing by opening `<dir>/.` verbatim (smbd_dirptr_get_entry) —
     # the path arrives uncanonicalised.
     test "a trailing '.' segment resolves to the directory itself" do
-      expect(NeonFS.Client, :core_call, fn NeonFS.Core, :get_file_meta, ["vol-a", "/d"] ->
+      expect(NeonFS.Client, :core_call, fn NeonFS.Core, :get_file_meta, ["vol-a", "/d" | _] ->
         {:ok, file_meta("/d", mode: 0o40755)}
       end)
 
@@ -990,7 +1080,7 @@ defmodule NeonFS.CIFS.HandlerTest do
     end
 
     test "a trailing '..' segment resolves to the parent directory" do
-      expect(NeonFS.Client, :core_call, fn NeonFS.Core, :get_file_meta, ["vol-a", "/"] ->
+      expect(NeonFS.Client, :core_call, fn NeonFS.Core, :get_file_meta, ["vol-a", "/" | _] ->
         {:ok, file_meta("/", mode: 0o40777)}
       end)
 
@@ -1001,7 +1091,7 @@ defmodule NeonFS.CIFS.HandlerTest do
     test "mid-path dot segments are resolved without touching other dots" do
       expect(NeonFS.Client, :core_call, fn NeonFS.Core,
                                            :get_file_meta,
-                                           ["vol-a", "/b/.::TMPNAME:D:1%2:x"] ->
+                                           ["vol-a", "/b/.::TMPNAME:D:1%2:x" | _] ->
         {:ok, file_meta("/b/.::TMPNAME:D:1%2:x", mode: 0o40755)}
       end)
 
