@@ -12,11 +12,22 @@ name: Nightly end-to-end
 # `canary`, and a failure here is a signal to investigate rather than a
 # merge blocker.
 #
-# What these jobs prove today: the toolchain each end-to-end test needs
-# exists — for CSI, at the pinned versions with a real cluster accepting the
-# chart; for CIFS, an `smbd` running the VFS module built against its own
-# Samba. The tests themselves (csi-sanity against a deployed driver, and an
-# SMB round trip through the bridge) are the remaining pieces.
+# What these jobs prove today:
+#
+#   * `rig_acceptance` — the whole `test-rig` acceptance matrix against a real
+#     cluster of QEMU VMs installed from the shipped `.deb`s, including the
+#     steps a container cannot run at all: attaching a kernel block device
+#     over NBD and verifying it with `fio --verify`.
+#   * `csi_tooling` — the Kubernetes toolchain at its pinned versions, and the
+#     CSI chart as far as it can be validated *without* a cluster. It boots
+#     none; neither kind nor k3d can bring one up inside a runner container,
+#     which is what the k3s rig VM exists to answer.
+#   * `cifs_smbd` — an `smbd` running the VFS module built against its own
+#     Samba, and an SMB round trip through the bridge.
+#
+# `rig_acceptance` and `csi_tooling` are two halves of one story: the cluster
+# the CSI end-to-end test needs comes from the rig, not from a runner
+# container.
 
 on:
   schedule:
@@ -49,6 +60,113 @@ jobs:
           echo "elixir_rust_image=harton.dev/james/workflows/elixir-rust:${ELIXIR}-erlang-${ERLANG}-rust-${RUST}" >> "$GITHUB_OUTPUT"
           echo "elixir=${ELIXIR}" >> "$GITHUB_OUTPUT"
           echo "rust=${RUST}" >> "$GITHUB_OUTPUT"
+
+  # =======================================================================
+  # The `test-rig` acceptance matrix, in CI for the first time. Everything
+  # here was previously only ever run by hand.
+  #
+  # It runs on `jeb` rather than the containerised `amd64` runners for the
+  # same reason `bench.yml` does: the rig boots QEMU VMs and wants /dev/kvm,
+  # and TCG emulation is roughly ten times slower. That is also what makes
+  # the suite's kernel-level steps possible — a container cannot `modprobe
+  # nbd` or attach a block device, so the NBD attach and `fio --verify`
+  # coverage has nowhere else to live.
+  #
+  # Two scheduled QEMU workloads now share this one KVM host: `bench.yml` at
+  # 03:00 Monday and this at 14:00 daily. They do not overlap today, and that
+  # is now a constraint to preserve rather than a coincidence — anything that
+  # lengthens either schedule has to account for the other.
+  # =======================================================================
+  rig_acceptance:
+    runs-on: jeb
+    # Three VMs to boot and provision from freshly-built `.deb`s, then every
+    # interface in the matrix. The rig is sequential by design, so give it
+    # room; `bench.yml` allows 720 minutes for the same host.
+    timeout-minutes: 240
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # `jeb` is bare metal and the CI base images live in another
+      # repository, so provisioning happens in-job. Same list as bench.yml,
+      # which boots the same VMs.
+      - name: Install rig prerequisites
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends \
+            qemu-system-x86 qemu-utils cloud-image-utils jq
+          if ! command -v nfpm >/dev/null 2>&1; then
+            curl -fsSL -o /tmp/nfpm.tgz \
+              https://github.com/goreleaser/nfpm/releases/download/v2.46.3/nfpm_2.46.3_Linux_x86_64.tar.gz
+            sudo tar -C /usr/local/bin -xzf /tmp/nfpm.tgz nfpm
+          fi
+
+      - name: Provision toolchain from .tool-versions
+        run: |
+          asdf install
+          mix local.hex --force
+          mix local.rebar --force
+
+      # A stale rig from an interrupted earlier run would be adopted as "a
+      # running cluster" by `up`, so start from nothing rather than
+      # inheriting whatever is on the host.
+      - name: Discard any leftover rig state
+        run: cd test-rig && ./neonfs-rig clean || true
+
+      - name: Boot a three-node cluster
+        run: |
+          export PATH="$PWD/resources/scripts:$PATH"
+          cd test-rig
+          NODES=3 ./neonfs-rig up
+
+      # `multi` is the fuller matrix: it adds the cross-node replication steps
+      # to everything `single` runs. The whole suite runs, with no step
+      # selection and no opt-in flag — an opt-in test is one nobody runs,
+      # which is what kept the rig out of CI until now. Steps that cannot run
+      # on this host report 77 (skip) through the suite's own contract rather
+      # than failing, which is how the CIFS steps behave here: the VFS module
+      # is not built (that needs a Samba tree, which is `cifs_smbd`'s job), so
+      # its share step skips.
+      #
+      # Step ordering inside the suite is load-bearing and must not be
+      # disturbed: `s_block_fio_verify` writes random data across the device
+      # including its superblock, so it runs before the filesystem step. A
+      # reordering destroys that step's fixture and surfaces as a failure in
+      # the wrong place.
+      - name: Run the acceptance matrix
+        run: |
+          export PATH="$PWD/resources/scripts:$PATH"
+          cd test-rig
+          ./acceptance multi 3
+
+      # A nightly failure has to be diagnosable without shell access to
+      # `jeb`, and the per-VM serial console is where a node that never came
+      # up says why. Collected before teardown, which deletes the run dir.
+      - name: Collect VM serial logs
+        if: always()
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/rig-logs"
+          for log in test-rig/.cache/run/node-*/serial.log; do
+            [ -f "$log" ] || continue
+            node="$(basename "$(dirname "$log")")"
+            cp "$log" "$GITHUB_WORKSPACE/rig-logs/${node}-serial.log"
+          done
+          echo "collected $(ls -1 "$GITHUB_WORKSPACE/rig-logs" | wc -l) serial log(s)"
+
+      - name: Upload rig logs
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: rig-acceptance-${{ github.sha }}
+          path: rig-logs/**
+          retention-days: 14
+          if-no-files-found: warn
+
+      # Unconditional: VMs left running on a shared KVM host would collide
+      # with the weekly bench and with the next night's run.
+      - name: Tear down the rig
+        if: always()
+        run: cd test-rig && ./neonfs-rig clean || true
 
   csi_tooling:
     runs-on: amd64
