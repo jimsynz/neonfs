@@ -74,6 +74,20 @@ defmodule NeonFS.Integration.CIFSSmbdTest do
 
     dir = Path.join(cifs_peer.data_dir, "smbd")
 
+    # The share no longer forces root, so the session's own identity is what
+    # core checks — and a volume root owned by uid 0 with mode 0o40755 grants a
+    # non-root session only `r-x`, which refuses every create. Handing the root
+    # to the account the share runs as is what makes the volume usable by it,
+    # and is what an operator does for a real share.
+    %{uid: uid, gid: gid} = Smbd.identity()
+
+    {:ok, _} =
+      PeerCluster.rpc(cluster, :node1, NeonFS.Core, :update_file_meta, [
+        @volume_name,
+        "/",
+        [uid: uid, gid: gid]
+      ])
+
     server = Smbd.start!(dir: dir, socket_path: socket_path, volume: @volume_name)
     on_exit(fn -> Smbd.stop(server) end)
 
