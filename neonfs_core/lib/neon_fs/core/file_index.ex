@@ -270,6 +270,24 @@ defmodule NeonFS.Core.FileIndex do
   end
 
   @doc """
+  The chunk list a caller's update was computed from, for the
+  `:expect_chunks` option.
+
+  A partial write is a read-modify-write of the whole chunk list — read it,
+  splice the affected span, commit the result — and the read happens
+  outside this process. Two writers therefore compute complete lists from
+  the same starting point, and the second commit silently discards the
+  first's chunks even when the two wrote to different parts of the file.
+
+  Passing the list the update was based on makes the commit a
+  compare-and-swap: this process holds the file while it checks, so a
+  caller whose snapshot went stale is told to redo its splice rather than
+  overwrite someone else's work.
+  """
+  @spec expect_chunks_opt([binary()]) :: keyword()
+  def expect_chunks_opt(chunks) when is_list(chunks), do: [expect_chunks: chunks]
+
+  @doc """
   Truncates a file to the given size, trimming chunks and stripes as needed.
 
   When `new_size` is smaller than the current file size, walks the chunk list
@@ -724,9 +742,15 @@ defmodule NeonFS.Core.FileIndex do
         state
       ) do
     plan =
-      plan_update(file_id, updates, state.pending_files)
-      |> with_chunk_commit(write_id, chunk_hashes)
-      |> with_extra_mutations(opts)
+      case check_expected_chunks(file_id, opts, state.pending_files) do
+        :ok ->
+          plan_update(file_id, updates, state.pending_files)
+          |> with_chunk_commit(write_id, chunk_hashes)
+          |> with_extra_mutations(opts)
+
+        {:error, _reason} = error ->
+          {:now, error}
+      end
 
     stage_or_reply(plan, from, state)
   end
@@ -904,6 +928,23 @@ defmodule NeonFS.Core.FileIndex do
     else
       {:error, %Conflict{}} -> {:now, {:error, AlreadyExists.from_reason(:already_exists)}}
       {:error, reason} -> {:now, {:error, reason}}
+    end
+  end
+
+  # The compare half of the compare-and-swap. Runs inside this process,
+  # holding the file, so a snapshot that is still current here cannot go
+  # stale before the mutation is staged from the same view.
+  defp check_expected_chunks(file_id, opts, overlay) do
+    case Keyword.fetch(opts, :expect_chunks) do
+      :error ->
+        :ok
+
+      {:ok, expected} ->
+        case fetch_file(file_id, overlay) do
+          {:ok, %{chunks: ^expected}} -> :ok
+          {:ok, _changed} -> {:error, :stale_chunks}
+          {:error, reason} -> {:error, reason}
+        end
     end
   end
 

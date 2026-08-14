@@ -637,7 +637,16 @@ defmodule NeonFS.Core.WriteOperation do
     end
   end
 
-  defp do_write_at(volume, file_meta, offset, data, write_id, opts) do
+  # A partial write reads the file's chunk list, splices the affected span
+  # and commits the result. The read is outside the commit, so two writers
+  # can each build a complete list from the same snapshot and the second
+  # discards the first's chunks — even writing to different parts of the
+  # file. The commit compares the snapshot it was computed from, and a
+  # writer whose view went stale redoes the splice against the new one
+  # rather than overwriting work it never saw.
+  @max_write_at_attempts 25
+
+  defp do_write_at(volume, file_meta, offset, data, write_id, opts, attempt \\ 1) do
     write_end = offset + byte_size(data)
     chunk_positions = build_chunk_info_list(file_meta.chunks, volume.id, 0, [])
     {prefix, affected, suffix} = partition_chunks(chunk_positions, offset, write_end)
@@ -662,10 +671,17 @@ defmodule NeonFS.Core.WriteOperation do
       all_hashes = prefix_hashes ++ new_hashes ++ suffix_hashes
       new_size = max(file_meta.size, write_end)
 
-      case update_file_and_commit(file_meta.volume_id, file_meta.id, write_id, new_chunks,
-             chunks: all_hashes,
-             size: new_size
+      case update_file_and_commit(
+             file_meta.volume_id,
+             file_meta.id,
+             write_id,
+             new_chunks,
+             [chunks: all_hashes, size: new_size],
+             FileIndex.expect_chunks_opt(file_meta.chunks)
            ) do
+        {:error, :stale_chunks} ->
+          retry_write_at(volume, file_meta, offset, data, write_id, opts, attempt)
+
         {:ok, _updated_meta} = ok ->
           # Account the offset write against volume stats: only the
           # grown bytes are new logical data, plus any newly-stored (non-deduped)
@@ -683,6 +699,40 @@ defmodule NeonFS.Core.WriteOperation do
     else
       {:error, _reason} = error ->
         abort_chunks(write_id)
+        error
+    end
+  end
+
+  # Another writer committed between this one's read and its commit, so the
+  # splice was computed against a list that no longer exists. Re-read and
+  # redo it; the chunks staged for the abandoned attempt are released, as
+  # they are on any other failure.
+  defp retry_write_at(_volume, file_meta, _offset, _data, write_id, _opts, attempt)
+       when attempt >= @max_write_at_attempts do
+    abort_chunks(write_id)
+
+    Logger.warning("Gave up on a partial write after repeated concurrent updates",
+      file_id: file_meta.id,
+      attempt: attempt
+    )
+
+    {:error, :stale_chunks}
+  end
+
+  defp retry_write_at(volume, file_meta, offset, data, write_id, opts, attempt) do
+    abort_chunks(write_id)
+
+    # Without a pause, every loser retries into the same window and the
+    # same one keeps losing. The jitter is what actually breaks the tie;
+    # the growth keeps a crowded file from spending its whole budget in
+    # the first millisecond.
+    Process.sleep(:rand.uniform(min(attempt * 4, 50)))
+
+    case FileIndex.get(file_meta.volume_id, file_meta.id) do
+      {:ok, fresh_meta} ->
+        do_write_at(volume, fresh_meta, offset, data, write_id, opts, attempt + 1)
+
+      {:error, _reason} = error ->
         error
     end
   end
