@@ -30,7 +30,14 @@ defmodule NeonFS.TestSupport.Smbd do
   write its own.
   """
 
-  @required_binaries ~w(smbd smbclient testparm)
+  @required_binaries ~w(smbd smbclient testparm pdbedit)
+
+  # The share runs as a real authenticated account rather than a guest mapped
+  # to root. Samba maps an SMB user to a local one under `security = user`, so
+  # the account has to already exist on the host — the user running the tests is
+  # the only one that reliably does. Its password is Samba's own, kept in the
+  # test's `private dir` and never touching the system passdb.
+  @smb_password "neonfs-test-pw"
 
   @typedoc """
   A running server. `port` is where `smbclient` should dial;
@@ -41,8 +48,24 @@ defmodule NeonFS.TestSupport.Smbd do
           os_pid: pos_integer(),
           share: String.t(),
           dir: String.t(),
-          erlang_port: port()
+          erlang_port: port(),
+          user: String.t(),
+          uid: non_neg_integer(),
+          gid: non_neg_integer()
         }
+
+  @doc """
+  The uid the share's sessions run as.
+
+  A volume served to this server has to grant this identity write access, or
+  every create is refused by core — which is the point: the share no longer
+  forces root, so the tests exercise the permission path rather than bypassing
+  it.
+  """
+  @spec identity() :: %{user: String.t(), uid: non_neg_integer(), gid: non_neg_integer()}
+  def identity do
+    %{user: run_cmd!("id", ["-un"]), uid: run_int!("id", ["-u"]), gid: run_int!("id", ["-g"])}
+  end
 
   @doc """
   Whether this machine can run an `smbd` with the NeonFS VFS module.
@@ -88,15 +111,69 @@ defmodule NeonFS.TestSupport.Smbd do
 
     port = free_port()
 
+    %{user: user, uid: uid, gid: gid} = identity()
+
     conf_path = Path.join(dir, "smb.conf")
     File.write!(conf_path, smb_conf(dir, share, socket_path, volume, port, read_only))
 
     validate_conf!(conf_path)
+    add_smb_user!(conf_path, user)
 
-    server = spawn_smbd(conf_path, dir, port, share)
+    server =
+      conf_path
+      |> spawn_smbd(dir, port, share)
+      |> Map.merge(%{user: user, uid: uid, gid: gid})
+
     await_ready!(server)
     server
   end
+
+  # `pdbedit`, not `smbpasswd`: the latter refuses to take a username unless it
+  # is running as root ("When run by root: smbpasswd [options] [username]"), and
+  # its `-L` local mode refuses too. `pdbedit` has no such restriction, so the
+  # tests need no privileges.
+  #
+  # `--configfile`, not `-c` — on `pdbedit` that is `--account-control`, and it
+  # is silently accepted, leaving the tool writing to the *system* passdb at
+  # `/var/lib/samba/private/passdb.tdb` and failing on its permissions. The
+  # config pins `passdb backend` to a path in the test directory, because
+  # `private dir` alone does not move it.
+  #
+  # `-t` takes the password from stdin twice rather than from a tty.
+  defp add_smb_user!(conf_path, user) do
+    port =
+      Port.open({:spawn_executable, System.find_executable("pdbedit")}, [
+        :binary,
+        :exit_status,
+        :hide,
+        :stderr_to_stdout,
+        args: ["--configfile=" <> conf_path, "-a", "-u", user, "-t"]
+      ])
+
+    Port.command(port, "#{@smb_password}\n#{@smb_password}\n")
+    collect_exit!(port, "pdbedit", [])
+  end
+
+  defp collect_exit!(port, name, acc) do
+    receive do
+      {^port, {:data, data}} -> collect_exit!(port, name, [data | acc])
+      {^port, {:exit_status, 0}} -> :ok
+      {^port, {:exit_status, code}} -> raise "#{name} failed (#{code}):\n#{output(acc)}"
+    after
+      30_000 -> raise "#{name} did not finish within 30s:\n#{output(acc)}"
+    end
+  end
+
+  defp output(acc), do: acc |> Enum.reverse() |> Enum.join()
+
+  defp run_cmd!(cmd, args) do
+    case System.cmd(cmd, args, stderr_to_stdout: true) do
+      {out, 0} -> String.trim(out)
+      {out, code} -> raise "#{cmd} #{Enum.join(args, " ")} failed (#{code}): #{out}"
+    end
+  end
+
+  defp run_int!(cmd, args), do: cmd |> run_cmd!(args) |> String.to_integer()
 
   @doc """
   Stops the server, leaving nothing of it behind.
@@ -135,7 +212,8 @@ defmodule NeonFS.TestSupport.Smbd do
         "//localhost/#{share}",
         "-p",
         Integer.to_string(server.port),
-        "-N",
+        "-U",
+        "#{server.user}%#{@smb_password}",
         "-c",
         commands
       ] ++ Keyword.get(opts, :extra_args, [])
@@ -179,7 +257,6 @@ defmodule NeonFS.TestSupport.Smbd do
         workgroup = WORKGROUP
         server min protocol = SMB2
         security = user
-        map to guest = Bad User
         smb ports = #{port}
         log file = #{dir}/smbd.log
         log level = 3 vfs:10
@@ -189,18 +266,19 @@ defmodule NeonFS.TestSupport.Smbd do
         cache directory = #{dir}
         pid directory = #{dir}
         ncalrpc dir = #{dir}
+        # Pinned explicitly: `private dir` does not move the passdb, so without
+        # this both `pdbedit` and `smbd` read the host's database at
+        # /var/lib/samba/private and the test needs privileges it should not.
+        passdb backend = tdbsam:#{dir}/passdb.tdb
 
     [#{share}]
         path = /
         read only = #{if read_only, do: "yes", else: "no"}
-        guest ok = yes
-        # Without this the session runs as `nobody` and every create is
-        # refused before a VFS hook is reached: the module implements no
-        # ACL hooks, so smbd's access check falls through to the default
-        # VFS and answers from the host filesystem rather than NeonFS.
-        # Fine for a test share, which is asserting the data path rather
-        # than access control; not an answer for a deployment.
-        force user = root
+        # No `force user` and no guest access: the session runs as the
+        # authenticated account, so every request reaches core carrying that
+        # identity and is checked against the volume's own permissions. A share
+        # that forced root would pass these tests without the permission path
+        # ever running.
         vfs objects = neonfs
         neonfs:socket = #{socket_path}
         neonfs:volume = #{volume}
@@ -252,7 +330,19 @@ defmodule NeonFS.TestSupport.Smbd do
   end
 
   defp await_ready!(server, attempts) do
-    case System.cmd("smbclient", ["-L", "localhost", "-p", Integer.to_string(server.port), "-N"],
+    # Authenticated, like every other call: with guest access gone, `-N` gets
+    # NT_STATUS_LOGON_FAILURE and this would spin until it gave up, reporting a
+    # server that never came ready when it had.
+    case System.cmd(
+           "smbclient",
+           [
+             "-L",
+             "localhost",
+             "-p",
+             Integer.to_string(server.port),
+             "-U",
+             "#{server.user}%#{@smb_password}"
+           ],
            stderr_to_stdout: true
          ) do
       {_output, 0} ->
