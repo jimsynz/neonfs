@@ -334,7 +334,8 @@ static int do_stat(nw_conn *conn, const char *op, const char *path,
     }
 
     if (strcmp(key, "dev") == 0 || strcmp(key, "ino") == 0 ||
-        strcmp(key, "size") == 0 || strcmp(key, "mode") == 0) {
+        strcmp(key, "size") == 0 || strcmp(key, "mode") == 0 ||
+        strcmp(key, "uid") == 0 || strcmp(key, "gid") == 0) {
       unsigned long long n = 0;
       if (ei_decode_ulonglong(buf, &idx, &n) != 0) goto bad;
       if (strcmp(key, "dev") == 0) {
@@ -345,6 +346,12 @@ static int do_stat(nw_conn *conn, const char *op, const char *path,
         saw_ino = 1;
       } else if (strcmp(key, "size") == 0) {
         out->size = (uint64_t)n;
+      } else if (strcmp(key, "uid") == 0) {
+        if (n > UINT32_MAX) goto bad;
+        out->uid = (uint32_t)n;
+      } else if (strcmp(key, "gid") == 0) {
+        if (n > UINT32_MAX) goto bad;
+        out->gid = (uint32_t)n;
       } else {
         if (n > UINT32_MAX) goto bad;
         out->mode = (uint32_t)n;

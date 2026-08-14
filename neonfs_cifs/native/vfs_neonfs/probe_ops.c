@@ -33,6 +33,8 @@ int nw_probe_run(nw_conn *conn) {
   PCHECK(st.ino == UINT64_C(0x957c881d9661b59d), "stat.ino");
   PCHECK(st.size == 1234, "stat.size");
   PCHECK(st.mode == 0100644, "stat.mode");
+  PCHECK(st.uid == 65534, "stat.uid");
+  PCHECK(st.gid == 65533, "stat.gid");
   PCHECK(st.atime == 111 && st.mtime == 222 && st.ctime == 333, "stat.times");
   PCHECK(st.kind == NW_KIND_FILE, "stat.kind");
 
@@ -42,6 +44,7 @@ int nw_probe_run(nw_conn *conn) {
   PCHECK(handle == 42, "openat.handle");
   PCHECK(nw_fstat(conn, handle, &st) == 0, "fstat");
   PCHECK(st.size == 1234, "fstat.size");
+  PCHECK(st.uid == 65534 && st.gid == 65533, "fstat.ownership");
 
   PCHECK(nw_fchmod(conn, handle, 0755) == 0, "fchmod");
   PCHECK(nw_fntimes(conn, handle, 10, 20) == 0, "fntimes");

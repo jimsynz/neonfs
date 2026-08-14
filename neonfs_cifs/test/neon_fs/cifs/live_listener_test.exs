@@ -83,6 +83,12 @@ defmodule NeonFS.CIFS.LiveListenerTest do
         ino: 0x957C881D9661B59D,
         size: 1234,
         mode: 0o100644,
+        # Non-root deliberately: root:root is what the module reported before
+        # ownership reached the wire, so a fixture of 0 would pass either way.
+        # These match the mock responder in `test_wire.c`, because
+        # `probe_ops.c` asserts against both.
+        uid: 65_534,
+        gid: 65_533,
         atime: 111,
         mtime: 222,
         ctime: 333,

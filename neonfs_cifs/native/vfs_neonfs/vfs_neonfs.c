@@ -147,6 +147,8 @@ static void neonfs_fill_stat(SMB_STRUCT_STAT *dst, const nw_stat_t *src)
 	dst->st_ex_ino = (ino_t)src->ino;
 	dst->st_ex_size = (off_t)src->size;
 	dst->st_ex_mode = (mode_t)src->mode | neonfs_kind_mode(src->kind);
+	dst->st_ex_uid = (uid_t)src->uid;
+	dst->st_ex_gid = (gid_t)src->gid;
 	dst->st_ex_nlink = 1;
 	dst->st_ex_atime.tv_sec = (time_t)src->atime;
 	dst->st_ex_mtime.tv_sec = (time_t)src->mtime;
