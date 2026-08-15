@@ -46,6 +46,24 @@ defmodule NeonFS.TestSupport.Smbd do
   @spec password() :: String.t()
   def password, do: @smb_password
 
+  # An account that is *not* the one running the tests, for asserting that
+  # NeonFS refuses a principal it should. It has to be a real local user for
+  # `security = user` to map it, and `nobody` is the one every distribution
+  # has. smbd can only switch to it when running as root, so a test using this
+  # has to say so.
+  @unprivileged_user "nobody"
+
+  @doc """
+  A second, unprivileged account the server also accepts.
+
+  The account the tests otherwise run as is whoever invoked them — which in CI
+  is **root**, and `NeonFS.Core.Authorise.check/4` grants uid 0 everything. A
+  test about being refused therefore cannot use it, or it passes for the wrong
+  reason on a workstation and cannot fail at all in CI.
+  """
+  @spec unprivileged_credentials() :: String.t()
+  def unprivileged_credentials, do: "#{@unprivileged_user}%#{@smb_password}"
+
   @typedoc """
   A running server. `port` is where `smbclient` should dial;
   `os_pid` is the process group `stop/1` signals.
@@ -125,6 +143,9 @@ defmodule NeonFS.TestSupport.Smbd do
 
     validate_conf!(conf_path)
     add_smb_user!(conf_path, user)
+    # Added unconditionally so a test can ask for it without the server having
+    # to be started differently; smbd only switches to it when it can.
+    add_smb_user!(conf_path, @unprivileged_user)
 
     server =
       conf_path
