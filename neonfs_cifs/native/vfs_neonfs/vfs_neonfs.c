@@ -33,6 +33,15 @@
 #undef DBGC_CLASS
 #define DBGC_CLASS DBGC_VFS
 
+/*
+ * The identity an operation with no establishable one is performed as. Not 0:
+ * `NeonFS.Core.Authorise.check/4` grants uid 0 everything, so defaulting to it
+ * would turn a missing identity into full access. Matches the Elixir handler's
+ * own fallback.
+ */
+#define NEONFS_NOBODY_UID 65534
+#define NEONFS_NOBODY_GID 65533
+
 /* Per-tree-connect state, stored in the VFS handle. */
 struct neonfs_config {
 	nw_conn conn;
@@ -137,11 +146,21 @@ static void neonfs_disconnect(struct vfs_handle_struct *handle)
  * `nw_*` call could be forgotten at one call site, and that site would then
  * send whatever the previous operation used.
  *
- * A missing token is refused rather than defaulted. Every caller already
- * treats NULL as `EBADF`, so failing closed here costs nothing and avoids the
- * alternative: falling back to uid 0, which core authorises for everything.
- * Samba populates `session_info` at tree connect, so this is a guard against
- * a future path that does not, not an expected case.
+ * A missing token falls back to `nobody` rather than refusing. Refusing meant
+ * returning NULL, and every caller maps NULL to `EBADF` — so an operation with
+ * no establishable identity reached the client as NT_STATUS_INVALID_HANDLE, a
+ * handle answer to a permission question. A client cannot tell that from a
+ * broken share, and a test asserting only "it failed" cannot tell it from a
+ * correct denial.
+ *
+ * `nobody` is the same fallback the Elixir handler makes for a request that
+ * arrives without one, so both ends of the wire agree. It is not uid 0, which
+ * `NeonFS.Core.Authorise.check/4` grants everything — so core refuses the
+ * operation on its own terms and the client gets NT_STATUS_ACCESS_DENIED,
+ * which is what actually happened.
+ *
+ * Samba populates `session_info` at tree connect, so this remains a guard
+ * against a future path that does not rather than an expected case.
  */
 static struct neonfs_config *neonfs_cfg(struct vfs_handle_struct *handle)
 {
@@ -155,8 +174,11 @@ static struct neonfs_config *neonfs_cfg(struct vfs_handle_struct *handle)
 
 	if (handle->conn->session_info == NULL ||
 	    handle->conn->session_info->unix_token == NULL) {
-		DBG_ERR("neonfs: no unix token for this operation\n");
-		return NULL;
+		DBG_ERR("neonfs: no unix token for this operation; "
+			"falling back to nobody\n");
+		nw_set_ident(&cfg->conn, NEONFS_NOBODY_UID, NEONFS_NOBODY_GID,
+			     NULL, 0);
+		return cfg;
 	}
 
 	tok = handle->conn->session_info->unix_token;

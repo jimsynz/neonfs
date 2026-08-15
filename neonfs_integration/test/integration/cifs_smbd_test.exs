@@ -284,7 +284,7 @@ defmodule NeonFS.Integration.CIFSSmbdTest do
       assert {:error, {_status, output}} =
                Smbd.client(server, "ls", credentials: "#{server.user}%wrong-#{Smbd.password()}")
 
-      assert output =~ "NT_STATUS_LOGON_FAILURE"
+      assert output =~ "NT_STATUS_LOGON_FAILURE", Smbd.logs(server)
 
       # Samba rejected the session, so the bridge was never asked anything. A
       # module that had been consulted would have logged an op here, and that
@@ -335,7 +335,7 @@ defmodule NeonFS.Integration.CIFSSmbdTest do
                  credentials: Smbd.unprivileged_credentials()
                )
 
-      assert output =~ "NT_STATUS_ACCESS_DENIED"
+      assert output =~ "NT_STATUS_ACCESS_DENIED", Smbd.logs(server)
       refute File.exists?(fetched)
 
       # The privileged session reads the same file, so the refusal is about who
