@@ -462,6 +462,18 @@ defmodule NeonFS.Core.Telemetry do
         measurement: :chunks_deleted,
         description: "Total chunks deleted by garbage collection"
       ),
+      sum("neonfs.gc.volume_reclaim.chunks",
+        event_name: [:neonfs, :garbage_collector, :volume_reclaim],
+        measurement: :chunks,
+        tags: [:volume_id, :volume_type],
+        description: "Chunks reclaimed by garbage collection, per volume"
+      ),
+      sum("neonfs.gc.volume_reclaim.bytes",
+        event_name: [:neonfs, :garbage_collector, :volume_reclaim],
+        measurement: :bytes,
+        tags: [:volume_id, :volume_type],
+        description: "Bytes reclaimed by garbage collection, per volume"
+      ),
       counter("neonfs.tier_migration.count",
         event_name: [:neonfs, :tier_migration, :stop],
         tags: [:source_tier, :target_tier],

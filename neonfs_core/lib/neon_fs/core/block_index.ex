@@ -26,8 +26,12 @@ defmodule NeonFS.Core.BlockIndex do
   modes, to save writes NBD never told the guest were durable.
 
   The consequence to watch is that a crashy device generates GC debt
-  proportional to its in-flight window, and that debt is invisible until
-  GC runs.
+  proportional to its in-flight window. `[:neonfs, :garbage_collector,
+  :volume_reclaim]` is where it surfaces: reclaim per volume, tagged with
+  the volume's type. Nothing distinguishes a crash-leaked chunk from one an
+  overwrite or a discard orphaned — both are simply unreferenced by the time
+  GC sees them — so what a crash loop looks like is a reclaim rate that does
+  not track the device's write rate.
 
   ## One consensus round per commit, however many extents
 

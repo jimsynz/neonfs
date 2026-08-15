@@ -102,7 +102,7 @@ defmodule NeonFS.Core.GarbageCollector do
     referenced_stripes =
       live_stripes |> MapSet.union(snapshot_stripes) |> MapSet.union(extent_stripes)
 
-    {chunks_deleted, chunks_protected} =
+    {chunks_deleted, chunks_protected, freed_by_volume} =
       sweep_chunks(referenced_chunks, volume_filter, unmarked_volumes)
 
     stripes_deleted = sweep_stripes(referenced_stripes, volume_filter)
@@ -116,6 +116,7 @@ defmodule NeonFS.Core.GarbageCollector do
     }
 
     emit_gc_telemetry(result, duration)
+    emit_volume_reclaim_telemetry(freed_by_volume)
 
     {:ok, result}
   end
@@ -394,7 +395,7 @@ defmodule NeonFS.Core.GarbageCollector do
 
     release_freed_usage(freed)
 
-    {deleted, protected}
+    {deleted, protected, freed}
   end
 
   defp sweep_unreferenced_chunk(chunk_meta, deleted, protected, freed) do
@@ -560,6 +561,37 @@ defmodule NeonFS.Core.GarbageCollector do
       end)
 
     if Enum.any?(results, &(&1 == :ok)), do: :ok, else: :error
+  end
+
+  # Per-volume reclaim, which is the only visibility there is into the GC
+  # debt an extent-backed device accrues.
+  #
+  # The extent map's write ordering leaks chunks by design: they land before
+  # the map commits, so a crash between the two leaves chunks nothing points
+  # at, in proportion to the device's in-flight window. Nothing distinguishes
+  # such a chunk from one legitimately orphaned by an overwrite or a discard —
+  # by the time GC sees either, both are simply unreferenced, and GC has no
+  # history to tell them apart. So this reports the reclaim rate rather than
+  # claiming to report the debt: on a device whose write rate is known, a
+  # reclaim rate that does not track it is the crash loop showing through.
+  #
+  # `volume_type` rides along because that distinction only makes sense for a
+  # `:block` volume; on an `:fs` volume the same number is ordinary churn.
+  defp emit_volume_reclaim_telemetry(freed_by_volume) do
+    Enum.each(freed_by_volume, fn {volume_id, {bytes, chunks}} ->
+      :telemetry.execute(
+        [:neonfs, :garbage_collector, :volume_reclaim],
+        %{bytes: bytes, chunks: chunks},
+        %{volume_id: volume_id, volume_type: volume_type(volume_id)}
+      )
+    end)
+  end
+
+  defp volume_type(volume_id) do
+    case VolumeRegistry.get(volume_id) do
+      {:ok, %{type: type}} -> type
+      _ -> nil
+    end
   end
 
   defp emit_gc_telemetry(result, duration) do

@@ -588,6 +588,45 @@ defmodule NeonFS.Core.GarbageCollectorTest do
     end
   end
 
+  describe "per-volume reclaim telemetry" do
+    setup do
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:neonfs, :garbage_collector, :volume_reclaim]
+        ])
+
+      {:ok, reclaim_ref: ref}
+    end
+
+    test "reports what a sweep reclaimed, attributed to the volume and its type",
+         %{reclaim_ref: ref} do
+      {:ok, vol} = VolumeRegistry.create("gc-reclaim-vol", [])
+      {:ok, file} = WriteOperation.write_file_streamed(vol.id, "/gone.txt", ["reclaim me"])
+      FileIndex.delete(file.id)
+
+      volume_id = vol.id
+
+      assert {:ok, result} = GarbageCollector.collect(volume_id: vol.id)
+      assert result.chunks_deleted > 0
+
+      assert_receive {[:neonfs, :garbage_collector, :volume_reclaim], ^ref, measurements,
+                      %{volume_id: ^volume_id, volume_type: :fs}}
+
+      assert measurements.chunks > 0
+      assert measurements.bytes > 0
+    end
+
+    test "a sweep that reclaims nothing emits nothing", %{reclaim_ref: ref} do
+      {:ok, vol} = VolumeRegistry.create("gc-no-reclaim-vol", [])
+      {:ok, _file} = WriteOperation.write_file_streamed(vol.id, "/kept.txt", ["keep me"])
+
+      assert {:ok, result} = GarbageCollector.collect(volume_id: vol.id)
+      assert result.chunks_deleted == 0
+
+      refute_receive {[:neonfs, :garbage_collector, :volume_reclaim], ^ref, _, _}, 100
+    end
+  end
+
   describe "collect/1 marking a block volume's extent map" do
     setup do
       {:ok, vol} =
