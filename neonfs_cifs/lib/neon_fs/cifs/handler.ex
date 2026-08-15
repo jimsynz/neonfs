@@ -310,12 +310,10 @@ defmodule NeonFS.CIFS.Handler do
   # for an n-entry directory.)
   defp do_handle(:fdopendir, %{"path" => path}, state) do
     with_volume(state, fn volume, state ->
-      # The directory itself is authorised above; the listing is not.
-      # `NeonFS.Core.list_dir/2` accepts no identity, so there is nothing to
-      # pass — the same gap the NFS backend has, tracked separately.
       with {:ok, _file} <-
              core_call(NeonFS.Core, :get_file_meta, [volume, path, identity_opts(state)]),
-           {:ok, children} <- core_call(NeonFS.Core, :list_dir, [volume, path]) do
+           {:ok, children} <-
+             core_call(NeonFS.Core, :list_dir, [volume, path, identity_opts(state)]) do
         {handle, state} = mint_handle(state)
 
         entry = %{volume: volume, path: path, entries: dir_entries(children)}

@@ -108,7 +108,7 @@ defmodule NeonFS.CIFS.HandlerTest do
   defp open_dir(state, path) do
     stub(NeonFS.Client, :core_call, fn
       NeonFS.Core, :get_file_meta, ["vol-a", ^path | _] -> {:ok, file_meta(path, mode: 0o040755)}
-      NeonFS.Core, :list_dir, ["vol-a", ^path] -> {:ok, []}
+      NeonFS.Core, :list_dir, ["vol-a", ^path | _] -> {:ok, []}
     end)
 
     {{:ok, %{handle: handle}}, state} = Handler.handle({:fdopendir, %{"path" => path}}, state)
@@ -836,7 +836,7 @@ defmodule NeonFS.CIFS.HandlerTest do
 
       # Exactly one list_dir per fdopendir: readdir steps pop the
       # snapshot rather than re-fetching from core.
-      expect(NeonFS.Client, :core_call, fn NeonFS.Core, :list_dir, ["vol-a", "/dir"] ->
+      expect(NeonFS.Client, :core_call, fn NeonFS.Core, :list_dir, ["vol-a", "/dir" | _] ->
         {:ok,
          [
            %{path: "/dir/b.txt", mode: 0o100644},
@@ -870,7 +870,7 @@ defmodule NeonFS.CIFS.HandlerTest do
         NeonFS.Core, :get_file_meta, ["vol-a", "/dir" | _] ->
           {:ok, %{path: "/dir", mode: 0o040755}}
 
-        NeonFS.Core, :list_dir, ["vol-a", "/dir"] ->
+        NeonFS.Core, :list_dir, ["vol-a", "/dir" | _] ->
           {:error, :io_error}
       end)
 
@@ -1100,7 +1100,7 @@ defmodule NeonFS.CIFS.HandlerTest do
         {:ok, %{size: 0, mode: 0o40777}}
       end)
 
-      expect(NeonFS.Client, :core_call, fn NeonFS.Core, :list_dir, ["vol-a", "/"] ->
+      expect(NeonFS.Client, :core_call, fn NeonFS.Core, :list_dir, ["vol-a", "/" | _] ->
         {:ok, []}
       end)
 

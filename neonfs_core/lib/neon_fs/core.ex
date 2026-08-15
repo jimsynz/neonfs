@@ -976,11 +976,32 @@ defmodule NeonFS.Core do
   Returns `FileMeta` structs for each child entry. Directory children
   are synthesised as `FileMeta` structs with `mode` including the
   S_IFDIR bit (`0o040000`), making them distinguishable from files.
+
+  Honours `:uid` / `:gids` opts for `:read` authorisation on the directory
+  (default uid 0, which is authorised for everything — so a caller that passes
+  no identity lists as root, exactly as before this took an identity at all).
+
+  Authorisation is on the directory, not on its children: what comes back is
+  every entry the directory holds, not the subset the caller could open. A
+  listing that hid entries would be a different contract — it changes what a
+  client caches and what a rename appears to do — and is deliberately not what
+  this does.
   """
-  @spec list_dir(String.t(), String.t()) ::
+  @spec list_dir(String.t(), String.t(), keyword()) ::
           {:ok, [NeonFS.Core.FileMeta.t()]} | {:error, term()}
-  def list_dir(volume_name, dir_path) do
-    with {:ok, volume} <- resolve_volume(volume_name) do
+  def list_dir(volume_name, dir_path, opts \\ []) do
+    uid = Keyword.get(opts, :uid, 0)
+    gids = Keyword.get(opts, :gids, [])
+
+    with {:ok, volume} <- resolve_volume(volume_name),
+         :ok <-
+           authorise_posix(
+             uid,
+             gids,
+             :read,
+             volume.id,
+             {:file, volume.id, normalize_path(dir_path)}
+           ) do
       case FileIndex.list_dir_full(volume.id, normalize_path(dir_path)) do
         {:ok, entries} ->
           {:ok, Enum.map(entries, fn {_name, _path, attrs} -> attrs end)}

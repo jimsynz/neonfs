@@ -637,6 +637,63 @@ defmodule NeonFS.CoreTest do
     end
   end
 
+  describe "list_dir/3 authorisation" do
+    test "refuses a caller without read on the directory", %{volume_name: vol_name} do
+      {:ok, _} = Core.mkdir(vol_name, "/private")
+      {:ok, _} = Core.write_file_streamed(vol_name, "/private/secret.txt", ["s"])
+
+      {:ok, _} =
+        Core.update_file_meta(vol_name, "/private", uid: 0, gid: 0, mode: 0o40700)
+
+      assert {:error, %NeonFS.Error.PermissionDenied{}} =
+               Core.list_dir(vol_name, "/private", uid: 1000, gids: [1000])
+    end
+
+    test "allows a caller the directory's mode permits", %{volume_name: vol_name} do
+      {:ok, _} = Core.mkdir(vol_name, "/shared")
+      {:ok, _} = Core.write_file_streamed(vol_name, "/shared/open.txt", ["o"])
+
+      {:ok, _} =
+        Core.update_file_meta(vol_name, "/shared", uid: 1000, gid: 1000, mode: 0o40755)
+
+      assert {:ok, entries} = Core.list_dir(vol_name, "/shared", uid: 1000, gids: [1000])
+      assert Enum.map(entries, & &1.path) == ["/shared/open.txt"]
+    end
+
+    # The listing is authorised on the directory, not per child: what comes
+    # back is everything the directory holds. Hiding entries the caller could
+    # not open would be a different contract — it changes what a client caches
+    # and what a rename appears to do.
+    test "returns every child, not the subset the caller could open", %{volume_name: vol_name} do
+      {:ok, _} = Core.mkdir(vol_name, "/mixed")
+      {:ok, _} = Core.write_file_streamed(vol_name, "/mixed/readable.txt", ["r"])
+      {:ok, _} = Core.write_file_streamed(vol_name, "/mixed/locked.txt", ["l"])
+
+      {:ok, _} =
+        Core.update_file_meta(vol_name, "/mixed", uid: 1000, gid: 1000, mode: 0o40755)
+
+      {:ok, _} =
+        Core.update_file_meta(vol_name, "/mixed/locked.txt", uid: 0, gid: 0, mode: 0o100600)
+
+      assert {:ok, entries} = Core.list_dir(vol_name, "/mixed", uid: 1000, gids: [1000])
+      paths = entries |> Enum.map(& &1.path) |> Enum.sort()
+      assert paths == ["/mixed/locked.txt", "/mixed/readable.txt"]
+    end
+
+    # An absent identity is uid 0, which `Authorise.check/4` grants everything.
+    # Every caller that has not been taught to pass one therefore behaves
+    # exactly as it did before this took an identity at all.
+    test "lists as root when no identity is passed", %{volume_name: vol_name} do
+      {:ok, _} = Core.mkdir(vol_name, "/rootonly")
+      {:ok, _} = Core.write_file_streamed(vol_name, "/rootonly/x.txt", ["x"])
+
+      {:ok, _} =
+        Core.update_file_meta(vol_name, "/rootonly", uid: 0, gid: 0, mode: 0o40700)
+
+      assert {:ok, [_]} = Core.list_dir(vol_name, "/rootonly")
+    end
+  end
+
   describe "mkdir/2" do
     test "creates a directory", %{volume_name: vol_name} do
       assert {:ok, _dir_entry} = Core.mkdir(vol_name, "/new-dir")
