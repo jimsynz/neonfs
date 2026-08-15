@@ -12,6 +12,8 @@ defmodule NeonFS.Core.GarbageCollectorTest do
     WriteOperation
   }
 
+  alias NeonFS.Core.Volume.BlockExtent
+
   @moduletag :tmp_dir
 
   setup %{tmp_dir: tmp_dir} do
@@ -584,6 +586,105 @@ defmodule NeonFS.Core.GarbageCollectorTest do
         m -> Map.get(m, key)
       end
     end
+  end
+
+  describe "collect/1 marking a block volume's extent map" do
+    setup do
+      {:ok, vol} =
+        VolumeRegistry.create("gc-block-vol", type: :block, max_size: 64 * 1024 * 1024)
+
+      {:ok, volume: vol}
+    end
+
+    test "a chunk named only by an extent is not swept", %{volume: vol} do
+      {:ok, file} = WriteOperation.write_file_streamed(vol.id, "/staged.bin", ["extent payload"])
+      [hash] = file.chunks
+
+      # The extent map is the only reference: the file that staged the chunk
+      # is gone, exactly as it is for a device whose bytes arrived over the
+      # data plane and were never a file at all.
+      FileIndex.delete(file.id)
+
+      assert {:ok, result} =
+               GarbageCollector.collect(
+                 volume_id: vol.id,
+                 block_volume_enumerator: fn -> [vol] end,
+                 metadata_reader: extent_reader([{0, hash}])
+               )
+
+      assert result.chunks_deleted == 0
+      assert {:ok, _meta} = ChunkIndex.get(vol.id, hash)
+    end
+
+    test "a chunk the extent map dropped is swept", %{volume: vol} do
+      {:ok, file} = WriteOperation.write_file_streamed(vol.id, "/dropped.bin", ["orphan payload"])
+      [hash] = file.chunks
+
+      FileIndex.delete(file.id)
+
+      assert {:ok, result} =
+               GarbageCollector.collect(
+                 volume_id: vol.id,
+                 block_volume_enumerator: fn -> [vol] end,
+                 metadata_reader: extent_reader([])
+               )
+
+      assert result.chunks_deleted > 0
+      assert {:error, :not_found} = ChunkIndex.get(vol.id, hash)
+    end
+
+    test "an unreadable extent map protects the volume rather than sweeping it",
+         %{volume: vol} do
+      {:ok, file} = WriteOperation.write_file_streamed(vol.id, "/unreadable.bin", ["payload"])
+      [hash] = file.chunks
+
+      FileIndex.delete(file.id)
+
+      assert {:ok, result} =
+               GarbageCollector.collect(
+                 volume_id: vol.id,
+                 block_volume_enumerator: fn -> [vol] end,
+                 metadata_reader: __MODULE__.FailingExtentReader
+               )
+
+      assert result.chunks_deleted == 0
+      assert result.chunks_protected > 0
+      assert {:ok, _meta} = ChunkIndex.get(vol.id, hash)
+    end
+  end
+
+  # Feeds the mark phase a `block_index` scan without standing up the
+  # metadata tree the real reader walks.
+  defp extent_reader(extents) do
+    entries =
+      Enum.map(extents, fn {index, hash} ->
+        {BlockExtent.key(index), BlockExtent.encode({:chunk, hash})}
+      end)
+
+    :persistent_term.put({__MODULE__, :extents}, entries)
+    __MODULE__.StubExtentReader
+  end
+
+  defmodule StubExtentReader do
+    @moduledoc false
+
+    def range(_volume_id, :block_index, _start_key, _end_key, _opts),
+      do: {:ok, :persistent_term.get({NeonFS.Core.GarbageCollectorTest, :extents}, [])}
+
+    def range(_volume_id, _kind, _start_key, _end_key, _opts), do: {:ok, []}
+
+    def get_stripe(_volume_id, _stripe_id, _opts), do: {:error, :not_found}
+  end
+
+  defmodule FailingExtentReader do
+    @moduledoc false
+
+    def range(_volume_id, :block_index, _start_key, _end_key, _opts),
+      do: {:error, {:index_tree_read_failed, :simulated}}
+
+    def range(_volume_id, _kind, _start_key, _end_key, _opts), do: {:ok, []}
+
+    def get_stripe(_volume_id, _stripe_id, _opts), do: {:error, :not_found}
   end
 
   defmodule RaisingReader do

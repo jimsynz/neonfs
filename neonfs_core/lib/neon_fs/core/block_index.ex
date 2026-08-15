@@ -105,6 +105,47 @@ defmodule NeonFS.Core.BlockIndex do
   end
 
   @doc """
+  Every chunk hash and stripe id the volume's extent map names.
+
+  The extent map is the *only* thing referring to a block volume's chunks —
+  there is no `FileMeta` naming them — so anything deciding whether a chunk
+  is live has to ask here. A mark phase that walks files alone concludes
+  that every extent's chunk is garbage.
+
+  Returns `%{chunks: MapSet.t(), stripes: MapSet.t()}`. A stripe target
+  contributes its stripe id; resolving that to the stripe's own chunks is
+  the caller's job, since it already holds the stripe index.
+  """
+  @spec referenced_targets(String.t(), keyword()) ::
+          {:ok, %{chunks: MapSet.t(), stripes: MapSet.t()}} | {:error, term()}
+  def referenced_targets(volume_name, opts \\ []) when is_binary(volume_name) do
+    reader = Keyword.get(opts, :metadata_reader, MetadataReader)
+
+    with {:ok, volume} <- resolve_volume(volume_name),
+         {:ok, entries} <-
+           reader.range(volume.id, :block_index, <<>>, <<>>, reader_opts(opts)) do
+      empty = %{chunks: MapSet.new(), stripes: MapSet.new()}
+      Enum.reduce_while(entries, {:ok, empty}, &fold_target/2)
+    end
+  end
+
+  defp fold_target({_key, entry}, {:ok, acc}) do
+    case BlockExtent.decode(entry) do
+      {:ok, {:chunk, hash}} ->
+        {:cont, {:ok, %{acc | chunks: MapSet.put(acc.chunks, hash)}}}
+
+      {:ok, {:stripe, id, _index}} ->
+        {:cont, {:ok, %{acc | stripes: MapSet.put(acc.stripes, id)}}}
+
+      {:ok, :hole} ->
+        {:cont, {:ok, acc}}
+
+      {:error, _} = err ->
+        {:halt, err}
+    end
+  end
+
+  @doc """
   Publishes `extents` as one commit.
 
   Each element is `{extent_index, target}`. A `:hole` target drops the

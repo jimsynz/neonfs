@@ -24,16 +24,33 @@ defmodule NeonFS.Integration.BlockIndexTest do
   @moduletag nodes: 3
   @moduletag :integration
 
-  @volume "block-index"
-  @volume_opts %{
+  @durability %{
     durability: %{type: :replicate, factor: 2, min_copies: 2},
     compression: %{algorithm: :none, level: 0, min_size: 0}
   }
 
+  # The extent-map tests stage their chunks as files, which a `:block`
+  # volume has no room for: provisioning sizes its device at `max_size`,
+  # so the volume is full the moment it exists. They run on an `:fs`
+  # volume — `block_index` is a property of the metadata tree, not of the
+  # volume type. The GC test needs the type, because that is what tells
+  # the mark phase to consult the extent map at all, and it takes its
+  # chunk from the device rather than from a file.
+  @volume "block-index"
+  @block_volume "block-index-gc"
+  @device_size 8 * 1024 * 1024
+
   @chunk 131_072
 
   setup %{cluster: cluster} do
-    :ok = init_multi_node_cluster(cluster, volumes: [{@volume, @volume_opts}])
+    :ok =
+      init_multi_node_cluster(cluster,
+        volumes: [
+          {@volume, @durability},
+          {@block_volume, Map.merge(@durability, %{type: :block, max_size: @device_size})}
+        ]
+      )
+
     :ok
   end
 
@@ -114,6 +131,82 @@ defmodule NeonFS.Integration.BlockIndexTest do
       assert {:ok, zeroes} = block_index(cluster, :node2, :read_extent, [@volume, index])
       assert zeroes == :binary.copy(<<0>>, @chunk)
     end
+  end
+
+  test "garbage collection keeps a chunk the extent map is the only reference to",
+       %{cluster: cluster} do
+    payload = :binary.copy(<<0xE5>>, @chunk)
+    device_path = PeerCluster.rpc(cluster, :node1, NeonFS.Core.BlockBacking, :device_path, [])
+
+    {:ok, device} =
+      PeerCluster.rpc(
+        cluster,
+        :node1,
+        NeonFS.Core.BlockBacking,
+        :open_device,
+        [@block_volume, device_path]
+      )
+
+    {:ok, _} =
+      PeerCluster.rpc(
+        cluster,
+        :node1,
+        NeonFS.Core.BlockBacking,
+        :write,
+        [@block_volume, device.file_id, 2 * @chunk, payload],
+        120_000
+      )
+
+    {:ok, meta} =
+      PeerCluster.rpc(
+        cluster,
+        :node1,
+        NeonFS.Core,
+        :get_file_meta,
+        [@block_volume, device_path]
+      )
+
+    hash = Enum.at(meta.chunks, 2)
+
+    assert {:ok, _} =
+             block_index(cluster, :node1, :commit, [@block_volume, [{2, {:chunk, hash}}]])
+
+    # Drop the device file, so the extent map is the only thing naming the
+    # chunk — the state every chunk of an extent-backed device is in, since
+    # its bytes arrive over the data plane and are never a file at all.
+    :ok =
+      PeerCluster.rpc(
+        cluster,
+        :node1,
+        NeonFS.Core,
+        :delete_file,
+        [@block_volume, device_path],
+        120_000
+      )
+
+    {:ok, volume} =
+      PeerCluster.rpc(cluster, :node1, NeonFS.Core.VolumeRegistry, :get_by_name, [@block_volume])
+
+    assert {:ok, result} =
+             PeerCluster.rpc(
+               cluster,
+               :node1,
+               NeonFS.Core.GarbageCollector,
+               :collect,
+               [[volume_id: volume.id]],
+               120_000
+             )
+
+    # The device's other chunks were only ever named by the file just
+    # deleted, so a sweep that collects them is correct. What must survive
+    # is the one the extent map names, and the proof is that it still
+    # reads back rather than that the counter is zero.
+    assert is_integer(result.chunks_deleted)
+
+    assert {:ok, _meta} =
+             PeerCluster.rpc(cluster, :node1, NeonFS.Core.ChunkIndex, :get, [volume.id, hash])
+
+    assert {:ok, ^payload} = block_index(cluster, :node1, :read_extent, [@block_volume, 2])
   end
 
   # `BlockIndex` deliberately does not write chunk data — the caller lands
