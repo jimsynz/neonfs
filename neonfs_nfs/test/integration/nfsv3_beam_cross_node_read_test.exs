@@ -49,7 +49,17 @@ defmodule NeonFS.Integration.NFSv3BeamCrossNodeReadTest do
   # non-root callers to it.
   @auth %Auth.Sys{uid: 0, gid: 0, gids: []}
   @chunk_max 1_048_576
-  @payload_size 16 * @chunk_max
+
+  # Four whole chunks is the smallest payload that still exercises
+  # multi-chunk READ reassembly over the data plane; sixteen only made
+  # the write and the read loop slower.
+  @payload_size 4 * @chunk_max
+
+  # A cross-node READ pulls its chunk over the data plane, so it is far
+  # slower than a local one and `PeerCluster.rpc/5`'s 30 s default is not
+  # a budget anyone chose for it. Same 120 s slow-runner convention as
+  # the write below.
+  @read_timeout 120_000
 
   test "cross-node READ on an NFS interface peer pulls chunks via ChunkReader" do
     # 2-peer cluster: 1 core (chunk holder), 1 NFS interface. The
@@ -228,7 +238,14 @@ defmodule NeonFS.Integration.NFSv3BeamCrossNodeReadTest do
           XDR.encode_uint(@chunk_max)
 
       {:ok, body} =
-        PeerCluster.rpc(cluster, :node2, Handler, :handle_call, [6, args, @auth, ctx])
+        PeerCluster.rpc(
+          cluster,
+          :node2,
+          Handler,
+          :handle_call,
+          [6, args, @auth, ctx],
+          @read_timeout
+        )
 
       body
     end

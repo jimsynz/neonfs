@@ -47,11 +47,20 @@ defmodule NeonFS.Integration.NFSv3BeamReadTest do
   # holds non-root callers to the volume ACL.
   @auth %Auth.Sys{uid: 0, gid: 0, gids: []}
 
-  # FastCDC default `max` chunk size. Choosing a 16-MiB payload (16
-  # whole chunks) keeps the test multi-chunk without ballooning the
-  # peer-cluster runtime.
+  # FastCDC default `max` chunk size. Four whole chunks is the smallest
+  # payload that still exercises multi-chunk READ reassembly across
+  # chunk boundaries — the same size `nfsv3_beam_write_test.exs` uses.
+  # Sixteen bought no extra coverage and made the replicated write the
+  # slowest single RPC in the suite.
   @chunk_max 1_048_576
-  @payload_size 16 * @chunk_max
+  @payload_size 4 * @chunk_max
+
+  # The multi-chunk write replicates through Ra and the blob store on a
+  # three-node peer cluster, so it is far slower than anything else here
+  # and `PeerCluster.rpc/5`'s 30 s default is not a budget anyone chose
+  # for it. Match the 120 s slow-runner convention used by the cross-node
+  # read test.
+  @write_timeout 120_000
 
   setup_all %{cluster: cluster} do
     :ok = init_multi_node_cluster(cluster, name: "nfsv3-beam-read")
@@ -143,11 +152,14 @@ defmodule NeonFS.Integration.NFSv3BeamReadTest do
     payload = :crypto.strong_rand_bytes(@payload_size)
 
     {:ok, _meta} =
-      PeerCluster.rpc(cluster, :node1, NeonFS.Core, :write_file_streamed, [
-        volume,
-        file_path,
-        [payload]
-      ])
+      PeerCluster.rpc(
+        cluster,
+        :node1,
+        NeonFS.Core,
+        :write_file_streamed,
+        [volume, file_path, [payload]],
+        @write_timeout
+      )
 
     # Quorum-write replicates asynchronously across the cluster; the
     # subsequent quorum-read must observe the new file. Poll for it
