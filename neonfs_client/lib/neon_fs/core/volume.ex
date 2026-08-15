@@ -83,6 +83,7 @@ defmodule NeonFS.Core.Volume do
           encryption: VolumeEncryption.t(),
           metadata_consistency: metadata_consistency_config() | nil,
           max_size: non_neg_integer() | nil,
+          block_chunk_bytes: pos_integer() | nil,
           max_files: non_neg_integer() | nil,
           logical_size: non_neg_integer(),
           physical_size: non_neg_integer(),
@@ -111,6 +112,7 @@ defmodule NeonFS.Core.Volume do
     :metadata_consistency,
     :max_size,
     :max_files,
+    :block_chunk_bytes,
     :logical_size,
     :physical_size,
     :chunk_count,
@@ -160,6 +162,7 @@ defmodule NeonFS.Core.Volume do
       encryption: Keyword.get(opts, :encryption, default_encryption()),
       metadata_consistency: Keyword.get(opts, :metadata_consistency),
       max_size: Keyword.get(opts, :max_size),
+      block_chunk_bytes: block_chunk_bytes(type, opts),
       max_files: Keyword.get(opts, :max_files),
       nfs_allowed_ips: Keyword.get(opts, :nfs_allowed_ips, []),
       nfs_root_squash: Keyword.get(opts, :nfs_root_squash, true),
@@ -171,6 +174,26 @@ defmodule NeonFS.Core.Volume do
       updated_at: now
     }
   end
+
+  @doc """
+  The chunk size a block volume's device is stored in.
+
+  Fixed for the volume's life: every extent in its map is expressed in this
+  size, so changing it would invalidate all of them.
+
+  Only meaningful for `:block` volumes; `nil` on a filesystem volume, which
+  chunks by content rather than at a fixed size.
+  """
+  @spec default_block_chunk_bytes() :: pos_integer()
+  def default_block_chunk_bytes, do: 131_072
+
+  # `nil` rather than the default on a filesystem volume: a value there would
+  # read as "this is the size it chunks at", which is not true — fs volumes use
+  # content-defined chunking.
+  defp block_chunk_bytes(:block, opts),
+    do: Keyword.get(opts, :block_chunk_bytes) || default_block_chunk_bytes()
+
+  defp block_chunk_bytes(_type, _opts), do: nil
 
   @doc """
   Returns the default durability configuration.

@@ -748,6 +748,61 @@ defmodule NeonFS.CLI.HandlerTest do
     end
   end
 
+  describe "create_volume/2 block chunk size" do
+    setup %{tmp_dir: tmp_dir} do
+      configure_test_dirs(tmp_dir)
+      ensure_cluster_state()
+      stop_ra()
+      start_drive_registry()
+      start_blob_store()
+      start_chunk_index()
+      start_file_index()
+      start_stripe_index()
+      start_volume_registry()
+      ensure_chunk_access_tracker()
+
+      on_exit(fn -> cleanup_test_dirs() end)
+      :ok
+    end
+
+    test "refuses a size that is not a whole number of logical blocks" do
+      assert {:error, error} =
+               Handler.create_volume("blk-bad-#{:rand.uniform(999_999)}", %{
+                 "type" => "block",
+                 "max_size" => 8 * BlockBacking.chunk_bytes(),
+                 "block_chunk_bytes" => 5000
+               })
+
+      assert Exception.message(error) =~ "4096"
+    end
+
+    test "refuses a chunk size on a filesystem volume" do
+      assert {:error, error} =
+               Handler.create_volume("fs-chunked-#{:rand.uniform(999_999)}", %{
+                 "block_chunk_bytes" => 4096
+               })
+
+      assert Exception.message(error) =~ "block"
+    end
+
+    # Fixed for the volume's life: every extent in its map is expressed in this
+    # size, so a change would invalidate all of them.
+    test "refuses to change it after creation" do
+      name = "blk-immutable-#{:rand.uniform(999_999)}"
+
+      {:ok, _} =
+        Handler.create_volume(name, %{
+          "type" => "block",
+          "max_size" => 4 * BlockBacking.chunk_bytes()
+        })
+
+      assert {:error, error} =
+               Handler.update_volume(name, %{"block_chunk_bytes" => 4096})
+
+      assert Exception.message(error) =~ "block_chunk_bytes"
+    end
+  end
+
   describe "block_attachments/0" do
     setup %{tmp_dir: tmp_dir} do
       configure_test_dirs(tmp_dir)
