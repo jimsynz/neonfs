@@ -189,7 +189,7 @@ defmodule NeonFS.Core.Volume.MetadataReaderTest do
   end
 
   describe "list_referenced_chunks/2" do
-    test "unions hashes from all three index trees" do
+    test "unions hashes from every index tree" do
       tree_root = <<7::256>>
 
       segment =
@@ -197,7 +197,8 @@ defmodule NeonFS.Core.Volume.MetadataReaderTest do
           index_roots: %{
             file_index: tree_root,
             chunk_index: <<8::256>>,
-            stripe_index: <<9::256>>
+            stripe_index: <<9::256>>,
+            block_index: <<10::256>>
           }
         )
 
@@ -212,6 +213,9 @@ defmodule NeonFS.Core.Volume.MetadataReaderTest do
 
           root == <<9::256>> ->
             {:ok, [<<4>>]}
+
+          root == <<10::256>> ->
+            {:ok, [<<5>>]}
         end
       end
 
@@ -222,7 +226,7 @@ defmodule NeonFS.Core.Volume.MetadataReaderTest do
         )
 
       assert {:ok, hashes} = MetadataReader.list_referenced_chunks("vol-1", opts)
-      assert MapSet.new(hashes) == MapSet.new([<<1>>, <<2>>, <<3>>, <<4>>])
+      assert MapSet.new(hashes) == MapSet.new([<<1>>, <<2>>, <<3>>, <<4>>, <<5>>])
     end
 
     test "empty tree roots pass <<>> to the NIF and contribute no hashes" do
@@ -231,7 +235,8 @@ defmodule NeonFS.Core.Volume.MetadataReaderTest do
           index_roots: %{
             file_index: nil,
             chunk_index: nil,
-            stripe_index: nil
+            stripe_index: nil,
+            block_index: nil
           }
         )
 

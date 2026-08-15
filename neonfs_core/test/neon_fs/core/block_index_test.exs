@@ -1,0 +1,216 @@
+defmodule NeonFS.Core.BlockIndexTest do
+  use NeonFS.TestCase, async: false
+
+  alias NeonFS.Core.BlockIndex
+  alias NeonFS.Core.Volume.BlockExtent
+
+  @volume_name "block-index-test-vol"
+  @volume_id "0123456789abcdef0123456789abcdef"
+  @hash :crypto.hash(:sha256, "extent-0")
+
+  defmodule StubCommitter do
+    @moduledoc false
+    def commit(volume_id, mutations, opts) do
+      send(self(), {:committed, volume_id, mutations, opts})
+      {:ok, %{0 => "root"}}
+    end
+  end
+
+  defmodule StubReader do
+    @moduledoc false
+    def get(_volume_id, kind, key, _opts) do
+      case Process.get({:entry, kind, key}) do
+        nil -> {:error, :not_found}
+        entry -> {:ok, entry}
+      end
+    end
+
+    def range(_volume_id, _kind, _start_key, _end_key, _opts) do
+      {:ok, Process.get(:range, [])}
+    end
+  end
+
+  setup do
+    start_volume_registry()
+    :ok
+  end
+
+  # The registry's own create path goes through Ra; these tests only need
+  # the name→volume lookup `BlockIndex` resolves through, so seed its ETS
+  # directly rather than standing up consensus for it.
+  defp register_volume(chunk_bytes \\ 131_072) do
+    volume = %NeonFS.Core.Volume{
+      id: @volume_id,
+      name: @volume_name,
+      type: :block,
+      block_chunk_bytes: chunk_bytes
+    }
+
+    :ets.insert(:volumes_by_id, {volume.id, volume})
+    :ets.insert(:volumes_by_name, {volume.name, volume.id})
+    volume
+  end
+
+  defp opts do
+    [volume_committer: StubCommitter, metadata_reader: StubReader]
+  end
+
+  describe "commit/3" do
+    test "publishes every extent as one batch of mutations" do
+      register_volume()
+
+      other = :crypto.hash(:sha256, "extent-1")
+
+      assert {:ok, _roots} =
+               BlockIndex.commit(
+                 @volume_name,
+                 [{0, {:chunk, @hash}}, {1, {:chunk, other}}],
+                 opts()
+               )
+
+      assert_received {:committed, @volume_id, mutations, _opts}
+      assert length(mutations) == 2
+
+      assert [
+               {:put, :block_index, key_0, entry_0},
+               {:put, :block_index, key_1, _entry_1}
+             ] = mutations
+
+      assert BlockExtent.extent_index(key_0) == 0
+      assert BlockExtent.extent_index(key_1) == 1
+      assert {:ok, {:chunk, @hash}} = BlockExtent.decode(entry_0)
+    end
+
+    test "a :hole target drops the extent rather than writing an entry" do
+      register_volume()
+
+      assert {:ok, _roots} = BlockIndex.commit(@volume_name, [{7, :hole}], opts())
+
+      assert_received {:committed, @volume_id, [{:delete, :block_index, key}], _opts}
+      assert BlockExtent.extent_index(key) == 7
+    end
+
+    test "a batch may mix writes and punches" do
+      register_volume()
+
+      assert {:ok, _roots} =
+               BlockIndex.commit(@volume_name, [{0, {:chunk, @hash}}, {1, :hole}], opts())
+
+      assert_received {:committed, @volume_id, mutations, _opts}
+      assert [{:put, :block_index, _, _}, {:delete, :block_index, _}] = mutations
+    end
+
+    test "a stripe member commits as a stripe target" do
+      register_volume()
+      stripe_id = UUIDv7.generate()
+
+      assert {:ok, _roots} =
+               BlockIndex.commit(@volume_name, [{3, {:stripe, stripe_id, 2}}], opts())
+
+      assert_received {:committed, @volume_id, [{:put, :block_index, _key, entry}], _opts}
+      assert {:ok, {:stripe, ^stripe_id, 2}} = BlockExtent.decode(entry)
+    end
+
+    test "does not leak the injection opts into the writer" do
+      register_volume()
+
+      assert {:ok, _roots} =
+               BlockIndex.commit(@volume_name, [{0, {:chunk, @hash}}, {1, :hole}], opts())
+
+      assert_received {:committed, @volume_id, _mutations, writer_opts}
+      refute Keyword.has_key?(writer_opts, :volume_committer)
+      refute Keyword.has_key?(writer_opts, :metadata_reader)
+    end
+
+    test "an unknown volume is refused before anything is published" do
+      assert {:error, _} = BlockIndex.commit("no-such-volume", [{0, {:chunk, @hash}}], opts())
+      refute_received {:committed, _, _, _}
+    end
+  end
+
+  describe "discard/4" do
+    test "drops every extent in the range in one commit" do
+      register_volume()
+
+      assert {:ok, _roots} = BlockIndex.discard(@volume_name, 4, 6, opts())
+
+      assert_received {:committed, @volume_id, mutations, _opts}
+
+      assert Enum.map(mutations, fn {:delete, :block_index, key} ->
+               BlockExtent.extent_index(key)
+             end) == [4, 5, 6]
+    end
+  end
+
+  describe "get/3" do
+    test "returns the extent's target" do
+      register_volume()
+      Process.put({:entry, :block_index, BlockExtent.key(2)}, BlockExtent.encode({:chunk, @hash}))
+
+      assert {:ok, {:chunk, @hash}} = BlockIndex.get(@volume_name, 2, opts())
+    end
+
+    test "an extent with no entry is a hole" do
+      register_volume()
+
+      assert {:ok, :hole} = BlockIndex.get(@volume_name, 99, opts())
+    end
+  end
+
+  describe "range/4" do
+    test "decodes entries back into extent indices, ascending" do
+      register_volume()
+
+      Process.put(:range, [
+        {BlockExtent.key(4), BlockExtent.encode({:chunk, @hash})},
+        {BlockExtent.key(9), BlockExtent.encode({:chunk, @hash})}
+      ])
+
+      assert {:ok, [{4, {:chunk, @hash}}, {9, {:chunk, @hash}}]} =
+               BlockIndex.range(@volume_name, 0, 10, opts())
+    end
+
+    test "surfaces a malformed entry rather than skipping it" do
+      register_volume()
+      Process.put(:range, [{BlockExtent.key(1), <<9::8, 0::256>>}])
+
+      assert {:error, {:malformed_extent, {:unknown_kind, 9}}} =
+               BlockIndex.range(@volume_name, 0, 5, opts())
+    end
+  end
+
+  describe "read_extent/3" do
+    test "a hole reads as the volume's extent width in zeroes" do
+      register_volume(65_536)
+
+      assert {:ok, zeroes} = BlockIndex.read_extent(@volume_name, 12, opts())
+      assert byte_size(zeroes) == 65_536
+      assert zeroes == <<0::size(65_536)-unit(8)>>
+    end
+
+    test "a chunk extent reads its chunk's bytes" do
+      register_volume()
+      Process.put({:entry, :block_index, BlockExtent.key(1)}, BlockExtent.encode({:chunk, @hash}))
+
+      reader = fn _volume_id, hash, _opts ->
+        assert hash == @hash
+        {:ok, "extent bytes"}
+      end
+
+      assert {:ok, "extent bytes"} =
+               BlockIndex.read_extent(@volume_name, 1, opts() ++ [chunk_reader: reader])
+    end
+
+    test "an erasure extent is refused rather than answered with wrong bytes" do
+      register_volume()
+
+      Process.put(
+        {:entry, :block_index, BlockExtent.key(1)},
+        BlockExtent.encode({:stripe, UUIDv7.generate(), 0})
+      )
+
+      assert {:error, :erasure_extent_unsupported} =
+               BlockIndex.read_extent(@volume_name, 1, opts())
+    end
+  end
+end

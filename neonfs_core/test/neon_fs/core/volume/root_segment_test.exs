@@ -18,7 +18,14 @@ defmodule NeonFS.Core.Volume.RootSegmentTest do
       assert seg.last_written_by_neonfs_version == seg.created_by_neonfs_version
       assert seg.on_disk_format_version == 1
       assert match?(%HLC{}, seg.hlc)
-      assert seg.index_roots == %{file_index: nil, chunk_index: nil, stripe_index: nil}
+
+      assert seg.index_roots == %{
+               file_index: nil,
+               chunk_index: nil,
+               stripe_index: nil,
+               block_index: nil
+             }
+
       assert seg.schedules.gc.interval_ms > 0
       assert seg.schedules.scrub.interval_ms > 0
       assert seg.schedules.anti_entropy.interval_ms > 0
@@ -52,7 +59,8 @@ defmodule NeonFS.Core.Volume.RootSegmentTest do
         | index_roots: %{
             file_index: <<0xAB, 0xCD>>,
             chunk_index: <<0xEF, 0x01>>,
-            stripe_index: nil
+            stripe_index: nil,
+            block_index: <<0x02, 0x03>>
           }
       }
 

@@ -80,7 +80,13 @@ defmodule NeonFS.Core.Volume.ProvisionerTest do
       assert segment.volume_id == volume.id
       assert segment.cluster_id == "clust-test"
       assert segment.durability == volume.durability
-      assert segment.index_roots == %{file_index: nil, chunk_index: nil, stripe_index: nil}
+
+      assert segment.index_roots == %{
+               file_index: nil,
+               chunk_index: nil,
+               stripe_index: nil,
+               block_index: nil
+             }
     end
 
     test "excludes drives on excluded (draining/maintenance) nodes from placement" do
