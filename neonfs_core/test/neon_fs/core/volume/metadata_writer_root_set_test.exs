@@ -39,7 +39,7 @@ defmodule NeonFS.Core.Volume.MetadataWriterRootSetTest do
 
   test "a cross-shard batch publishes every participant in one command", ctx do
     mutations = mutations_on_distinct_shards(3)
-    shards = Enum.map(mutations, &Shard.for_key(elem(&1, 2)))
+    shards = Enum.map(mutations, &Shard.for_key(elem(&1, 1), elem(&1, 2)))
 
     assert {:ok, roots} =
              MetadataWriter.apply_batch("vol-1", mutations, capturing_opts(ctx))
@@ -70,7 +70,9 @@ defmodule NeonFS.Core.Volume.MetadataWriterRootSetTest do
 
   test "a stale expectation on one shard rebuilds the whole set", ctx do
     mutations = mutations_on_distinct_shards(3)
-    shard_count = mutations |> Enum.map(&Shard.for_key(elem(&1, 2))) |> Enum.uniq() |> length()
+
+    shard_count =
+      mutations |> Enum.map(&Shard.for_key(elem(&1, 1), elem(&1, 2))) |> Enum.uniq() |> length()
 
     assert {:ok, _roots} =
              MetadataWriter.apply_batch(
@@ -213,7 +215,7 @@ defmodule NeonFS.Core.Volume.MetadataWriterRootSetTest do
              MetadataWriter.apply_batch("vol-1", [create, rename], capturing_opts(ctx))
 
     for key <- ["file:created", "dirent:renamed"] do
-      assert Map.has_key?(roots, Shard.for_key(key)),
+      assert Map.has_key?(roots, Shard.for_key(:file_index, key)),
              "#{key}'s shard must be in the published set"
     end
   end
@@ -284,13 +286,13 @@ defmodule NeonFS.Core.Volume.MetadataWriterRootSetTest do
     commands |> :ets.lookup(:command) |> Enum.map(fn {:command, command} -> command end)
   end
 
-  # `Shard.for_key/1` hashes the key, so walk candidates until `count`
+  # `Shard.for_key/2` hashes a `:file_index` key, so walk candidates until `count`
   # distinct shards are covered rather than assuming any particular mapping.
   defp mutations_on_distinct_shards(count) do
     Stream.iterate(0, &(&1 + 1))
     |> Stream.map(&"file:key-#{&1}")
     |> Enum.reduce_while({[], MapSet.new()}, fn key, {keys, shards} ->
-      shard = Shard.for_key(key)
+      shard = Shard.for_key(:file_index, key)
 
       cond do
         MapSet.size(shards) == count -> {:halt, {keys, shards}}

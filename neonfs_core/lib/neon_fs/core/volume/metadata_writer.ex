@@ -86,8 +86,8 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
       volume_id,
       opts,
       fn ->
-        apply_index_op(volume_id, Shard.for_key(key), index_kind, opts, fn store,
-                                                                           current_tree_root ->
+        apply_index_op(volume_id, Shard.for_key(index_kind, key), index_kind, opts, fn store,
+                                                                                       current_tree_root ->
           nif_put = Keyword.get(opts, :index_tree_put, &Native.index_tree_put/5)
           nif_put.(store, current_tree_root, "hot", key, value)
         end)
@@ -110,8 +110,8 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
       volume_id,
       opts,
       fn ->
-        apply_index_op(volume_id, Shard.for_key(key), index_kind, opts, fn store,
-                                                                           current_tree_root ->
+        apply_index_op(volume_id, Shard.for_key(index_kind, key), index_kind, opts, fn store,
+                                                                                       current_tree_root ->
           nif_delete = Keyword.get(opts, :index_tree_delete, &Native.index_tree_delete/4)
           nif_delete.(store, current_tree_root, "hot", key)
         end)
@@ -146,7 +146,7 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
       fn ->
         apply_index_op(
           volume_id,
-          Shard.for_key(key),
+          Shard.for_key(index_kind, key),
           index_kind,
           opts,
           merge_tree_op(key, fields, opts)
@@ -440,12 +440,16 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
   defp local_apply_batch(_volume_id, [], _opts), do: {:ok, %{}}
 
   defp local_apply_batch(volume_id, mutations, opts) do
-    by_shard = Enum.group_by(mutations, &Shard.for_key(mutation_key(&1)))
+    by_shard = Enum.group_by(mutations, &Shard.for_key(mutation_kind(&1), mutation_key(&1)))
     opts = Keyword.put(opts, :volume_id, volume_id)
     retries_left = Keyword.get(opts, :cas_retries, @default_cas_retries)
 
     do_apply_batch(volume_id, by_shard, opts, retries_left)
   end
+
+  defp mutation_kind({:put, kind, _key, _value}), do: kind
+  defp mutation_kind({:delete, kind, _key}), do: kind
+  defp mutation_kind({:merge, kind, _key, _fields}), do: kind
 
   defp mutation_key({:put, _kind, key, _value}), do: key
   defp mutation_key({:delete, _kind, key}), do: key
