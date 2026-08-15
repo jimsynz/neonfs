@@ -299,6 +299,12 @@ defmodule NeonFS.Integration.CIFSSmbdTest do
       assert {:ok, _} = Smbd.client(server, "put #{listing} after-logon-failure.txt")
     end
 
+    # Not the account the rest of the suite uses. That account is whoever ran
+    # the tests, which in CI is **root**, and `Authorise.check/4` grants uid 0
+    # everything — so a denial test built on it cannot fail where it matters.
+    # `nobody` is a real local user everywhere, and smbd can only switch to it
+    # when running as root, hence the tag.
+    @tag :requires_root
     test "an authenticated user without NeonFS permission is refused by core", %{
       server: server,
       cluster: cluster,
@@ -325,17 +331,17 @@ defmodule NeonFS.Integration.CIFSSmbdTest do
       fetched = Path.join(dir, "classified.txt")
 
       assert {:error, {_status, output}} =
-               Smbd.client(server, "get classified.txt #{fetched}")
+               Smbd.client(server, "get classified.txt #{fetched}",
+                 credentials: Smbd.unprivileged_credentials()
+               )
 
       assert output =~ "NT_STATUS_ACCESS_DENIED"
       refute File.exists?(fetched)
 
-      # The same session reads a file it owns, so the refusal is about this
-      # file's permissions rather than about reads being broken.
-      readable = Path.join(dir, "readable.txt")
-      File.write!(readable, "mine")
-      assert {:ok, _} = Smbd.client(server, "put #{readable} mine.txt")
-      assert {:ok, _} = Smbd.client(server, "get mine.txt #{Path.join(dir, "mine-back.txt")}")
+      # The privileged session reads the same file, so the refusal is about who
+      # asked rather than about the file being unreadable.
+      assert {:ok, _} = Smbd.client(server, "get classified.txt #{fetched}")
+      assert File.read!(fetched) == "not for you"
     end
   end
 
