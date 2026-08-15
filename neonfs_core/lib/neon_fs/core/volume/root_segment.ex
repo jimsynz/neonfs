@@ -14,7 +14,7 @@ defmodule NeonFS.Core.Volume.RootSegment do
   - The volume's durability config (replicate/erasure parameters).
   - Per-volume HLC state.
   - Index tree roots — chunk hashes for the FileIndex / ChunkIndex /
-    StripeIndex tree roots within the volume.
+    StripeIndex / BlockIndex tree roots within the volume.
   - Per-volume schedules for GC, scrub, and anti-entropy.
 
   The bootstrap layer holds the chunk hash of the *current*
@@ -47,6 +47,8 @@ defmodule NeonFS.Core.Volume.RootSegment do
   @format_version 1
   @tag :neonfs_root_segment
 
+  @default_index_roots %{file_index: nil, chunk_index: nil, stripe_index: nil, block_index: nil}
+
   @typedoc """
   A volume's root segment.
 
@@ -63,8 +65,11 @@ defmodule NeonFS.Core.Volume.RootSegment do
     (different volumes can be at different versions during a cluster
     upgrade).
   - `hlc` — per-volume HLC state, advanced on each metadata write.
-  - `index_roots` — chunk hashes for the volume's three index trees.
-    `nil` for an empty index that hasn't been written yet.
+  - `index_roots` — chunk hashes for the volume's index trees.
+    `nil` for an empty index that hasn't been written yet. A volume
+    carries a root for every kind whether or not it uses them: an `:fs`
+    volume leaves `block_index` `nil` for its whole life, and a `:block`
+    volume leaves `file_index` `nil`.
   - `schedules` — per-volume cadence for GC / scrub / anti-entropy.
   - `shard` — the shard index (`0..count-1`) this segment's root belongs
     to, stamped on the first write that diverges the shard from the
@@ -89,7 +94,8 @@ defmodule NeonFS.Core.Volume.RootSegment do
           index_roots: %{
             file_index: binary() | nil,
             chunk_index: binary() | nil,
-            stripe_index: binary() | nil
+            stripe_index: binary() | nil,
+            block_index: binary() | nil
           },
           schedules: %{
             gc: schedule(),
@@ -136,7 +142,7 @@ defmodule NeonFS.Core.Volume.RootSegment do
             last_written_by_neonfs_version: nil,
             on_disk_format_version: 1,
             hlc: nil,
-            index_roots: %{file_index: nil, chunk_index: nil, stripe_index: nil},
+            index_roots: @default_index_roots,
             schedules: %{
               gc: %{interval_ms: 86_400_000, last_run: nil},
               scrub: %{interval_ms: 7 * 86_400_000, last_run: nil},
@@ -276,7 +282,7 @@ defmodule NeonFS.Core.Volume.RootSegment do
          last_written_by_neonfs_version: Map.fetch!(payload, :last_written_by_neonfs_version),
          on_disk_format_version: Map.fetch!(payload, :on_disk_format_version),
          hlc: hlc,
-         index_roots: Map.get(payload, :index_roots, default_index_roots()),
+         index_roots: Map.merge(default_index_roots(), Map.get(payload, :index_roots, %{})),
          schedules: schedules,
          shard: Map.get(payload, :shard)
        }}
@@ -360,7 +366,7 @@ defmodule NeonFS.Core.Volume.RootSegment do
     }
   end
 
-  defp default_index_roots, do: %{file_index: nil, chunk_index: nil, stripe_index: nil}
+  defp default_index_roots, do: @default_index_roots
 
   defp current_neonfs_version do
     case Application.spec(:neonfs_core, :vsn) do

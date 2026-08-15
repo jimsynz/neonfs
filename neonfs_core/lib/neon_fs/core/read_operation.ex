@@ -1300,7 +1300,17 @@ defmodule NeonFS.Core.ReadOperation do
     Map.take(old_meta, fields) != Map.take(new_meta, fields)
   end
 
-  defp fetch_chunk_data(chunk_meta, should_verify, volume_id) do
+  @doc """
+  Fetches one chunk's plaintext bytes from its `ChunkMeta`.
+
+  Resolves the chunk's tier, drive, compression and decryption from the
+  metadata rather than from the caller, so anything reading a volume's
+  chunks — the file read path, the block extent map — resolves them the
+  same way. A verification failure repairs from another replica before
+  giving up.
+  """
+  @spec fetch_chunk_data(map(), boolean(), binary()) :: {:ok, binary()} | {:error, term()}
+  def fetch_chunk_data(chunk_meta, should_verify, volume_id) do
     {tier, drive_id} =
       case chunk_meta.locations do
         [location | _] ->

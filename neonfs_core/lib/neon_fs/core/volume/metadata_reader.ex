@@ -41,7 +41,7 @@ defmodule NeonFS.Core.Volume.MetadataReader do
   alias NeonFS.Core.Volume.RootSegment
   alias NeonFS.Core.Volume.Shard
 
-  @type index_kind :: :file_index | :chunk_index | :stripe_index
+  @type index_kind :: :file_index | :chunk_index | :stripe_index | :block_index
   @type read_error ::
           {:error, :not_found}
           | {:error, {:cluster_state_unavailable, term()}}
@@ -216,14 +216,15 @@ defmodule NeonFS.Core.Volume.MetadataReader do
 
   @doc """
   List every node chunk hash reachable from the volume's three
-  index trees (`file_index`, `chunk_index`, `stripe_index`) — both
+  index trees (`file_index`, `chunk_index`, `stripe_index`,
+  `block_index`) — both
   internal-page chunks and leaf-page chunks. Used by the
   anti-entropy runner so the per-volume reconciliation pass
   enumerates index-tree pages as well as data chunks, catching
   tree-page divergence between replicas that the read-path
   cross-node fallback would otherwise leave undetected.
 
-  Returns `{:ok, [hash, ...]}` with hashes from all three trees
+  Returns `{:ok, [hash, ...]}` with hashes from every tree
   unioned (deduped — internal pages shared across trees are
   reported once). Empty trees contribute zero hashes.
 
@@ -259,7 +260,7 @@ defmodule NeonFS.Core.Volume.MetadataReader do
   defp collect_tree_chunks(store_handle, segment, opts) do
     nif = Keyword.get(opts, :index_tree_list, &default_index_tree_list/3)
 
-    [:file_index, :chunk_index, :stripe_index]
+    [:file_index, :chunk_index, :stripe_index, :block_index]
     |> Enum.reduce_while({:ok, MapSet.new()}, fn kind, {:ok, acc} ->
       tree_root = Map.fetch!(segment.index_roots, kind)
 

@@ -62,7 +62,7 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
   alias NeonFS.Core.Volume.{ChunkReplicator, MetadataReader, Provisioner, RootSegment, Shard}
   alias NeonFS.Core.VolumeRegistry
 
-  @type index_kind :: :file_index | :chunk_index | :stripe_index
+  @type index_kind :: :file_index | :chunk_index | :stripe_index | :block_index
   @type mutation ::
           {:put, index_kind(), binary(), binary()}
           | {:delete, index_kind(), binary()}
