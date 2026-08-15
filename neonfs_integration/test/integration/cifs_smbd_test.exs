@@ -272,6 +272,34 @@ defmodule NeonFS.Integration.CIFSSmbdTest do
     end
   end
 
+  # Two refusals that look alike to a client and come from different layers.
+  # Asserting only the first proves Samba authenticates and nothing about
+  # whether NeonFS's own check is reached; asserting only the second could pass
+  # on a share that let anyone in. The pair is the point.
+  describe "permission denied" do
+    test "a wrong password is refused by Samba, before any VFS hook", %{
+      server: server,
+      dir: dir
+    } do
+      assert {:error, {_status, output}} =
+               Smbd.client(server, "ls", credentials: "#{server.user}%wrong-#{Smbd.password()}")
+
+      assert output =~ "NT_STATUS_LOGON_FAILURE", Smbd.logs(server)
+
+      # Samba rejected the session, so the bridge was never asked anything. A
+      # module that had been consulted would have logged an op here, and that
+      # would mean the credential check was happening in the wrong place.
+      refute Smbd.logs(server) =~ "neonfs_connect",
+             "the VFS module was reached despite the logon failing"
+
+      # The same client with the right password works, so the refusal is about
+      # the credentials rather than about the share being unusable.
+      listing = Path.join(dir, "after-logon-failure.txt")
+      File.write!(listing, "ok")
+      assert {:ok, _} = Smbd.client(server, "put #{listing} after-logon-failure.txt")
+    end
+  end
+
   # The rest of the suite runs one core peer and one interface peer, which
   # has no minority to be in. This block builds its own topology: three
   # core peers so a majority exists to be cut off from, and the bridge peer
