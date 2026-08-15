@@ -133,7 +133,7 @@ defmodule NeonFS.Core.Volume.MetadataReader do
 
   # A point get resolves the single shard the key belongs to.
   defp do_local_get(volume_id, index_kind, key, opts) do
-    shard = Shard.for_key(key)
+    shard = Shard.for_key(index_kind, key)
 
     with {:ok, segment, root_entry} <- resolve_segment(volume_id, shard, opts) do
       tree_root = Map.fetch!(segment.index_roots, index_kind)

@@ -287,7 +287,7 @@ defmodule NeonFS.Integration.MetadataCommitBoundaryTest do
   # makes "this case spans shards" a property of the test rather than of
   # the hash landing well on the day.
   defp assert_shards_advanced(cluster, volume_id, roots_before, keys) do
-    shards = MapSet.new(keys, &Shard.for_key/1)
+    shards = MapSet.new(keys, &Shard.for_key(:file_index, &1))
 
     assert MapSet.size(shards) >= 2,
            "#{inspect(keys)} share a shard, so this case cannot cross a boundary"
@@ -351,15 +351,15 @@ defmodule NeonFS.Integration.MetadataCommitBoundaryTest do
     roots |> Map.get(shard, %{}) |> Map.get(:root_chunk_hash)
   end
 
-  # `Shard.for_key/1` hashes, so a file id can collide with the dirent
+  # `Shard.for_key/2` hashes a `:file_index` key, so a file id can collide with the dirent
   # keys of its own operation. Draw ids until the `file:` key lands
   # somewhere else.
   defp file_id_off_shards(dirent_keys) do
-    occupied = MapSet.new(dirent_keys, &Shard.for_key/1)
+    occupied = MapSet.new(dirent_keys, &Shard.for_key(:file_index, &1))
 
     Stream.repeatedly(&UUIDv7.generate/0)
     |> Stream.take(1_000)
-    |> Enum.find(&(Shard.for_key(file_key(&1)) not in occupied))
+    |> Enum.find(&(Shard.for_key(:file_index, file_key(&1)) not in occupied))
     |> case do
       nil -> flunk("no file id landed off #{inspect(MapSet.to_list(occupied))}")
       id -> id
