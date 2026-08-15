@@ -2,16 +2,31 @@ defmodule NeonFS.Core.GarbageCollector do
   @moduledoc """
   Mark-and-sweep garbage collector for NeonFS chunks and stripe metadata.
 
-  The GC identifies committed chunks that are no longer referenced by any file
-  and deletes them from both ChunkIndex and BlobStore. For erasure-coded
+  The GC identifies committed chunks that are no longer referenced and
+  deletes them from both ChunkIndex and BlobStore. For erasure-coded
   volumes, the mark phase resolves file → stripes → chunk hashes to build
   the referenced set. Orphaned stripe metadata is cleaned up after chunk GC.
+
+  ## A block volume has no files to mark from
+
+  A block volume's chunks are named by its extent map, not by a
+  `NeonFS.Core.FileMeta` — there is nothing in `FileIndex` to walk. So the
+  mark phase asks `NeonFS.Core.BlockIndex` for every target the map holds,
+  and a chunk named only by an extent is live for exactly the same reason a
+  chunk named only by a file is.
+
+  This is load-bearing rather than tidy. The extent map's write ordering
+  deliberately relies on GC: chunks land first and the map commits second,
+  so a crash between the two leaks chunks nothing points at, and GC is what
+  reclaims them. A mark phase that could not tell that leak apart from a
+  live extent would reclaim the device's data instead.
 
   Chunks with `active_write_refs` are never deleted (in-flight write protection).
   """
 
   alias NeonFS.Core.{
     BlobStore,
+    BlockIndex,
     ChunkIndex,
     ChunkMeta,
     FileIndex,
@@ -78,10 +93,18 @@ defmodule NeonFS.Core.GarbageCollector do
 
     {snapshot_chunks, snapshot_stripes} = mark_snapshot_references(volume_filter, opts)
 
-    referenced_chunks = MapSet.union(live_chunks, snapshot_chunks)
-    referenced_stripes = MapSet.union(live_stripes, snapshot_stripes)
+    {extent_chunks, extent_stripes, unmarked_volumes} =
+      mark_extent_references(volume_filter, opts)
 
-    {chunks_deleted, chunks_protected} = sweep_chunks(referenced_chunks, volume_filter)
+    referenced_chunks =
+      live_chunks |> MapSet.union(snapshot_chunks) |> MapSet.union(extent_chunks)
+
+    referenced_stripes =
+      live_stripes |> MapSet.union(snapshot_stripes) |> MapSet.union(extent_stripes)
+
+    {chunks_deleted, chunks_protected} =
+      sweep_chunks(referenced_chunks, volume_filter, unmarked_volumes)
+
     stripes_deleted = sweep_stripes(referenced_stripes, volume_filter)
 
     duration = System.monotonic_time() - start_time
@@ -152,6 +175,63 @@ defmodule NeonFS.Core.GarbageCollector do
   end
 
   defp collect_file_stripe_ids(_, acc), do: acc
+
+  # ─── Extent-Map Mark (block volumes) ───────────────────────────────────
+  #
+  # One volume at a time, so the entry list a scan materialises is
+  # collectable as soon as its hashes are folded in rather than being held
+  # for the whole pass. A stripe target contributes the stripe's own chunks
+  # too, resolved the same way an erasure-coded file's are.
+
+  defp mark_extent_references(volume_filter, opts) do
+    enumerator =
+      Keyword.get(opts, :block_volume_enumerator, fn -> block_volumes(volume_filter) end)
+
+    Enum.reduce(enumerator.(), {MapSet.new(), MapSet.new(), MapSet.new()}, fn volume,
+                                                                              {chunks, stripes,
+                                                                               unmarked} ->
+      case BlockIndex.referenced_targets(volume.name, opts) do
+        {:ok, %{chunks: extent_chunks, stripes: extent_stripes}} ->
+          {
+            chunks |> MapSet.union(extent_chunks) |> union_stripe_chunks(volume, extent_stripes),
+            MapSet.union(stripes, extent_stripes),
+            unmarked
+          }
+
+        {:error, reason} ->
+          # An unreadable map marks nothing, and marking nothing is
+          # indistinguishable from "none of it is referenced" — which would
+          # delete the whole device. Carry the volume forward so the sweep
+          # protects its chunks instead of collecting them.
+          Logger.warning("Extent map unreadable during GC mark; protecting the volume's chunks",
+            volume_id: volume.id,
+            reason: inspect(reason)
+          )
+
+          {chunks, stripes, MapSet.put(unmarked, volume.id)}
+      end
+    end)
+  end
+
+  defp union_stripe_chunks(chunks, volume, stripe_ids) do
+    Enum.reduce(stripe_ids, chunks, fn stripe_id, acc ->
+      case StripeIndex.get(volume.id, stripe_id) do
+        {:ok, stripe} -> Enum.reduce(stripe.chunks, acc, &MapSet.put(&2, &1))
+        {:error, :not_found} -> acc
+      end
+    end)
+  end
+
+  defp block_volumes(nil) do
+    Enum.filter(VolumeRegistry.list(), &(&1.type == :block))
+  end
+
+  defp block_volumes(volume_id) do
+    case VolumeRegistry.get(volume_id) do
+      {:ok, %{type: :block} = volume} -> [volume]
+      _ -> []
+    end
+  end
 
   # ─── Multi-Root Mark (snapshots) ───────────────────────────────────────
   #
@@ -292,7 +372,7 @@ defmodule NeonFS.Core.GarbageCollector do
 
   # ─── Sweep Phase ───────────────────────────────────────────────────────
 
-  defp sweep_chunks(referenced_set, volume_filter) do
+  defp sweep_chunks(referenced_set, volume_filter, unmarked_volumes) do
     all_committed = list_committed_chunks(volume_filter)
 
     {deleted, protected, freed} =
@@ -300,6 +380,9 @@ defmodule NeonFS.Core.GarbageCollector do
         cond do
           MapSet.member?(referenced_set, chunk_meta.hash) ->
             {deleted, protected, freed}
+
+          unmarked_volume?(chunk_meta, unmarked_volumes) ->
+            {deleted, protected + 1, freed}
 
           has_active_writes?(chunk_meta) ->
             {deleted, protected + 1, freed}
@@ -402,6 +485,13 @@ defmodule NeonFS.Core.GarbageCollector do
       [],
       :chunk_index
     )
+  end
+
+  # A chunk belonging to a volume whose extent map could not be read this
+  # pass. Reported as protected rather than skipped silently: the counter is
+  # what tells an operator the pass was incomplete.
+  defp unmarked_volume?(%ChunkMeta{volume_ids: volume_ids}, unmarked_volumes) do
+    not MapSet.disjoint?(volume_ids, unmarked_volumes)
   end
 
   defp has_active_writes?(chunk_meta) do
