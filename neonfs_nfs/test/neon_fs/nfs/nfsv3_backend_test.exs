@@ -1241,7 +1241,7 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
       put_core(fn
         NeonFS.Core, :get_file_meta, [@volume_name, "/parent" | _] -> {:ok, pre_dir}
         NeonFS.Core, :get_file_meta, [@volume_name, ^child_path | _] -> {:ok, target}
-        NeonFS.Core, :list_dir, [@volume_name, ^child_path] -> {:ok, []}
+        NeonFS.Core, :list_dir, [@volume_name, ^child_path | _] -> {:ok, []}
         NeonFS.Core, :delete_file, [@volume_name, ^child_path | _] -> :ok
       end)
 
@@ -1263,7 +1263,7 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
         NeonFS.Core, :get_file_meta, [@volume_name, ^child_path | _] ->
           {:ok, target}
 
-        NeonFS.Core, :list_dir, [@volume_name, ^child_path] ->
+        NeonFS.Core, :list_dir, [@volume_name, ^child_path | _] ->
           {:ok, [%{path: child_path <> "/file.txt"}]}
 
         NeonFS.Core, :delete_file, _ ->
@@ -1474,7 +1474,7 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
 
       test_pid = self()
 
-      put_core(fn NeonFS.Core, :list_dir, [vol_name, "/"] ->
+      put_core(fn NeonFS.Core, :list_dir, [vol_name, "/" | _] ->
         send(test_pid, {:list_dir, vol_name})
         {:ok, []}
       end)
@@ -1502,7 +1502,7 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
           send(test_pid, {:get_volume_by_id, uuid})
           {:ok, %{id: uuid, name: @volume_name}}
 
-        NeonFS.Core, :list_dir, [vol_name, "/"] ->
+        NeonFS.Core, :list_dir, [vol_name, "/" | _] ->
           send(test_pid, {:list_dir, vol_name})
           {:ok, []}
       end)

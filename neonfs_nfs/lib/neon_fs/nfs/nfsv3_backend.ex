@@ -149,10 +149,12 @@ defmodule NeonFS.NFS.NFSv3Backend do
 
   @impl true
   def readdir(fh, cookie, _verf, count, auth, ctx) do
+    identity = squashed_identity(auth, fh)
+
     with {:ok, vol_name, path, dir_meta} <-
-           resolve_meta(fh, squashed_identity(auth, fh), peer(ctx)),
+           resolve_meta(fh, identity, peer(ctx)),
          {:ok, entries} <-
-           core_call(NeonFS.Core, :list_dir, [vol_name, path]) do
+           core_call(NeonFS.Core, :list_dir, [vol_name, path, identity]) do
       all_entries = build_readdir_entries(vol_name, path, entries)
 
       readdir_entries =
@@ -665,7 +667,7 @@ defmodule NeonFS.NFS.NFSv3Backend do
   end
 
   defp check_rmdir_empty(vol_name, child_path, pre_dir_wcc, dir_path, identity) do
-    case core_call(NeonFS.Core, :list_dir, [vol_name, child_path]) do
+    case core_call(NeonFS.Core, :list_dir, [vol_name, child_path, identity]) do
       {:ok, []} ->
         :ok
 
