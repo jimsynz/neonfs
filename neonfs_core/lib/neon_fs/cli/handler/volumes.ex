@@ -38,7 +38,7 @@ defmodule NeonFS.CLI.Handler.Volumes do
 
   require Logger
 
-  @immutable_update_fields ~w(durability encryption name id)
+  @immutable_update_fields ~w(durability encryption name id block_chunk_bytes)
   @tiering_fields ~w(initial_tier promotion_threshold demotion_delay)
   @caching_fields ~w(transformed_chunks reconstructed_stripes remote_chunks)
   @verification_fields ~w(on_read sampling_rate scrub_interval)
@@ -102,6 +102,7 @@ defmodule NeonFS.CLI.Handler.Volumes do
       owner_gid = Keyword.get(opts, :owner_gid, 0)
 
       with {:ok, typed_opts} <- parse_type_opt(opts),
+           {:ok, typed_opts} <- parse_block_chunk_bytes_opt(typed_opts),
            {:ok, parsed_opts} <- parse_durability_opt(typed_opts),
            {:ok, enc_opts} <- parse_encryption_opt(parsed_opts),
            final_opts = merge_verification_defaults(enc_opts),
@@ -385,6 +386,7 @@ defmodule NeonFS.CLI.Handler.Volumes do
       verification: volume.verification,
       metadata_consistency: volume.metadata_consistency,
       encryption: encryption_to_map(volume.encryption),
+      block_chunk_bytes: volume.block_chunk_bytes,
       logical_size: volume.logical_size,
       physical_size: volume.physical_size,
       chunk_count: volume.chunk_count,
@@ -466,6 +468,37 @@ defmodule NeonFS.CLI.Handler.Volumes do
 
       other ->
         {:error, InvalidConfig.exception(field: :type, reason: "unknown type #{inspect(other)}")}
+    end
+  end
+
+  # Fixed for the volume's life, so it is validated at creation and nowhere
+  # else: every extent in a block volume's map is expressed in this size, and
+  # changing it would invalidate all of them. `@immutable_update_fields` refuses
+  # it afterwards.
+  #
+  # A multiple of the 4 KiB logical block, because a chunk that does not hold a
+  # whole number of blocks makes every write straddle one.
+  defp parse_block_chunk_bytes_opt(opts) do
+    case {Keyword.get(opts, :type), Keyword.get(opts, :block_chunk_bytes)} do
+      {_type, nil} ->
+        {:ok, opts}
+
+      {:block, size} when is_integer(size) and size > 0 and rem(size, 4096) == 0 ->
+        {:ok, Keyword.put(opts, :block_chunk_bytes, size)}
+
+      {:block, size} ->
+        {:error,
+         InvalidConfig.exception(
+           field: :block_chunk_bytes,
+           reason: "must be a positive multiple of 4096, got #{inspect(size)}"
+         )}
+
+      {_other_type, _size} ->
+        {:error,
+         InvalidConfig.exception(
+           field: :block_chunk_bytes,
+           reason: "only applies to a volume of type :block"
+         )}
     end
   end
 

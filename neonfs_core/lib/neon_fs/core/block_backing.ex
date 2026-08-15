@@ -73,7 +73,6 @@ defmodule NeonFS.Core.BlockBacking do
   alias NeonFS.Core
 
   @chunk_bytes 131_072
-  @chunk_strategy {:fixed, @chunk_bytes}
 
   # One device per volume means the backing file's name is the same
   # everywhere, so it is defined once here rather than spelled out by core,
@@ -107,10 +106,22 @@ defmodule NeonFS.Core.BlockBacking do
         }
 
   @doc """
-  The fixed chunk size every block backing file is written with.
+  The chunk size a block volume is written with when it names none.
+
+  The size is per-volume (`NeonFS.Core.Volume.block_chunk_bytes`) and fixed for
+  the volume's life. This is the value a volume created before that field
+  existed reads as, and the default a new one gets — so the baseline the
+  file-backed spike measured carries over unchanged.
   """
   @spec chunk_bytes() :: pos_integer()
   def chunk_bytes, do: @chunk_bytes
+
+  @doc """
+  The chunk size `volume_record` is stored in.
+  """
+  @spec chunk_bytes_for(NeonFS.Core.Volume.t() | map()) :: pos_integer()
+  def chunk_bytes_for(%{block_chunk_bytes: size}) when is_integer(size) and size > 0, do: size
+  def chunk_bytes_for(_volume), do: @chunk_bytes
 
   @doc """
   The path of the single backing file a block volume holds.
@@ -181,8 +192,8 @@ defmodule NeonFS.Core.BlockBacking do
     start_time = System.monotonic_time()
 
     with :ok <- validate_device_size(size_bytes),
-         {:ok, write_opts} <- force_fixed_chunking(opts),
          {:ok, volume_record} <- Core.get_volume(volume),
+         {:ok, write_opts} <- force_fixed_chunking(opts, chunk_bytes_for(volume_record)),
          :ok <- validate_durability(volume_record),
          :ok <- validate_capacity(volume_record, size_bytes),
          {:ok, meta} <-
@@ -202,7 +213,7 @@ defmodule NeonFS.Core.BlockBacking do
         %{volume: volume, path: path, file_id: meta.id}
       )
 
-      {:ok, device_from_meta(volume, meta)}
+      {:ok, device_from_meta(volume, meta, chunk_bytes_for(volume_record))}
     end
   end
 
@@ -216,7 +227,7 @@ defmodule NeonFS.Core.BlockBacking do
   @spec open_device(String.t(), String.t()) :: {:ok, device()} | {:error, term()}
   def open_device(volume, path) do
     with {:ok, meta} <- Core.get_file_meta(volume, path) do
-      {:ok, device_from_meta(volume, meta)}
+      {:ok, device_from_meta(volume, meta, volume_chunk_bytes(volume))}
     end
   end
 
@@ -226,7 +237,7 @@ defmodule NeonFS.Core.BlockBacking do
   @spec device_info(String.t(), binary()) :: {:ok, device()} | {:error, term()}
   def device_info(volume, file_id) do
     with {:ok, meta} <- Core.get_file_meta_by_id(volume, file_id) do
-      {:ok, device_from_meta(volume, meta)}
+      {:ok, device_from_meta(volume, meta, volume_chunk_bytes(volume))}
     end
   end
 
@@ -290,8 +301,10 @@ defmodule NeonFS.Core.BlockBacking do
     guest_bytes = byte_size(data)
 
     with :ok <- validate_request(offset, guest_bytes),
-         {:ok, write_opts} <- force_fixed_chunking(opts),
+         # The device is resolved first because it carries the volume's chunk
+         # size, which is what the write has to be chunked at.
          {:ok, device} <- device_info(volume, file_id),
+         {:ok, write_opts} <- force_fixed_chunking(opts, device.chunk_bytes),
          :ok <- validate_range(device, offset, guest_bytes),
          {:ok, _meta} <- Core.write_file_at_by_id(volume, file_id, offset, data, write_opts) do
       {chunks, chunk_bytes} = rewritten_chunks(device, offset, guest_bytes)
@@ -388,22 +401,38 @@ defmodule NeonFS.Core.BlockBacking do
     error
   end
 
-  defp device_from_meta(volume, meta) do
+  # A volume that cannot be resolved falls back to the default rather than
+  # failing: the caller already holds a device, and refusing to describe it
+  # because its volume record is momentarily unreadable turns a metadata blip
+  # into an IO error.
+  defp volume_chunk_bytes(volume) do
+    case Core.get_volume(volume) do
+      {:ok, record} -> chunk_bytes_for(record)
+      {:error, _reason} -> @chunk_bytes
+    end
+  end
+
+  defp device_from_meta(volume, meta, chunk_bytes) do
     %{
       volume: volume,
       file_id: meta.id,
       path: meta.path,
       size: meta.size,
-      chunk_bytes: @chunk_bytes,
+      chunk_bytes: chunk_bytes,
       logical_block_bytes: @logical_block_bytes,
       physical_block_bytes: @physical_block_bytes
     }
   end
 
-  defp force_fixed_chunking(opts) do
+  # A block device is never content-chunked: an extent map addresses fixed-size
+  # chunks by position, so a boundary that moved with the data would make every
+  # extent unaddressable.
+  defp force_fixed_chunking(opts, chunk_bytes) do
+    strategy = {:fixed, chunk_bytes}
+
     case Keyword.fetch(opts, :chunk_strategy) do
-      :error -> {:ok, Keyword.put(opts, :chunk_strategy, @chunk_strategy)}
-      {:ok, @chunk_strategy} -> {:ok, opts}
+      :error -> {:ok, Keyword.put(opts, :chunk_strategy, strategy)}
+      {:ok, ^strategy} -> {:ok, opts}
       {:ok, other} -> {:error, {:unsupported_chunk_strategy, other}}
     end
   end

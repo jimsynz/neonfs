@@ -90,6 +90,53 @@ defmodule NeonFS.Core.BlockBackingTest do
     end
   end
 
+  describe "per-volume chunk size" do
+    test "defaults to the spike's 128 KiB, so the measured baseline carries over" do
+      name = "block-default-#{:rand.uniform(999_999)}"
+      {:ok, volume} = NeonFS.Core.create_volume(name, type: :block, max_size: 4 * @chunk)
+
+      assert volume.block_chunk_bytes == BlockBacking.chunk_bytes()
+      assert {:ok, device} = BlockBacking.open_device(name, BlockBacking.device_path())
+      assert device.chunk_bytes == BlockBacking.chunk_bytes()
+    end
+
+    test "a volume stores its device at the size it names" do
+      name = "block-sized-#{:rand.uniform(999_999)}"
+      size = 4096 * 8
+
+      {:ok, volume} =
+        NeonFS.Core.create_volume(name,
+          type: :block,
+          max_size: 16 * size,
+          block_chunk_bytes: size
+        )
+
+      assert volume.block_chunk_bytes == size
+
+      assert {:ok, device} = BlockBacking.open_device(name, BlockBacking.device_path())
+      assert device.chunk_bytes == size
+
+      {:ok, meta} = NeonFS.Core.get_file_meta_by_id(name, device.file_id)
+      assert length(meta.chunks) == 16
+    end
+
+    # A volume predating the field reads as the default rather than as `nil`,
+    # which would divide by zero somewhere further down.
+    test "a volume with no size recorded reads as the default" do
+      assert BlockBacking.chunk_bytes_for(%{block_chunk_bytes: nil}) ==
+               BlockBacking.chunk_bytes()
+
+      assert BlockBacking.chunk_bytes_for(%{}) == BlockBacking.chunk_bytes()
+    end
+
+    test "a filesystem volume records no block chunk size" do
+      name = "fs-nochunk-#{:rand.uniform(999_999)}"
+      {:ok, volume} = NeonFS.Core.create_volume(name, max_size: 4 * @chunk)
+
+      assert volume.block_chunk_bytes == nil
+    end
+  end
+
   describe "provision_volume_device/1" do
     test "a block volume created through core owns a device sized to its maximum" do
       name = "block-provisioned-#{:rand.uniform(999_999)}"
