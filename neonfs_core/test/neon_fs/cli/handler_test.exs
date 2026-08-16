@@ -826,7 +826,10 @@ defmodule NeonFS.CLI.HandlerTest do
       volume_name = "blk-#{:rand.uniform(999_999)}"
 
       assert {:ok, _claim_id} =
-               NamespaceCoordinator.claim_path(BlockAttachment.path(volume_name), :exclusive)
+               NamespaceCoordinator.claim_path(
+                 BlockAttachment.path(volume_name, BlockAttachment.default_device_path()),
+                 :exclusive
+               )
 
       assert {:ok, %{^volume_name => node_name}} = Handler.block_attachments()
       assert node_name == Atom.to_string(node())
@@ -843,7 +846,10 @@ defmodule NeonFS.CLI.HandlerTest do
       volume_name = "blk-#{:rand.uniform(999_999)}"
 
       {:ok, claim_id} =
-        NamespaceCoordinator.claim_path(BlockAttachment.path(volume_name), :exclusive)
+        NamespaceCoordinator.claim_path(
+          BlockAttachment.path(volume_name, BlockAttachment.default_device_path()),
+          :exclusive
+        )
 
       assert :ok = NamespaceCoordinator.release(claim_id)
 

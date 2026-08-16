@@ -260,8 +260,17 @@ defmodule NeonFS.CLI.Handler.Volumes do
   Which node each attached block volume is attached to, keyed by volume name.
 
   A volume with no entry is unattached. The attachment record is an
-  exclusive claim on `NeonFS.Core.BlockAttachment.path/1`, held by a pid on
-  the attached node, so the holder's node is the answer.
+  exclusive claim on `NeonFS.Core.BlockAttachment.path/2`, held by a pid on
+  the node holding the attachment, so the holder's node is the answer.
+
+  What that node *is* depends on how the device was attached: the consuming
+  node for a CSI attachment, the `neonfs_block` node serving the socket for
+  an NBD one. `NeonFS.Core.BlockAttachment` records why.
+
+  Claims are per device and a volume can hold several, so a volume with more
+  than one attached device reports one of their nodes. Only the device a
+  volume is provisioned with is reachable through the CLI, which is the case
+  this answers.
 
   ## Returns
   - `{:ok, map}` - Volume name to node name, one entry per attached volume
@@ -363,8 +372,8 @@ defmodule NeonFS.CLI.Handler.Volumes do
   # starts with the prefix, so a path that is not an attachment is dropped
   # rather than reported under a truncated volume name.
   defp attachment_entry({_claim_id, %{path: path, holder: holder}}) when is_pid(holder) do
-    case BlockAttachment.volume_name(path) do
-      {:ok, volume_name} -> [{volume_name, Atom.to_string(node(holder))}]
+    case BlockAttachment.device(path) do
+      {:ok, volume_name, _device_path} -> [{volume_name, Atom.to_string(node(holder))}]
       :error -> []
     end
   end

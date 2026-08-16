@@ -71,14 +71,17 @@ defmodule NeonFS.Core.BlockBacking do
   """
 
   alias NeonFS.Core
+  alias NeonFS.Core.BlockAttachment
 
   @chunk_bytes 131_072
 
   # One device per volume means the backing file's name is the same
-  # everywhere, so it is defined once here rather than spelled out by core,
-  # the CLI, CSI and the acceptance rig. It is deliberately not a field on
-  # the volume record, which could only ever hold this one value.
-  @device_path "/dev.img"
+  # everywhere, so it is defined once rather than spelled out by core, the
+  # CLI, CSI and the acceptance rig. It lives in `neonfs_client` because CSI
+  # names a volume's device to build its attachment claim path and cannot
+  # depend on core to ask. It is deliberately not a field on the volume
+  # record, which could only ever hold this one value.
+  @device_path BlockAttachment.default_device_path()
 
   @logical_block_bytes 4096
   @physical_block_bytes 4096
