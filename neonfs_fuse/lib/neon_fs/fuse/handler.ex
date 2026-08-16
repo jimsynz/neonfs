@@ -982,6 +982,13 @@ defmodule NeonFS.FUSE.Handler do
       {:error, :cluster_frozen} ->
         {"error", %{"errno" => errno(:eagain)}}
 
+      # A partial write that exhausted its retry budget against a genuinely
+      # contended span. Nothing was lost and a retry gets through, so this
+      # is `EAGAIN` rather than `EIO` — an I/O error on a write that never
+      # failed is what remounts an ext4 read-only.
+      {:error, :stale_chunks} ->
+        {"error", %{"errno" => errno(:eagain)}}
+
       {:error, reason} ->
         Logger.warning("Write failed", reason: inspect(reason))
         {"error", %{"errno" => errno(:eio)}}

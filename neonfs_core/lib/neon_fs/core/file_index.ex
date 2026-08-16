@@ -288,6 +288,52 @@ defmodule NeonFS.Core.FileIndex do
   def expect_chunks_opt(chunks) when is_list(chunks), do: [expect_chunks: chunks]
 
   @doc """
+  The narrow form of the same compare-and-swap: compare and replace only the
+  chunks covering a byte span, leaving the rest of the list as this process
+  finds it at commit time.
+
+  `expect_chunks_opt/1` compares the *entire* chunk list, so any change
+  anywhere in the file invalidates every concurrent writer — disjointness
+  buys nothing, and writers to different parts of one file thrash against
+  each other. This compares only what the writer actually read and replaces
+  only what it actually rewrote, so two writers to different spans do not
+  collide at all.
+
+  `span_start` and `chunk_bytes` are what locate the span, **not** a chunk
+  index captured before the call: the index is recomputed here, from bytes,
+  because a concurrent writer can change how many chunks precede a span.
+
+  ## The alignment precondition
+
+  Deriving an index from a byte offset arithmetically requires every chunk
+  before the span to be exactly `chunk_bytes` long. That is a property of
+  the *file*, not of a chunking strategy: a fixed-chunking write that
+  extends a file past a short final chunk re-chunks from that chunk's end,
+  which leaves a short chunk mid-list and misaligns everything after it.
+
+  Block volumes hold the invariant by construction — the device is
+  provisioned at full size in one aligned write, every write is bounded by
+  that size, and `chunk_bytes` is fixed for the volume's life — which is why
+  `NeonFS.Core.WriteOperation` only takes this path for them. Callers must
+  establish alignment before using it; this function cannot check it without
+  the chunk sizes, which live behind a quorum read this process must not
+  make.
+  """
+  @spec splice_chunks_opt(non_neg_integer(), [binary()], [binary()], pos_integer()) :: keyword()
+  def splice_chunks_opt(span_start, expected, replacement, chunk_bytes)
+      when is_integer(span_start) and span_start >= 0 and is_list(expected) and
+             is_list(replacement) and is_integer(chunk_bytes) and chunk_bytes > 0 do
+    [
+      splice_chunks: %{
+        span_start: span_start,
+        expected: expected,
+        replacement: replacement,
+        chunk_bytes: chunk_bytes
+      }
+    ]
+  end
+
+  @doc """
   Truncates a file to the given size, trimming chunks and stripes as needed.
 
   When `new_size` is smaller than the current file size, walks the chunk list
@@ -742,9 +788,9 @@ defmodule NeonFS.Core.FileIndex do
         state
       ) do
     plan =
-      case check_expected_chunks(file_id, opts, state.pending_files) do
-        :ok ->
-          plan_update(file_id, updates, state.pending_files)
+      case resolve_chunk_update(file_id, updates, opts, state.pending_files) do
+        {:ok, resolved_updates} ->
+          plan_update(file_id, resolved_updates, state.pending_files)
           |> with_chunk_commit(write_id, chunk_hashes)
           |> with_extra_mutations(opts)
 
@@ -929,6 +975,45 @@ defmodule NeonFS.Core.FileIndex do
       {:error, %Conflict{}} -> {:now, {:error, AlreadyExists.from_reason(:already_exists)}}
       {:error, reason} -> {:now, {:error, reason}}
     end
+  end
+
+  # Both compare-and-swap forms, resolved to the `chunks:` and `size:` the
+  # update should actually carry. The wide form compares the caller's whole
+  # snapshot and takes its list as given; the narrow one compares only the
+  # span the caller read and splices its replacement into the list current
+  # *here*, so a concurrent writer's changes outside the span survive.
+  defp resolve_chunk_update(file_id, updates, opts, overlay) do
+    case Keyword.fetch(opts, :splice_chunks) do
+      {:ok, splice} ->
+        splice_chunk_update(file_id, updates, splice, overlay)
+
+      :error ->
+        with :ok <- check_expected_chunks(file_id, opts, overlay), do: {:ok, updates}
+    end
+  end
+
+  defp splice_chunk_update(file_id, updates, splice, overlay) do
+    %{span_start: span_start, expected: expected, replacement: replacement} = splice
+    first = div(span_start, splice.chunk_bytes)
+
+    with {:ok, current} <- fetch_file(file_id, overlay),
+         ^expected <- Enum.slice(current.chunks, first, length(expected)) do
+      spliced =
+        Enum.take(current.chunks, first) ++
+          replacement ++ Enum.drop(current.chunks, first + length(expected))
+
+      {:ok, Keyword.merge(updates, chunks: spliced, size: grown_size(current, updates))}
+    else
+      {:error, reason} -> {:error, reason}
+      _changed_span -> {:error, :stale_chunks}
+    end
+  end
+
+  # The caller computed its size against a snapshot, so a concurrent writer
+  # that extended the file further must not be shrunk back by this commit.
+  # Only the caller's own growth is its to claim.
+  defp grown_size(current, updates) do
+    max(current.size, Keyword.get(updates, :size, current.size))
   end
 
   # The compare half of the compare-and-swap. Runs inside this process,

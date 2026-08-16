@@ -515,6 +515,11 @@ defmodule NeonFS.NFS.NFSv3Backend do
   # A frozen cluster is a temporary maintenance pause: JUKEBOX
   # tells the client to retry rather than surfacing a hard error.
   defp to_nfs_status(:cluster_frozen), do: :jukebox
+  # So is a partial write that exhausted its retry budget against a
+  # genuinely contended span — nothing was lost, and a client that retries
+  # gets through. Reporting it as an I/O error would fail a write that never
+  # failed.
+  defp to_nfs_status(:stale_chunks), do: :jukebox
   defp to_nfs_status(:name_too_long), do: :nametoolong
   defp to_nfs_status(:not_empty), do: :notempty
   defp to_nfs_status(:cross_device), do: :xdev

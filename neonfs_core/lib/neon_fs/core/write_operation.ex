@@ -677,7 +677,7 @@ defmodule NeonFS.Core.WriteOperation do
              write_id,
              new_chunks,
              [chunks: all_hashes, size: new_size],
-             FileIndex.expect_chunks_opt(file_meta.chunks)
+             commit_compare(volume, file_meta, prefix, affected, new_hashes, opts)
            ) do
         {:error, :stale_chunks} ->
           retry_write_at(volume, file_meta, offset, data, write_id, opts, attempt)
@@ -701,6 +701,45 @@ defmodule NeonFS.Core.WriteOperation do
         abort_chunks(write_id)
         error
     end
+  end
+
+  # Which compare-and-swap the commit uses.
+  #
+  # The wide one compares the writer's entire chunk list, so any change
+  # anywhere in the file invalidates it — two writers to different chunks of
+  # one file collide, and each retry redoes the read, re-chunk, re-hash,
+  # re-encrypt and re-store it just discarded. That is the whole cost this
+  # narrows away.
+  #
+  # The narrow one is only sound when a byte offset can be turned into a
+  # chunk index by division, which needs every chunk before the span to be
+  # exactly `chunk_bytes` long. Fixed chunking does not give that on its own:
+  # a write extending a file past a short final chunk re-chunks from that
+  # chunk's end, leaving a short chunk mid-list and misaligning the rest.
+  #
+  # A block volume does give it, by construction — its device is provisioned
+  # at full size in one aligned write, no write can extend it, and its
+  # `chunk_bytes` is fixed for the volume's life — so alignment is a property
+  # of the volume rather than of one write's options. Every other volume
+  # keeps the wide compare, where an incorrect index would be silent data
+  # loss rather than a slow write.
+  defp commit_compare(%{type: :block}, file_meta, prefix, affected, new_hashes, opts) do
+    case Keyword.get(opts, :chunk_strategy) do
+      {:fixed, chunk_bytes} ->
+        FileIndex.splice_chunks_opt(
+          chunks_end(prefix),
+          Enum.map(affected, fn {hash, _start, _end} -> hash end),
+          new_hashes,
+          chunk_bytes
+        )
+
+      _other ->
+        FileIndex.expect_chunks_opt(file_meta.chunks)
+    end
+  end
+
+  defp commit_compare(_volume, file_meta, _prefix, _affected, _new_hashes, _opts) do
+    FileIndex.expect_chunks_opt(file_meta.chunks)
   end
 
   # Another writer committed between this one's read and its commit, so the
