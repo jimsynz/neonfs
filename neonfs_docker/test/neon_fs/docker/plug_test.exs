@@ -4,6 +4,7 @@ defmodule NeonFS.Docker.PlugTest do
 
   alias NeonFS.Docker.{MountTracker, VolumeStore}
   alias NeonFS.Docker.Plug, as: DockerPlug
+  alias NeonFS.Error.PermissionDenied
 
   setup do
     suffix = System.unique_integer([:positive])
@@ -266,6 +267,44 @@ defmodule NeonFS.Docker.PlugTest do
     test "rejects missing Name", %{store: store, tracker: tracker} do
       conn = post("/VolumeDriver.Path", %{}, store: store, tracker: tracker)
       assert %{"Err" => "missing or invalid Name"} = decode(conn)
+    end
+  end
+
+  describe "a core authorisation refusal" do
+    # The module setup's store is reused; only the tracker is replaced, with
+    # one whose mount refuses. A second `VolumeStore` child would collide on
+    # the spec id rather than the name.
+    setup do
+      tracker_name = :"denied_tracker_#{System.unique_integer([:positive])}"
+
+      start_supervised!(
+        Supervisor.child_spec(
+          {MountTracker,
+           name: tracker_name,
+           mount_fn: fn _vol ->
+             {:error, PermissionDenied.exception(operation: :mount, uid: 1000)}
+           end,
+           unmount_fn: fn _ -> :ok end},
+          id: tracker_name,
+          restart: :temporary
+        )
+      )
+
+      {:ok, tracker: tracker_name}
+    end
+
+    # The plugin protocol has no status code — `Err` is the whole channel —
+    # so a denial that falls through to the catch-all reaches an operator as
+    # a struct dump rather than as a reason.
+    test "reads as a refusal rather than a struct dump", %{store: store, tracker: tracker} do
+      conn =
+        post("/VolumeDriver.Mount", %{"Name" => "vol-denied"}, store: store, tracker: tracker)
+
+      assert conn.status == 200
+      assert %{"Err" => err} = decode(conn)
+      assert err =~ "refused"
+      assert err =~ "Permission denied"
+      refute err =~ "PermissionDenied{"
     end
   end
 

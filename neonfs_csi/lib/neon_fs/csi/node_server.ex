@@ -324,9 +324,7 @@ defmodule NeonFS.CSI.NodeServer do
             %NodeUnpublishVolumeResponse{}
 
           {:error, reason} ->
-            raise GRPC.RPCError,
-              status: :internal,
-              message: "bind unmount failed: #{inspect(reason)}"
+            core_error!("bind unmount", reason)
         end
     end
   end
@@ -441,9 +439,7 @@ defmodule NeonFS.CSI.NodeServer do
       %NodeStageVolumeResponse{}
     else
       {:error, reason} ->
-        raise GRPC.RPCError,
-          status: :internal,
-          message: "fuse mount failed: #{inspect(reason)}"
+        core_error!("fuse mount", reason)
     end
   end
 
@@ -462,9 +458,7 @@ defmodule NeonFS.CSI.NodeServer do
       %NodeStageVolumeResponse{}
     else
       {:error, reason} ->
-        raise GRPC.RPCError,
-          status: :internal,
-          message: "block attach failed: #{inspect(reason)}"
+        core_error!("block attach", reason)
     end
   end
 
@@ -542,9 +536,7 @@ defmodule NeonFS.CSI.NodeServer do
         %NodeUnstageVolumeResponse{}
 
       {:error, reason} ->
-        raise GRPC.RPCError,
-          status: :internal,
-          message: "block detach failed: #{inspect(reason)}"
+        core_error!("block detach", reason)
     end
   end
 
@@ -555,9 +547,7 @@ defmodule NeonFS.CSI.NodeServer do
         %NodeUnstageVolumeResponse{}
 
       {:error, reason} ->
-        raise GRPC.RPCError,
-          status: :internal,
-          message: "fuse unmount failed: #{inspect(reason)}"
+        core_error!("fuse unmount", reason)
     end
   end
 
@@ -577,9 +567,7 @@ defmodule NeonFS.CSI.NodeServer do
       record_publish(vol_id, staging_path, target_path, readonly)
     else
       {:error, reason} ->
-        raise GRPC.RPCError,
-          status: :internal,
-          message: "bind mount failed: #{inspect(reason)}"
+        core_error!("bind mount", reason)
     end
   end
 
@@ -595,9 +583,7 @@ defmodule NeonFS.CSI.NodeServer do
       record_publish(vol_id, staging_path, target_path, readonly)
     else
       {:error, reason} ->
-        raise GRPC.RPCError,
-          status: :internal,
-          message: "block bind mount failed: #{inspect(reason)}"
+        core_error!("block bind mount", reason)
     end
   end
 
@@ -815,5 +801,19 @@ defmodule NeonFS.CSI.NodeServer do
 
   defp nbd_device_bound?(device) do
     match?({_out, 0}, System.cmd("nbd-client", ["-c", device], stderr_to_stdout: true))
+  end
+
+  # A core error becomes a gRPC status. A refusal is `PERMISSION_DENIED`, not
+  # `INTERNAL`: an authorisation denial is an answer, and reporting it as a
+  # server fault makes the CO retry something that will never succeed — and
+  # hides the reason from an operator reading the event.
+  defp core_error!(operation, %{class: :forbidden} = reason) do
+    raise GRPC.RPCError,
+      status: :permission_denied,
+      message: "#{operation} refused: #{Exception.message(reason)}"
+  end
+
+  defp core_error!(operation, reason) do
+    raise GRPC.RPCError, status: :internal, message: "#{operation} failed: #{inspect(reason)}"
   end
 end

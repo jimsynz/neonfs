@@ -16,6 +16,7 @@ defmodule NeonFS.Block.LiveServerTest do
   use ExUnit.Case, async: false
 
   alias NeonFS.Block.{DeviceRegistry, Listener}
+  alias NeonFS.Error.PermissionDenied
 
   @block 4096
   @chunk 131_072
@@ -296,6 +297,22 @@ defmodule NeonFS.Block.LiveServerTest do
       # EINVAL: an out-of-range request is the client's mistake, not the
       # server failing to serve a valid one.
       assert {:ok, <<_magic::32, 22::32, 5::64>>} = :gen_tcp.recv(socket, 16, 2_000)
+    end
+
+    # A denial is an answer, not a device fault. `EIO` — what an unmapped
+    # reason gets — reads to a guest as "the disk is broken", and ext4
+    # typically remounts read-only over one.
+    test "a core authorisation refusal answers EPERM, not EIO", %{port: port} do
+      socket = connect(port)
+      {:ok, _export} = handshake(socket, @export)
+
+      stub_core(fn _module, _function, _args ->
+        {:error, PermissionDenied.exception(operation: :write, uid: 1000)}
+      end)
+
+      :ok = :gen_tcp.send(socket, request(@write, 7, 0, @block) <> :binary.copy(<<1>>, @block))
+
+      assert {:ok, <<_magic::32, 1::32, 7::64>>} = :gen_tcp.recv(socket, 16, 2_000)
     end
 
     test "a disconnect closes the connection", %{port: port} do
