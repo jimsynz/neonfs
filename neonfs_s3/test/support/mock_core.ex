@@ -204,7 +204,9 @@ defmodule NeonFS.S3.Test.MockCore do
   end
 
   @spec delete_file(String.t(), String.t()) :: :ok | {:error, :not_found}
-  def delete_file(volume_name, path) do
+  def delete_file(volume_name, path, opts \\ []) do
+    record_identity(:delete_file, opts)
+
     files = Process.get(:mock_files, %{})
     key = {volume_name, normalise_path(path)}
 
@@ -217,7 +219,9 @@ defmodule NeonFS.S3.Test.MockCore do
   end
 
   @spec get_file_meta(String.t(), String.t()) :: {:ok, FileMeta.t()} | {:error, :not_found}
-  def get_file_meta(volume_name, path) do
+  def get_file_meta(volume_name, path, opts \\ []) do
+    record_identity(:get_file_meta, opts)
+
     files = Process.get(:mock_files, %{})
     key = {volume_name, normalise_path(path)}
 
@@ -246,7 +250,9 @@ defmodule NeonFS.S3.Test.MockCore do
 
   @spec list_files_recursive(String.t(), String.t()) ::
           {:ok, [FileMeta.t()]} | {:error, :not_found}
-  def list_files_recursive(volume_name, path \\ "/") do
+  def list_files_recursive(volume_name, path \\ "/", opts \\ []) do
+    record_identity(:list_files_recursive, opts)
+
     volumes = Process.get(:mock_volumes, %{})
 
     if Map.has_key?(volumes, volume_name) do
@@ -286,13 +292,15 @@ defmodule NeonFS.S3.Test.MockCore do
     end
   end
 
-  @spec add_credential(String.t(), String.t()) :: :ok
-  def add_credential(access_key_id, secret_access_key) do
+  @spec add_credential(String.t(), String.t(), keyword()) :: :ok
+  def add_credential(access_key_id, secret_access_key, opts \\ []) do
     creds = Process.get(:mock_credentials, %{})
 
     cred = %{
       secret_access_key: secret_access_key,
-      identity: %{user: access_key_id}
+      identity: %{user: access_key_id},
+      uid: Keyword.get(opts, :uid, 1000),
+      gids: Keyword.get(opts, :gids, [1000])
     }
 
     Process.put(:mock_credentials, Map.put(creds, access_key_id, cred))
@@ -317,5 +325,17 @@ defmodule NeonFS.S3.Test.MockCore do
       {:ok, value} -> Keyword.put(target, key, value)
       :error -> target
     end
+  end
+
+  # Lets a test assert that a request reached core carrying an identity
+  # rather than defaulting to uid 0, which is the bypass this exists to
+  # catch. Delivered to the test process when one has registered interest.
+  def record_identity(function, opts) do
+    case Process.whereis(:s3_identity_probe) do
+      nil -> :ok
+      pid -> send(pid, {:core_identity, function, Keyword.take(opts, [:uid, :gids])})
+    end
+
+    :ok
   end
 end

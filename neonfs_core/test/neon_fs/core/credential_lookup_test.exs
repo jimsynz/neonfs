@@ -32,14 +32,31 @@ defmodule NeonFS.Core.CredentialLookupTest do
       assert {:error, %NotFound{}} = NeonFS.Core.lookup_credential("NEONFS_UNKNOWN")
     end
 
-    test "returned map has exactly the fields the S3 backend expects" do
-      {:ok, created} = CredentialManager.create(%{user: "test"})
+    # The POSIX identity travels with the secret so that an interface can
+    # authorise a request without a second round trip — including on paths
+    # where the credential's volume no longer exists.
+    test "returned map has exactly the fields the S3 and WebDAV backends expect" do
+      {:ok, created} = CredentialManager.create(%{user: "test"}, uid: 1000, gids: [1000, 20])
 
       {:ok, result} = NeonFS.Core.lookup_credential(created.access_key_id)
 
       assert Map.has_key?(result, :secret_access_key)
       assert Map.has_key?(result, :identity)
-      assert map_size(result) == 2
+      assert result.uid == 1000
+      assert result.gids == [1000, 20]
+      assert map_size(result) == 4
+    end
+
+    # A credential created without one carries `nil`, not 0. Core reads an
+    # absent uid as 0 and `Authorise.check/4` passes 0 unconditionally, so a
+    # defaulted uid here would be the root bypass this field exists to close.
+    test "a credential created without a uid reports nil rather than 0" do
+      {:ok, created} = CredentialManager.create(%{user: "nouid"})
+
+      {:ok, result} = NeonFS.Core.lookup_credential(created.access_key_id)
+
+      assert result.uid == nil
+      assert result.gids == []
     end
   end
 end

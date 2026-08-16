@@ -45,7 +45,8 @@ defmodule NeonFS.S3.MultipartCrossNodeTest do
 
     {:ok, credential} =
       PeerCluster.rpc(cluster, :node1, NeonFS.Core.CredentialManager, :create, [
-        %{user: "mp-xnode-test"}
+        %{user: "mp-xnode-test"},
+        [uid: 0, gids: [0]]
       ])
 
     config_a = exaws_config(cluster, :node2, credential)

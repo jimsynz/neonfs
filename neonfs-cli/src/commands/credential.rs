@@ -20,6 +20,15 @@ pub enum CredentialCommand {
         /// User identity to associate with the credential
         #[arg(long, value_name = "USER")]
         user: String,
+
+        /// POSIX uid requests made with this credential are authorised as.
+        /// Without it the credential authenticates but is refused everything.
+        #[arg(long, value_name = "UID")]
+        uid: Option<u32>,
+
+        /// Supplementary POSIX group ids, comma-separated
+        #[arg(long, value_name = "GIDS", value_delimiter = ',')]
+        gids: Vec<u32>,
     },
 
     /// List credentials
@@ -55,6 +64,9 @@ struct Credential {
     #[serde(skip_serializing_if = "Option::is_none")]
     secret_access_key: Option<String>,
     identity: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    uid: Option<u32>,
+    gids: Vec<u32>,
     created_at: String,
 }
 
@@ -77,6 +89,12 @@ impl Credential {
                 .get("secret_access_key")
                 .and_then(|t| term_to_string(t).ok()),
             identity,
+            uid: map.get("uid").and_then(term_to_u32),
+            gids: map
+                .get("gids")
+                .and_then(|t| term_to_list(t).ok())
+                .map(|items| items.iter().filter_map(term_to_u32).collect())
+                .unwrap_or_default(),
             created_at: map
                 .get("created_at")
                 .map(|t| term_to_string(t).unwrap_or_default())
@@ -97,6 +115,38 @@ fn format_identity(term: &Term) -> String {
     }
 }
 
+/// Erlang integers arrive as `FixInteger` or `BigInteger`; a uid is small
+/// enough that only the former is expected, but a value that is neither is
+/// absent rather than zero — zero is root.
+fn term_to_u32(term: &Term) -> Option<u32> {
+    match term {
+        Term::FixInteger(i) => u32::try_from(i.value).ok(),
+        _ => None,
+    }
+}
+
+fn make_posix_term(uid: Option<u32>, gids: &[u32]) -> Term {
+    let mut entries = vec![(
+        Term::Atom(Atom::from("gids")),
+        Term::List(eetf::List::from(
+            gids.iter()
+                .map(|g| Term::FixInteger(eetf::FixInteger { value: *g as i32 }))
+                .collect::<Vec<_>>(),
+        )),
+    )];
+
+    if let Some(uid) = uid {
+        entries.push((
+            Term::Atom(Atom::from("uid")),
+            Term::FixInteger(eetf::FixInteger { value: uid as i32 }),
+        ));
+    }
+
+    Term::Map(Map {
+        map: entries.into_iter().collect(),
+    })
+}
+
 fn make_identity_term(user: &str) -> Term {
     Term::Map(Map {
         map: vec![(
@@ -114,7 +164,7 @@ impl CredentialCommand {
     /// Execute the credential command
     pub fn execute(&self, format: OutputFormat) -> Result<()> {
         match self {
-            CredentialCommand::Create { user } => self.create(user, format),
+            CredentialCommand::Create { user, uid, gids } => self.create(user, *uid, gids, format),
             CredentialCommand::List { user } => self.list(user.as_deref(), format),
             CredentialCommand::Show { access_key_id } => self.show(access_key_id, format),
             CredentialCommand::Rotate { access_key_id } => self.rotate(access_key_id, format),
@@ -122,15 +172,22 @@ impl CredentialCommand {
         }
     }
 
-    fn create(&self, user: &str, format: OutputFormat) -> Result<()> {
+    fn create(
+        &self,
+        user: &str,
+        uid: Option<u32>,
+        gids: &[u32],
+        format: OutputFormat,
+    ) -> Result<()> {
         let identity = make_identity_term(user);
+        let posix = make_posix_term(uid, gids);
 
         let result = smol::block_on(async {
             let mut conn = DaemonConnection::connect().await?;
             conn.call(
                 "Elixir.NeonFS.CLI.Handler",
                 "handle_credential_create",
-                vec![identity],
+                vec![identity, posix],
             )
             .await
         })?;

@@ -25,7 +25,8 @@ defmodule NeonFS.S3.IntegrationTest.CoreBridge do
   def create_test_credential(node_atom) do
     {:ok, credential} =
       rpc(node_atom, NeonFS.Core.CredentialManager, :create, [
-        %{user: "integration-test"}
+        %{user: "integration-test"},
+        [uid: 0, gids: [0]]
       ])
 
     access_key = credential.access_key_id

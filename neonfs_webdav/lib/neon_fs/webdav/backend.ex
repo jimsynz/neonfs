@@ -39,10 +39,16 @@ defmodule NeonFS.WebDAV.Backend do
     with ["Basic " <> encoded] <- Plug.Conn.get_req_header(conn, "authorization"),
          {:ok, decoded} <- Base.decode64(encoded),
          [username, password] <- String.split(decoded, ":", parts: 2),
-         {:ok, %{secret_access_key: secret, identity: identity}} <-
+         {:ok, %{secret_access_key: secret} = credential} <-
            call_core(:lookup_credential, [username]),
          true <- Plug.Crypto.secure_compare(password, secret) do
-      {:ok, %{user: username, identity: identity}}
+      {:ok,
+       %{
+         user: username,
+         identity: credential.identity,
+         uid: credential[:uid],
+         gids: credential[:gids] || []
+       }}
     else
       _ -> {:error, :unauthorized}
     end
@@ -55,7 +61,40 @@ defmodule NeonFS.WebDAV.Backend do
     {:ok, root_resource()}
   end
 
-  def resolve(_auth, [volume_name]) do
+  def resolve(auth, [volume_name]) do
+    with {:ok, _ident} <- identity_opts(auth) do
+      resolve_volume_resource(volume_name)
+    end
+  end
+
+  def resolve(auth, [volume_name | rest] = path) do
+    file_path = "/" <> Enum.join(rest, "/")
+
+    with {:ok, ident} <- identity_opts(auth),
+         {:ok, volume} <- resolve_volume(volume_name),
+         {:ok, meta} <- call_core(:get_file_meta, [volume_name, file_path, ident]) do
+      {:ok, file_resource(volume_name, volume.id, rest, meta)}
+    else
+      {:error, :not_found} ->
+        resolve_missing_or_lock_null(path, volume_name, rest)
+
+      {:error, %{class: :not_found}} ->
+        resolve_missing_or_lock_null(path, volume_name, rest)
+
+      # A refusal this module already shaped — an identity that cannot
+      # authorise — is the answer, not something to wrap as a 500.
+      {:error, %Davy.Error{}} = refusal ->
+        refusal
+
+      {:error, %{class: :forbidden}} ->
+        {:error, %Davy.Error{code: :forbidden}}
+
+      {:error, reason} ->
+        {:error, internal_error(:resolve, reason)}
+    end
+  end
+
+  defp resolve_volume_resource(volume_name) do
     case call_core(:get_volume, [volume_name]) do
       {:ok, volume} ->
         {:ok, volume_resource(volume)}
@@ -68,24 +107,6 @@ defmodule NeonFS.WebDAV.Backend do
 
       {:error, reason} ->
         {:error, internal_error(:resolve_volume, reason)}
-    end
-  end
-
-  def resolve(_auth, [volume_name | rest] = path) do
-    file_path = "/" <> Enum.join(rest, "/")
-
-    with {:ok, volume} <- resolve_volume(volume_name),
-         {:ok, meta} <- call_core(:get_file_meta, [volume_name, file_path]) do
-      {:ok, file_resource(volume_name, volume.id, rest, meta)}
-    else
-      {:error, :not_found} ->
-        resolve_missing_or_lock_null(path, volume_name, rest)
-
-      {:error, %{class: :not_found}} ->
-        resolve_missing_or_lock_null(path, volume_name, rest)
-
-      {:error, reason} ->
-        {:error, internal_error(:resolve, reason)}
     end
   end
 
@@ -110,7 +131,7 @@ defmodule NeonFS.WebDAV.Backend do
     {:error, %Davy.Error{code: :forbidden, message: "Cannot set properties on #{type}"}}
   end
 
-  def set_properties(_auth, resource, operations) do
+  def set_properties(auth, resource, operations) do
     %{volume_name: volume_name, file_path: file_path, meta: meta} = resource.backend_data
     current_metadata = meta.metadata || %{}
 
@@ -123,8 +144,17 @@ defmodule NeonFS.WebDAV.Backend do
           Map.delete(acc, "#{namespace}#{name}")
       end)
 
-    case call_core(:update_file_meta, [volume_name, file_path, [metadata: new_metadata]]) do
-      {:ok, _updated} -> :ok
+    with {:ok, ident} <- identity_opts(auth),
+         {:ok, _updated} <-
+           call_core(:update_file_meta, [
+             volume_name,
+             file_path,
+             Keyword.merge([metadata: new_metadata], ident)
+           ]) do
+      :ok
+    else
+      {:error, %Davy.Error{}} = refusal -> refusal
+      {:error, %{class: :forbidden}} -> {:error, %Davy.Error{code: :forbidden}}
       {:error, reason} -> {:error, internal_error(:set_properties, reason)}
     end
   end
@@ -136,13 +166,22 @@ defmodule NeonFS.WebDAV.Backend do
     {:error, %Davy.Error{code: :not_found}}
   end
 
-  def get_content(_auth, resource, opts) do
+  def get_content(auth, resource, opts) do
     %{volume_name: volume_name, file_path: file_path} = resource.backend_data
-    read_opts = range_to_read_opts(opts)
 
+    with {:ok, ident} <- identity_opts(auth) do
+      read_opts = range_to_read_opts(opts) ++ ident
+      stream_content(volume_name, file_path, read_opts)
+    end
+  end
+
+  defp stream_content(volume_name, file_path, read_opts) do
     case try_stream_read(volume_name, file_path, read_opts) do
       {:ok, %{stream: stream}} ->
         {:ok, stream}
+
+      {:error, %{class: :forbidden}} ->
+        {:error, %Davy.Error{code: :forbidden}}
 
       {:error, :not_found} ->
         {:error, %Davy.Error{code: :not_found}}
@@ -171,11 +210,12 @@ defmodule NeonFS.WebDAV.Backend do
   end
 
   @impl true
-  def put_content_stream(_auth, [volume_name | rest] = path, stream, opts) do
+  def put_content_stream(auth, [volume_name | rest] = path, stream, opts) do
     file_path = "/" <> Enum.join(rest, "/")
-    write_opts = put_content_opts(opts) |> maybe_create_only()
 
-    with {:ok, volume} <- resolve_volume(volume_name),
+    with {:ok, ident} <- identity_opts(auth),
+         write_opts = opts |> put_content_opts() |> maybe_create_only() |> Keyword.merge(ident),
+         {:ok, volume} <- resolve_volume(volume_name),
          {:ok, meta} <- streaming_write(volume_name, file_path, stream, write_opts) do
       LockStore.promote_lock_null(path, meta.id)
       {:ok, file_resource(volume_name, volume.id, rest, meta)}
@@ -198,6 +238,12 @@ defmodule NeonFS.WebDAV.Backend do
 
       {:error, :cluster_frozen} ->
         raise NeonFS.WebDAV.ClusterFrozenError
+
+      {:error, %Davy.Error{}} = refusal ->
+        refusal
+
+      {:error, %{class: :forbidden}} ->
+        {:error, %Davy.Error{code: :forbidden}}
 
       {:error, reason} ->
         {:error, internal_error(:put_content_stream, reason)}
@@ -321,10 +367,16 @@ defmodule NeonFS.WebDAV.Backend do
     end
   end
 
-  def delete(_auth, resource) do
+  def delete(auth, resource) do
     %{volume_name: volume_name, file_path: file_path} = resource.backend_data
 
-    case call_core(:delete_file, [volume_name, file_path]) do
+    with {:ok, ident} <- identity_opts(auth) do
+      delete_file(volume_name, file_path, ident)
+    end
+  end
+
+  defp delete_file(volume_name, file_path, ident) do
+    case call_core(:delete_file, [volume_name, file_path, ident]) do
       :ok -> :ok
       {:error, :not_found} -> :ok
       {:error, %{class: :not_found}} -> :ok
@@ -333,21 +385,23 @@ defmodule NeonFS.WebDAV.Backend do
   end
 
   @impl true
-  def copy(_auth, resource, dest_path, overwrite?) do
+  def copy(auth, resource, dest_path, overwrite?) do
     %{volume_name: src_volume, file_path: src_path, meta: src_meta} = resource.backend_data
 
-    with :ok <- validate_dest(dest_path),
+    with {:ok, ident} <- identity_opts(auth),
+         :ok <- validate_dest(dest_path),
          {dest_volume, dest_file_path} = split_dest(dest_path),
          :ok <- check_same_volume(src_volume, dest_volume),
-         :ok <- check_overwrite(dest_volume, dest_file_path, overwrite?),
-         {:ok, %{stream: stream}} <- try_stream_read(src_volume, src_path, []),
-         existed? = resource_exists?(dest_volume, dest_file_path),
-         write_opts = content_type_opts(src_meta) ++ metadata_opts(src_meta),
+         :ok <- check_overwrite(dest_volume, dest_file_path, overwrite?, ident),
+         {:ok, %{stream: stream}} <- try_stream_read(src_volume, src_path, ident),
+         existed? = resource_exists?(dest_volume, dest_file_path, ident),
+         write_opts = content_type_opts(src_meta) ++ metadata_opts(src_meta) ++ ident,
          {:ok, _meta} <-
            streaming_write(dest_volume, dest_file_path, stream, write_opts) do
       if existed?, do: {:ok, :no_content}, else: {:ok, :created}
     else
       {:error, %Davy.Error{}} = err -> err
+      {:error, %{class: :forbidden}} -> {:error, %Davy.Error{code: :forbidden}}
       {:error, :not_found} -> {:error, %Davy.Error{code: :not_found}}
       {:error, %{class: :not_found}} -> {:error, %Davy.Error{code: :not_found}}
       {:error, reason} -> {:error, internal_error(:copy, reason)}
@@ -355,27 +409,38 @@ defmodule NeonFS.WebDAV.Backend do
   end
 
   @impl true
-  def move(_auth, resource, dest_path, overwrite?) do
+  def move(auth, resource, dest_path, overwrite?) do
     %{volume_name: src_volume, file_path: src_path} = resource.backend_data
 
-    with :ok <- validate_dest(dest_path),
+    with {:ok, ident} <- identity_opts(auth),
+         :ok <- validate_dest(dest_path),
          {dest_volume, dest_file_path} = split_dest(dest_path),
          :ok <- check_same_volume(src_volume, dest_volume),
-         :ok <- check_overwrite(dest_volume, dest_file_path, overwrite?) do
-      existed? = resource_exists?(dest_volume, dest_file_path)
-      move_same_volume(src_volume, src_path, dest_file_path, existed?)
+         :ok <- check_overwrite(dest_volume, dest_file_path, overwrite?, ident) do
+      existed? = resource_exists?(dest_volume, dest_file_path, ident)
+      move_same_volume(src_volume, src_path, dest_file_path, existed?, ident)
     end
   end
 
   # --- Collection operations ---
 
   @impl true
-  def create_collection(_auth, [volume_name | rest]) do
+  def create_collection(auth, [volume_name | rest]) do
     dir_path = "/" <> Enum.join(rest, "/")
 
+    with {:ok, ident} <- identity_opts(auth) do
+      create_collection_in(volume_name, dir_path, ident)
+    end
+  end
+
+  def create_collection(_auth, []) do
+    {:error, %Davy.Error{code: :forbidden, message: "Cannot create root collection"}}
+  end
+
+  defp create_collection_in(volume_name, dir_path, ident) do
     case resolve_volume(volume_name) do
       {:ok, _volume} ->
-        case call_core(:mkdir, [volume_name, dir_path]) do
+        case call_core(:mkdir, [volume_name, dir_path, ident]) do
           {:ok, _meta} ->
             :ok
 
@@ -400,10 +465,6 @@ defmodule NeonFS.WebDAV.Backend do
     end
   end
 
-  def create_collection(_auth, []) do
-    {:error, %Davy.Error{code: :forbidden, message: "Cannot create root collection"}}
-  end
-
   @impl true
   def get_members(_auth, %{backend_data: %{type: :root}}) do
     case call_core(:list_volumes, []) do
@@ -421,21 +482,26 @@ defmodule NeonFS.WebDAV.Backend do
     end
   end
 
-  def get_members(_auth, %{backend_data: %{type: :volume, volume_name: volume_name}} = resource) do
-    list_dir_members_with_lock_null(
-      volume_name,
-      resource.backend_data.volume_id,
-      "/",
-      [volume_name]
-    )
+  def get_members(auth, %{backend_data: %{type: :volume, volume_name: volume_name}} = resource) do
+    with {:ok, ident} <- identity_opts(auth) do
+      list_dir_members_with_lock_null(
+        volume_name,
+        resource.backend_data.volume_id,
+        "/",
+        [volume_name],
+        ident
+      )
+    end
   end
 
-  def get_members(_auth, resource) do
+  def get_members(auth, resource) do
     %{volume_name: volume_name, volume_id: volume_id, file_path: file_path} =
       resource.backend_data
 
-    parent_path = [volume_name | path_to_segments(file_path)]
-    list_dir_members_with_lock_null(volume_name, volume_id, file_path, parent_path)
+    with {:ok, ident} <- identity_opts(auth) do
+      parent_path = [volume_name | path_to_segments(file_path)]
+      list_dir_members_with_lock_null(volume_name, volume_id, file_path, parent_path, ident)
+    end
   end
 
   # --- Private helpers ---
@@ -450,8 +516,8 @@ defmodule NeonFS.WebDAV.Backend do
     end
   end
 
-  defp move_same_volume(volume, src_path, dest_path, existed?) do
-    case call_core(:rename_file, [volume, src_path, dest_path]) do
+  defp move_same_volume(volume, src_path, dest_path, existed?, ident) do
+    case call_core(:rename_file, [volume, src_path, dest_path, ident]) do
       :ok ->
         if existed?, do: {:ok, :no_content}, else: {:ok, :created}
 
@@ -473,6 +539,25 @@ defmodule NeonFS.WebDAV.Backend do
      %Davy.Error{
        code: :bad_gateway,
        message: "Cross-volume COPY/MOVE is not supported"
+     }}
+  end
+
+  # The POSIX identity every core call is made under, or a refusal.
+  #
+  # A credential carrying no uid authenticates and is then refused, rather
+  # than defaulting: core reads an absent uid as 0 and
+  # `NeonFS.Core.Authorise.check/4` passes 0 unconditionally, so a default
+  # is a root bypass wearing an identity. `NeonFS.Core.CredentialManager`
+  # records why the uid lives on the credential at all.
+  defp identity_opts(%{uid: uid, gids: gids}) when is_integer(uid) and is_list(gids) do
+    {:ok, [uid: uid, gids: gids]}
+  end
+
+  defp identity_opts(_auth) do
+    {:error,
+     %Davy.Error{
+       code: :forbidden,
+       message: "credential has no uid; set one with `neonfs credential create --uid`"
      }}
   end
 
@@ -574,8 +659,8 @@ defmodule NeonFS.WebDAV.Backend do
     end
   end
 
-  defp list_dir_members_with_lock_null(volume_name, volume_id, dir_path, parent_path) do
-    case call_core(:list_dir, [volume_name, dir_path]) do
+  defp list_dir_members_with_lock_null(volume_name, volume_id, dir_path, parent_path, ident) do
+    case call_core(:list_dir, [volume_name, dir_path, ident]) do
       {:ok, entries} ->
         real_resources =
           Enum.map(entries, fn meta ->
@@ -673,16 +758,16 @@ defmodule NeonFS.WebDAV.Backend do
     {volume_name, "/" <> Enum.join(rest, "/")}
   end
 
-  defp check_overwrite(volume_name, file_path, overwrite?) do
-    if not overwrite? and resource_exists?(volume_name, file_path) do
+  defp check_overwrite(volume_name, file_path, overwrite?, ident) do
+    if not overwrite? and resource_exists?(volume_name, file_path, ident) do
       {:error, %Davy.Error{code: :precondition_failed}}
     else
       :ok
     end
   end
 
-  defp resource_exists?(volume_name, file_path) do
-    case call_core(:get_file_meta, [volume_name, file_path]) do
+  defp resource_exists?(volume_name, file_path, ident) do
+    case call_core(:get_file_meta, [volume_name, file_path, ident]) do
       {:ok, _} -> true
       _ -> false
     end

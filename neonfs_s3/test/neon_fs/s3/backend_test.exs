@@ -6,7 +6,17 @@ defmodule NeonFS.S3.BackendTest do
   alias NeonFS.S3.Backend
   alias NeonFS.S3.Test.{FakeKV, MockCore}
 
-  @ctx %{access_key_id: "test-key", identity: %{user: "test-key"}}
+  # `identity` is what Firkin puts in the ctx verbatim; the S3 backend carries
+  # the POSIX identity inside it, since that is the only channel the behaviour
+  # provides. A ctx without a uid is refused rather than authorised as root.
+  @ctx %{
+    access_key_id: "test-key",
+    identity: %{identity: %{user: "test-key"}, uid: 1000, gids: [1000]}
+  }
+  @ctx_without_uid %{
+    access_key_id: "nouid",
+    identity: %{identity: %{user: "nouid"}, uid: nil, gids: []}
+  }
 
   setup :set_mimic_global
   setup :verify_on_exit!
@@ -76,15 +86,79 @@ defmodule NeonFS.S3.BackendTest do
   # Credential lookup
 
   describe "lookup_credential/1" do
-    test "returns credential for known access key" do
+    # Firkin hands `identity` back in every callback's ctx verbatim, so the
+    # backend puts the POSIX identity inside it — the behaviour offers no
+    # other channel. The credential record's own `identity` is untouched.
+    test "returns credential for known access key, carrying its POSIX identity" do
       assert {:ok, cred} = Backend.lookup_credential("test-key")
       assert cred.access_key_id == "test-key"
       assert cred.secret_access_key == "test-secret"
-      assert cred.identity == %{user: "test-key"}
+      assert cred.identity == %{identity: %{user: "test-key"}, uid: 1000, gids: [1000]}
     end
 
     test "returns error for unknown access key" do
       assert {:error, :not_found} = Backend.lookup_credential("unknown")
+    end
+  end
+
+  describe "identity threading" do
+    setup do
+      Process.register(self(), :s3_identity_probe)
+      :ok
+    end
+
+    # The defect this closes: core defaults an absent uid to 0, and
+    # `Authorise.check(0, _, _, _)` returns `:ok` unconditionally, so a
+    # request that arrives without an identity is authorised as root.
+    test "a HEAD carries the credential's uid to core" do
+      MockCore.create_volume("my-bucket")
+      MockCore.write_file("my-bucket", "/data.bin", "hi")
+
+      Backend.head_object(@ctx, "my-bucket", "data.bin")
+      assert_received {:core_identity, :get_file_meta, uid: 1000, gids: [1000]}
+    end
+
+    test "a listing carries the credential's uid to core" do
+      MockCore.create_volume("my-bucket")
+
+      Backend.list_objects_v2(@ctx, "my-bucket", %Firkin.ListOpts{})
+      assert_received {:core_identity, :list_files_recursive, uid: 1000, gids: [1000]}
+    end
+
+    test "a delete carries the credential's uid to core" do
+      MockCore.create_volume("my-bucket")
+      MockCore.write_file("my-bucket", "/data.bin", "hi")
+
+      Backend.delete_object(@ctx, "my-bucket", "data.bin")
+      assert_received {:core_identity, :delete_file, uid: 1000, gids: [1000]}
+    end
+  end
+
+  describe "a credential with no uid" do
+    setup do
+      Process.register(self(), :s3_identity_probe)
+      MockCore.create_volume("my-bucket")
+      MockCore.write_file("my-bucket", "/data.bin", "hi")
+      :ok
+    end
+
+    # Authentication succeeds and authorisation fails, rather than
+    # defaulting the uid — a default would be a root bypass wearing an
+    # identity, which is how this gap survived in the first place.
+    test "is refused with AccessDenied rather than authorised as root" do
+      assert {:error, %Firkin.Error{code: :access_denied}} =
+               Backend.head_object(@ctx_without_uid, "my-bucket", "data.bin")
+
+      assert {:error, %Firkin.Error{code: :access_denied}} =
+               Backend.delete_object(@ctx_without_uid, "my-bucket", "data.bin")
+
+      assert {:error, %Firkin.Error{code: :access_denied}} =
+               Backend.list_objects_v2(@ctx_without_uid, "my-bucket", %Firkin.ListOpts{})
+    end
+
+    test "never reaches core at all" do
+      Backend.head_object(@ctx_without_uid, "my-bucket", "data.bin")
+      refute_received {:core_identity, _function, _identity}
     end
   end
 

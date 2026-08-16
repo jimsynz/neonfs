@@ -54,7 +54,8 @@ defmodule NeonFS.S3.IntegrationTest.CredentialTest do
     test "create credential returns access key and secret", %{cluster: cluster} do
       {:ok, credential} =
         PeerCluster.rpc(cluster, :node1, NeonFS.Core.CredentialManager, :create, [
-          %{user: "crud-test"}
+          %{user: "crud-test"},
+          [uid: 0, gids: [0]]
         ])
 
       assert String.starts_with?(credential.access_key_id, "NEONFS")
@@ -66,7 +67,8 @@ defmodule NeonFS.S3.IntegrationTest.CredentialTest do
     test "lookup credential returns matching secret", %{cluster: cluster} do
       {:ok, created} =
         PeerCluster.rpc(cluster, :node1, NeonFS.Core.CredentialManager, :create, [
-          %{user: "lookup-test"}
+          %{user: "lookup-test"},
+          [uid: 0, gids: [0]]
         ])
 
       {:ok, found} =
@@ -82,7 +84,8 @@ defmodule NeonFS.S3.IntegrationTest.CredentialTest do
     test "lookup via NeonFS.Core facade returns expected shape", %{cluster: cluster} do
       {:ok, created} =
         PeerCluster.rpc(cluster, :node1, NeonFS.Core.CredentialManager, :create, [
-          %{user: "facade-test"}
+          %{user: "facade-test"},
+          [uid: 0, gids: [0]]
         ])
 
       {:ok, result} =
@@ -92,7 +95,12 @@ defmodule NeonFS.S3.IntegrationTest.CredentialTest do
 
       assert result.secret_access_key == created.secret_access_key
       assert result.identity == %{user: "facade-test"}
-      assert map_size(result) == 2
+
+      # The POSIX identity travels with the secret, so an interface has
+      # everything it needs to authorise without a second round trip.
+      assert result.uid == 0
+      assert result.gids == [0]
+      assert map_size(result) == 4
     end
 
     test "lookup unknown credential returns not_found", %{cluster: cluster} do
@@ -105,12 +113,14 @@ defmodule NeonFS.S3.IntegrationTest.CredentialTest do
     test "list credentials returns all without secrets", %{cluster: cluster} do
       {:ok, _} =
         PeerCluster.rpc(cluster, :node1, NeonFS.Core.CredentialManager, :create, [
-          %{user: "list-test-a"}
+          %{user: "list-test-a"},
+          [uid: 0, gids: [0]]
         ])
 
       {:ok, _} =
         PeerCluster.rpc(cluster, :node1, NeonFS.Core.CredentialManager, :create, [
-          %{user: "list-test-b"}
+          %{user: "list-test-b"},
+          [uid: 0, gids: [0]]
         ])
 
       creds =
@@ -127,7 +137,8 @@ defmodule NeonFS.S3.IntegrationTest.CredentialTest do
     test "delete credential removes it", %{cluster: cluster} do
       {:ok, created} =
         PeerCluster.rpc(cluster, :node1, NeonFS.Core.CredentialManager, :create, [
-          %{user: "delete-test"}
+          %{user: "delete-test"},
+          [uid: 0, gids: [0]]
         ])
 
       :ok =
@@ -146,7 +157,8 @@ defmodule NeonFS.S3.IntegrationTest.CredentialTest do
     test "credential created on node1 is accessible from node2", %{cluster: cluster} do
       {:ok, created} =
         PeerCluster.rpc(cluster, :node1, NeonFS.Core.CredentialManager, :create, [
-          %{user: "cross-node"}
+          %{user: "cross-node"},
+          [uid: 0, gids: [0]]
         ])
 
       {:ok, found} =
@@ -161,7 +173,8 @@ defmodule NeonFS.S3.IntegrationTest.CredentialTest do
     test "credential created on node2 is accessible from node3", %{cluster: cluster} do
       {:ok, created} =
         PeerCluster.rpc(cluster, :node2, NeonFS.Core.CredentialManager, :create, [
-          %{user: "cross-node-2-3"}
+          %{user: "cross-node-2-3"},
+          [uid: 0, gids: [0]]
         ])
 
       {:ok, found} =
