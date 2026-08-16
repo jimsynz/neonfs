@@ -3,7 +3,10 @@ defmodule NeonFS.CSI.AttachRegistry do
   Cluster-side record of which node a block volume is attached to.
 
   The record *is* an exclusive `NeonFS.Core.NamespaceCoordinator` claim on
-  the volume's attach path. That is what makes the exclusion real rather
+  the attach path of the volume's device — the same path
+  `NeonFS.Block.DeviceRegistry` claims when that device is attached over
+  NBD, so the two routes exclude each other rather than each keeping their
+  own record. That is what makes the exclusion real rather
   than advisory: the claim is Ra-backed, so every controller in the cluster
   is refused by the same state, and it is held by a pid on the attached
   node, so that node dying releases it with no one having to notice.
@@ -116,7 +119,13 @@ defmodule NeonFS.CSI.AttachRegistry do
     end
   end
 
-  defp attach_path(volume_id), do: BlockAttachment.path(volume_id)
+  # The claim is on the volume's *device*, which is what `neonfs_block`
+  # claims when the same device is attached over NBD — a volume-keyed path
+  # would sit beside that one instead of colliding with it. The device path
+  # is a cluster-wide constant, so naming it costs no round trip and works
+  # for a volume that has already been deleted.
+  defp attach_path(volume_id),
+    do: BlockAttachment.path(volume_id, BlockAttachment.default_device_path())
 
   defp publish_context(node_id), do: %{"neonfs.attached_node" => node_id}
 

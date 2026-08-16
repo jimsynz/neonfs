@@ -55,9 +55,15 @@ defmodule NeonFS.Block.LiveServerTest do
       {:ok, %{stream: [:binary.copy(<<0xA5>>, half), :binary.copy(<<0x5A>>, length - half)]}}
     end)
 
+    Application.put_env(:neonfs_block, :coordinator_call_fn, fn
+      :claim_path_for, _args -> {:ok, "claim"}
+      :release, _args -> :ok
+    end)
+
     on_exit(fn ->
       Application.delete_env(:neonfs_block, :core_call_fn)
       Application.delete_env(:neonfs_block, :read_stream_fn)
+      Application.delete_env(:neonfs_block, :coordinator_call_fn)
     end)
 
     start_supervised!(DeviceRegistry)

@@ -106,7 +106,7 @@ defmodule NeonFS.CSI.AttachLifecycleTest do
       reply = publish("blk", "worker-a")
 
       assert reply.publish_context["neonfs.attached_node"] == "worker-a"
-      assert_received {:claim, "csi:attach:blk", holder}
+      assert_received {:claim, "block:attach:blk:/dev.img", holder}
       assert holder == Process.whereis(AttachHolder)
     end
 

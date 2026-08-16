@@ -13,6 +13,28 @@ defmodule NeonFS.Block.DeviceRegistry do
   connection goes — not before, or a surviving connection would be left
   holding a handle to a detached device.
 
+  ## The cluster-wide claim
+
+  A device gaining its first connection also takes an exclusive
+  `NeonFS.Core.NamespaceCoordinator` claim on
+  `NeonFS.Core.BlockAttachment.path/2`, released when the last connection
+  goes. That claim is the cluster's one record of a block attachment by any
+  route: `NeonFS.CSI.AttachRegistry` takes the same path, so an export whose
+  device Kubernetes already has attached is refused here, and `volume show`
+  reports an `nbd-client` attachment instead of describing it as an absence.
+
+  The claim is per *device*, not per connection — several sockets to one
+  export is how blk-mq gets its parallelism, and a per-connection claim would
+  refuse `nbd-client -C` outright. The holder is this registry's pid, which
+  is the only pid the mechanism can use: an NBD client is an arbitrary host
+  rather than a BEAM node, so the node a claim reports for an NBD attachment
+  is this one, serving the socket. Two clients reaching the same device
+  through this node are therefore both admitted.
+
+  An export whose claim cannot be taken is refused, including when the
+  coordinator cannot be reached at all — a control-plane outage is exactly
+  the window a split-brain double attach happens in.
+
   ## Telemetry
 
     * `[:neonfs, :block, :attached]` — Measurements: `holders`. Metadata:
@@ -24,6 +46,9 @@ defmodule NeonFS.Block.DeviceRegistry do
   use GenServer
 
   alias NeonFS.Block.Device
+  alias NeonFS.Client.Router
+  alias NeonFS.Core.BlockAttachment
+  alias NeonFS.Core.NamespaceCoordinator
 
   @type export :: String.t()
 
@@ -36,7 +61,13 @@ defmodule NeonFS.Block.DeviceRegistry do
   Attaches `holder` to `export`, resolving the backing file on first use.
 
   Returns the shared device handle. A second attach of an already-attached
-  export does not re-resolve it.
+  export does not re-resolve it, nor re-claim it.
+
+  The first attach of a device takes the cluster-wide attachment claim, so
+  this fails with `{:attached_elsewhere, export}` when the device is already
+  attached — including through CSI — and with
+  `{:attachment_claim_unavailable, reason}` when exclusivity could not be
+  established at all.
   """
   @spec attach(export(), pid(), GenServer.server()) :: {:ok, Device.t()} | {:error, term()}
   def attach(export, holder, server \\ __MODULE__) do
@@ -74,13 +105,18 @@ defmodule NeonFS.Block.DeviceRegistry do
         {:reply, {:ok, device}, note_attach(state, export, holder)}
 
       :error ->
-        case Device.open(export) do
-          {:ok, device} ->
-            state = put_in(state.devices[export], %{device: device, holders: MapSet.new()})
-            {:reply, {:ok, device}, note_attach(state, export, holder)}
+        with {:ok, device} <- Device.open(export),
+             {:ok, claim_id} <- claim_device(device) do
+          state =
+            put_in(state.devices[export], %{
+              device: device,
+              claim_id: claim_id,
+              holders: MapSet.new()
+            })
 
-          {:error, _reason} = error ->
-            {:reply, error, state}
+          {:reply, {:ok, device}, note_attach(state, export, holder)}
+        else
+          {:error, _reason} = error -> {:reply, error, state}
         end
     end
   end
@@ -157,9 +193,45 @@ defmodule NeonFS.Block.DeviceRegistry do
 
   defp release_if_last(state, export, remaining) do
     if MapSet.size(remaining) == 0 do
+      release_claim(state.devices[export])
       %{state | devices: Map.delete(state.devices, export)}
     else
       put_in(state.devices[export].holders, remaining)
+    end
+  end
+
+  # Held by this process rather than the connection: several connections
+  # share one device, and the claim's lifetime is the device's.
+  defp claim_device(device) do
+    device.volume
+    |> BlockAttachment.path(device.path)
+    |> then(&coordinator_call(:claim_path_for, [&1, :exclusive, self()]))
+    |> case do
+      {:ok, claim_id} ->
+        {:ok, claim_id}
+
+      {:error, %NeonFS.Error.Conflict{}} ->
+        {:error, {:attached_elsewhere, device.export}}
+
+      other ->
+        {:error, {:attachment_claim_unavailable, other}}
+    end
+  end
+
+  defp release_claim(%{claim_id: claim_id}) do
+    _ = coordinator_call(:release, [claim_id])
+    :ok
+  end
+
+  # A block node runs as its own interface node, so the coordinator is
+  # always a hop away. Configured as a module or closure so a test can drive
+  # the registry without a cluster behind it, the same seam
+  # `NeonFS.CSI.AttachRegistry` uses.
+  defp coordinator_call(function, args) do
+    case Application.get_env(:neonfs_block, :coordinator_call_fn) do
+      nil -> Router.call(NamespaceCoordinator, function, args)
+      module when is_atom(module) -> apply(module, function, args)
+      fun when is_function(fun, 2) -> fun.(function, args)
     end
   end
 
