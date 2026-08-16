@@ -16,8 +16,10 @@ name: Nightly end-to-end
 #
 #   * `rig_acceptance` — the whole `test-rig` acceptance matrix against a real
 #     cluster of QEMU VMs installed from the shipped `.deb`s, including the
-#     steps a container cannot run at all: attaching a kernel block device
-#     over NBD and verifying it with `fio --verify`.
+#     steps that need a kernel of their own: attaching a block device over
+#     NBD and verifying it with `fio --verify`. Those run inside the guests,
+#     which is why the job itself can be an ordinary container given
+#     /dev/kvm.
 #   * `csi_tooling` — the Kubernetes toolchain at its pinned versions, and the
 #     CSI chart as far as it can be validated *without* a cluster. It boots
 #     none; neither kind nor k3d can bring one up inside a runner container,
@@ -65,12 +67,18 @@ jobs:
   # The `test-rig` acceptance matrix, in CI for the first time. Everything
   # here was previously only ever run by hand.
   #
-  # It runs on `jeb` rather than the containerised `amd64` runners for the
-  # same reason `bench.yml` does: the rig boots QEMU VMs and wants /dev/kvm,
-  # and TCG emulation is roughly ten times slower. That is also what makes
-  # the suite's kernel-level steps possible — a container cannot `modprobe
-  # nbd` or attach a block device, so the NBD attach and `fio --verify`
-  # coverage has nowhere else to live.
+  # It runs on `jeb` rather than the `amd64` pool for one reason: the rig
+  # boots QEMU VMs and wants /dev/kvm, and TCG emulation is roughly ten times
+  # slower. `runs-on: jeb` names the amd64 host that has that device — not a
+  # bare-metal runner. Every label this instance offers resolves to a
+  # container, `jeb` included, so the job passes the device through with
+  # `--privileged --device /dev/kvm`, the same mechanism `ci.yml` already
+  # uses for /dev/fuse and for loop devices.
+  #
+  # A container is sufficient because the suite's kernel-level steps are
+  # guest operations, not host ones: `s_block_fio_verify` attaches the NBD
+  # device and runs `fio` over ssh inside a VM. The host side wants only
+  # QEMU, `cloud-localds` and ssh, on user-mode networking.
   #
   # Two scheduled QEMU workloads now share this one KVM host: `bench.yml` at
   # 03:00 Monday and this at 14:00 daily. They do not overlap today, and that
@@ -78,32 +86,52 @@ jobs:
   # lengthens either schedule has to account for the other.
   # =======================================================================
   rig_acceptance:
+    needs: setup
     runs-on: jeb
     # Three VMs to boot and provision from freshly-built `.deb`s, then every
     # interface in the matrix. The rig is sequential by design, so give it
     # room; `bench.yml` allows 720 minutes for the same host.
     timeout-minutes: 240
+    container:
+      # Carries the Elixir and Rust toolchain the `.deb` build needs, so
+      # nothing is provisioned in-job beyond QEMU itself.
+      image: ${{ needs.setup.outputs.elixir_rust_image }}
+      options: --privileged --device /dev/kvm
 
     steps:
       - uses: actions/checkout@v7
 
-      # `jeb` is bare metal and the CI base images live in another
-      # repository, so provisioning happens in-job. Same list as bench.yml,
-      # which boots the same VMs.
+      # The CI base images live in another repository and carry no QEMU, so
+      # this much is provisioned in-job. Same list as bench.yml, which boots
+      # the same VMs. No `sudo`: the container runs as root.
       - name: Install rig prerequisites
         run: |
-          sudo apt-get update -y
-          sudo apt-get install -y --no-install-recommends \
+          apt-get update -y
+          apt-get install -y --no-install-recommends \
             qemu-system-x86 qemu-utils cloud-image-utils jq
           if ! command -v nfpm >/dev/null 2>&1; then
             curl -fsSL -o /tmp/nfpm.tgz \
               https://github.com/goreleaser/nfpm/releases/download/v2.46.3/nfpm_2.46.3_Linux_x86_64.tar.gz
-            sudo tar -C /usr/local/bin -xzf /tmp/nfpm.tgz nfpm
+            tar -C /usr/local/bin -xzf /tmp/nfpm.tgz nfpm
           fi
 
-      - name: Provision toolchain from .tool-versions
+      # `require_tools` only warns about a missing /dev/kvm and falls through
+      # to TCG, which is ~10x slower — this job would not fail, it would time
+      # out at 240 minutes without saying why. Fail here instead, naming the
+      # device, so a runner that stops passing it through is legible.
+      - name: Require /dev/kvm
         run: |
-          asdf install
+          if [ ! -w /dev/kvm ]; then
+            echo "/dev/kvm is not present or not writable in this container." >&2
+            echo "The job's container needs --device /dev/kvm; TCG fallback would time out." >&2
+            exit 1
+          fi
+
+      # The image carries Elixir and Rust, so nothing installs a toolchain
+      # here — but hex and rebar are per-user and `neonfs-rig up` builds the
+      # `.deb`s from a mix release.
+      - name: Install hex and rebar
+        run: |
           mix local.hex --force
           mix local.rebar --force
 
