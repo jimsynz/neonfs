@@ -11,9 +11,10 @@ defmodule NeonFS.Block.Device do
   A volume name cannot contain a colon, so the split is unambiguous, and the
   path keeps its leading slash exactly as it appears in the volume.
 
-  A bare `<volume>` names that volume's own device, whose path core answers
-  with rather than this module assuming it. That is the form `nbd-client -N
-  blockvol` and CSI want, and one device per volume makes it unambiguous.
+  A bare `<volume>` names that volume's own device, at the cluster-wide
+  constant `NeonFS.Core.BlockAttachment.default_device_path/0` that core
+  provisions against. That is the form `nbd-client -N blockvol` and CSI want,
+  and one device per volume makes it unambiguous.
 
   ## Reads stream
 
@@ -55,6 +56,7 @@ defmodule NeonFS.Block.Device do
 
   alias NeonFS.Client
   alias NeonFS.Client.ChunkReader
+  alias NeonFS.Core.BlockAttachment
 
   @backing NeonFS.Core.BlockBacking
 
@@ -214,10 +216,7 @@ defmodule NeonFS.Block.Device do
         {:ok, volume, path}
 
       [volume] when volume != "" ->
-        case core_call(:device_path, []) do
-          path when is_binary(path) -> {:ok, volume, path}
-          other -> {:error, other}
-        end
+        {:ok, volume, BlockAttachment.default_device_path()}
 
       _otherwise ->
         {:error, {:malformed_export_name, export}}
