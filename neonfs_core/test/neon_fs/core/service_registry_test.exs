@@ -312,11 +312,25 @@ defmodule NeonFS.Core.ServiceRegistryTest do
                       %{attempt: 0}, %{cause: :write}},
                      1_000
 
-      assert_receive {[:neonfs, :service_registry, :self_registered], ^ref, %{attempt: 1}, _meta},
-                     5_000
+      # Not `assert_receive ..., 5_000` on `%{attempt: 1}`. Attempt 0 is the
+      # only one this test fails on purpose; every later one runs the *real*
+      # Ra write, which can itself time out on a loaded runner and schedule
+      # another retry. Pinning the attempt makes a genuine Ra timeout — the
+      # very condition under test — read as a failure, and a fixed budget
+      # cannot cover a backoff that doubles from 500ms.
+      #
+      # `await_self_registration!/3` bounds how long the chain may go quiet
+      # rather than how long it may take, which is the tolerance the setup
+      # above already relies on.
+      await_self_registration!(ref, "127.0.0.1:4001")
 
       assert {:ok, info} = ServiceRegistry.get(Node.self(), :core)
       assert info.metadata.data_endpoint == "127.0.0.1:4001"
+
+      # What the pinned attempt number was really asserting: registration did
+      # not succeed on the attempt that was stubbed to fail. The `get/2`
+      # above is what proves the retry reached the state machine.
+      assert Agent.get(attempts, & &1) > 1, "the stubbed attempt must actually have failed"
     end
 
     test "is reported as a write retry, never as an endpoint one", %{ref: ref} do
