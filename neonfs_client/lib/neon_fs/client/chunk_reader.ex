@@ -36,9 +36,11 @@ defmodule NeonFS.Client.ChunkReader do
   Erasure-coded (stripe-based) files return data-chunk refs for each
   overlapping stripe when every data chunk is available. When any data
   chunk is missing and parity-based reconstruction is required, core
-  returns `{:error, {:stripe_refs_unsupported, chunk_bytes}}` — carrying what
-  the fallback read will cost, since only core knows which stripes are
-  degraded and a degraded stripe is rebuilt from whole chunks. This helper
+  returns `{:error, {:stripe_refs_unsupported, by_stripe}}` — a stripe-keyed
+  map of what the fallback read will cost, since only core knows which
+  stripes are degraded and a degraded stripe is rebuilt from whole chunks.
+  This buffered helper sums it; the per-stripe streaming walk uses the
+  parts. This helper
   then falls back to reading the file **one stripe at a time** via
   `NeonFS.Core.read_file/3`, using stripe ranges from `get_file_meta/2`.
   The server does reconstruction per stripe, so the peak working set is
@@ -97,14 +99,24 @@ defmodule NeonFS.Client.ChunkReader do
       returns with its refusal, which counts a degraded stripe as the whole
       chunks its reconstruction fetches rather than as its data byte span.
     * `:stripe` — one call per stripe of the degraded-erasure walk.
-      `chunk_bytes` is the stripe's whole byte range: core rebuilds the
-      stripe from parity to serve any part of it.
+      `chunk_bytes` is what rebuilding *that* stripe fetches, taken from the
+      same per-stripe breakdown core sends with its refusal — `data_chunks`
+      whole chunks for a degraded stripe. Not the stripe's data byte span: a
+      file's final stripe can hold a few hundred bytes and still cost every
+      one of its chunks to rebuild, so the two differ by orders of magnitude
+      on a small file.
 
   `chunk_bytes` is **absent, not zero**, when the size could not be
-  determined at all — core reports `nil` alongside its refusal when a stripe
-  is missing from the index, so no total over that read is trustworthy. Zero
-  would claim the call moved nothing, which is the under-report this event
-  exists to end, so consumers must go on treating the key as optional.
+  determined — core reports `nil` alongside its refusal when a stripe is
+  missing from the index, and a `:stripe` event omits it when the breakdown
+  has no entry for that stripe (the refusal and the stripe list come from
+  two calls, so a file changing between them can leave one unaccounted).
+  Zero would claim the call moved nothing, which is the under-report this
+  event exists to end, so consumers must go on treating the key as optional.
+
+  A walk in which some stripes were attributed and others were not therefore
+  **under-reports** a summed `chunk_bytes` rather than reporting nothing.
+  Sum the events of one read only when every one of them carries the key.
 
   Both events are per-read-path, not per-file: a single `read_file/3`
   emits either a run of `chunk_fetched` or exactly one `range_fetched`,
@@ -186,8 +198,8 @@ defmodule NeonFS.Client.ChunkReader do
       {:ok, %{chunks: chunks} = result} ->
         dispatch_read(chunks, result.hole_bytes, volume_name, target, opts)
 
-      {:error, {:stripe_refs_unsupported, chunk_bytes}} ->
-        degraded_read(volume_name, target, opts, chunk_bytes)
+      {:error, {:stripe_refs_unsupported, by_stripe}} ->
+        degraded_read(volume_name, target, opts, total_bytes(by_stripe))
 
       {:error, _} = error ->
         error
@@ -244,8 +256,8 @@ defmodule NeonFS.Client.ChunkReader do
         stream = build_chunk_stream(chunks, hole_bytes, volume_name, target, opts)
         {:ok, %{stream: stream, file_size: file_size}}
 
-      {:error, {:stripe_refs_unsupported, chunk_bytes}} ->
-        fallback_stream(volume_name, target, opts, chunk_bytes)
+      {:error, {:stripe_refs_unsupported, by_stripe}} ->
+        fallback_stream(volume_name, target, opts, by_stripe)
 
       {:error, _} = error ->
         error
@@ -561,21 +573,33 @@ defmodule NeonFS.Client.ChunkReader do
     end
   end
 
-  defp fallback_stream(volume_name, target, opts, chunk_bytes) do
+  # Core's refusal carries what its fallback will move off disk, broken down
+  # by stripe id. The streaming walk needs the parts, because it emits one
+  # measurement per stripe; the buffered path sums them. Both come from the
+  # same figure, so the two cannot report different numbers for one read.
+  defp fallback_stream(volume_name, target, opts, by_stripe) do
     meta_opts = Keyword.take(opts, [:uid, :gids])
 
     case meta_call(volume_name, target, meta_opts) do
       {:ok, %{stripes: stripes} = meta} when is_list(stripes) ->
         {:ok,
-         %{stream: stripe_fallback_stream(meta, volume_name, target, opts), file_size: meta.size}}
+         %{
+           stream: stripe_fallback_stream(meta, volume_name, target, opts, by_stripe),
+           file_size: meta.size
+         }}
 
       {:ok, meta} ->
-        buffered_fallback_stream(meta, volume_name, target, opts, chunk_bytes)
+        buffered_fallback_stream(meta, volume_name, target, opts, total_bytes(by_stripe))
 
       {:error, _} = err ->
         err
     end
   end
+
+  # `nil` propagates rather than summing to zero: core could not size the
+  # read at all, and zero would claim it moved nothing.
+  defp total_bytes(nil), do: nil
+  defp total_bytes(by_stripe), do: by_stripe |> Map.values() |> Enum.sum()
 
   # Sized from core's refusal rather than recomputed here, so the buffered and
   # streaming paths cannot report different numbers for the same read.
@@ -591,7 +615,7 @@ defmodule NeonFS.Client.ChunkReader do
     end
   end
 
-  defp stripe_fallback_stream(meta, volume_name, target, opts) do
+  defp stripe_fallback_stream(meta, volume_name, target, opts, by_stripe) do
     offset = Keyword.get(opts, :offset, 0)
     length = Keyword.get(opts, :length, :all)
     end_byte = compute_end_byte(meta.size, offset, length)
@@ -601,7 +625,7 @@ defmodule NeonFS.Client.ChunkReader do
     else
       segments =
         meta.stripes
-        |> Enum.map(&stripe_segment(&1, offset, end_byte))
+        |> Enum.map(&stripe_segment(&1, offset, end_byte, by_stripe))
         |> Enum.reject(&is_nil/1)
 
       ctx = fetch_ctx(volume_name, opts)
@@ -610,16 +634,34 @@ defmodule NeonFS.Client.ChunkReader do
     end
   end
 
-  # `stripe_bytes` is the whole stripe, not the slice of it this segment
-  # asks for: core rebuilds the stripe from parity to serve any part of
-  # it, so that is what the read cost regardless of how much was wanted.
-  defp stripe_segment(%{byte_range: byte_range}, offset, end_byte) do
+  # `stripe_bytes` is what reconstruction fetches for this stripe, which core
+  # sized and sent with its refusal — `data_chunks` *whole* chunks for a
+  # degraded stripe, whichever of the data and parity chunks are available.
+  # Not the slice this segment asks for, and not the stripe's data byte span
+  # either: a file's final stripe can hold a few hundred bytes and still cost
+  # every one of its chunks to rebuild.
+  #
+  # `nil` when the breakdown has no entry for this stripe. The figure comes
+  # from `get_chunk_refs` and the stripe list from a separate
+  # `get_file_meta`, so a file that changed between the two calls can leave a
+  # stripe unaccounted — a genuine race with no correct number available.
+  # That stripe's measurement is omitted; the others report normally.
+  defp stripe_segment(
+         %{stripe_id: stripe_id, byte_range: byte_range},
+         offset,
+         end_byte,
+         by_stripe
+       ) do
     {s, e} = normalise_byte_range(byte_range)
     read_start = max(s, offset)
     read_end = min(e, end_byte)
 
     if read_start < read_end do
-      %{offset: read_start, length: read_end - read_start, stripe_bytes: e - s}
+      %{
+        offset: read_start,
+        length: read_end - read_start,
+        stripe_bytes: by_stripe && Map.get(by_stripe, stripe_id)
+      }
     end
   end
 

@@ -417,7 +417,11 @@ defmodule NeonFS.Core.ReadFileRefsTest do
     # reconstruction fetches rather than the stripe's data byte span — for a
     # 13-byte file in a 2+1 stripe that is the difference between a figure that
     # says the read was nearly free and one that says it moved two whole chunks.
-    test "the refusal carries what the fallback read will cost, counting parity" do
+    #
+    # Keyed by stripe rather than summed because the client has two paths: a
+    # buffered read sums the map, while the per-stripe streaming walk needs
+    # each stripe's own figure as it emits that stripe.
+    test "the refusal carries what the fallback read will cost, per stripe" do
       {:ok, volume} = create_erasure_volume()
 
       {:ok, file_meta} =
@@ -426,24 +430,24 @@ defmodule NeonFS.Core.ReadFileRefsTest do
       [missing_hash | _] = stripe_data_hashes_for(file_meta)
       ChunkIndex.delete(missing_hash)
 
-      assert {:error, {:stripe_refs_unsupported, bytes}} =
+      assert {:error, {:stripe_refs_unsupported, by_stripe}} =
                ReadOperation.read_file_refs(volume.id, "/degraded.txt")
 
       expected =
-        file_meta.stripes
-        |> Enum.map(fn %{stripe_id: sid} ->
+        Map.new(file_meta.stripes, fn %{stripe_id: sid} ->
           {:ok, stripe} = StripeIndex.get(volume.id, sid)
-          stripe.config.data_chunks * stripe.config.chunk_size
+          {sid, stripe.config.data_chunks * stripe.config.chunk_size}
         end)
-        |> Enum.sum()
 
-      assert bytes == expected
-      assert bytes > file_meta.size
+      assert by_stripe == expected
+
+      assert Enum.sum(Map.values(by_stripe)) > file_meta.size,
+             "reconstruction costs whole chunks, not the file's byte span"
     end
 
-    # `nil` rather than a partial sum: a total that silently omits a stripe is
-    # the under-report the measurement exists to end, and the client omits the
-    # key entirely rather than emitting a wrong number.
+    # `nil` rather than a partial map: a breakdown that silently omits a
+    # stripe is the under-report the measurement exists to end, and the client
+    # omits the key entirely rather than emitting a wrong number.
     test "the refusal reports an unsizable read as nil rather than a partial sum" do
       {:ok, volume} = create_erasure_volume()
 

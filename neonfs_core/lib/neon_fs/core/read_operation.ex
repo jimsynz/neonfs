@@ -64,7 +64,7 @@ defmodule NeonFS.Core.ReadOperation do
              chunks: [chunk_ref()],
              hole_bytes: non_neg_integer()
            }}
-          | {:error, {:stripe_refs_unsupported, non_neg_integer() | nil}}
+          | {:error, {:stripe_refs_unsupported, %{binary() => non_neg_integer()} | nil}}
           | {:error, term()}
 
   @doc """
@@ -312,12 +312,21 @@ defmodule NeonFS.Core.ReadOperation do
   each stripe that overlaps the read range. This only applies when every
   data chunk in each relevant stripe is available — if any data chunk is
   missing (i.e. the stripe would require parity-based reconstruction),
-  `{:error, {:stripe_refs_unsupported, bytes}}` is returned so the caller can
-  fall back to `read_file/3`. `bytes` is what that fallback will move off
-  disk — counting the whole chunks a degraded stripe's reconstruction fetches,
-  not the stripe's data byte span — so the caller can report the read's chunk
-  cost without a second round trip. It is `nil` when a stripe could not be
-  sized at all, which the caller must treat as "unknown" rather than zero.
+  `{:error, {:stripe_refs_unsupported, by_stripe}}` is returned so the caller
+  can fall back to `read_file/3`. `by_stripe` maps each overlapping stripe's
+  id to what that fallback will move off disk for it — counting the whole
+  chunks a degraded stripe's reconstruction fetches, not the stripe's data
+  byte span — so the caller can report the read's chunk cost without a second
+  round trip.
+
+  Broken down per stripe rather than summed because the caller has two paths
+  and they must not disagree: a buffered read sums the map, while
+  `NeonFS.Client.ChunkReader`'s per-stripe streaming walk needs each stripe's
+  own figure as it emits that stripe. One representation, so the two cannot
+  drift.
+
+  It is `nil` when a stripe could not be sized at all, which the caller must
+  treat as "unknown" rather than zero.
 
   ## Options
 
@@ -329,9 +338,9 @@ defmodule NeonFS.Core.ReadOperation do
   ## Returns
 
     * `{:ok, %{file_size: size, chunks: [ref, ...]}}` on success
-    * `{:error, {:stripe_refs_unsupported, bytes | nil}}` when a relevant
+    * `{:error, {:stripe_refs_unsupported, by_stripe | nil}}` when a relevant
       stripe requires reconstruction (one or more data chunks are missing),
-      carrying the byte cost of the fallback read
+      carrying the byte cost of the fallback read keyed by stripe id
     * `{:error, reason}` on auth / lookup failure
   """
   @spec read_file_refs(binary(), String.t(), keyword()) :: refs_result()
@@ -484,14 +493,18 @@ defmodule NeonFS.Core.ReadOperation do
   # the two are summed per stripe rather than one rule applied to all.
   #
   # `nil` when any overlapping stripe cannot be sized, rather than a partial
-  # sum: a total that silently omits a stripe is the under-report the
+  # map: a breakdown that silently omits a stripe is the under-report the
   # `chunk_bytes` measurement exists to end, and an absent measurement is
   # handled (`NeonFS.Client.ChunkReader` omits the key) where a wrong one is
   # not.
+  #
+  # Kept per stripe rather than summed here because the streaming caller
+  # emits one measurement per stripe as it walks them, and a total cannot be
+  # taken apart again.
   defp fallback_read_bytes(stripe_refs, volume_id, offset, end_byte) do
-    Enum.reduce_while(stripe_refs, 0, fn stripe_ref, total ->
+    Enum.reduce_while(stripe_refs, %{}, fn stripe_ref, by_stripe ->
       case stripe_fallback_bytes(stripe_ref, volume_id, offset, end_byte) do
-        {:ok, bytes} -> {:cont, total + bytes}
+        {:ok, bytes} -> {:cont, Map.put(by_stripe, stripe_ref.stripe_id, bytes)}
         :error -> {:halt, nil}
       end
     end)
