@@ -106,9 +106,14 @@ node_cli() {
 
 # --- prerequisites ---------------------------------------------------------
 
+# `envsubst` and `nfpm` belong here rather than to `ensure_debs`, which is
+# where they are actually used: that runs a full `mix release` first, so a
+# missing one surfaces minutes in instead of in the second this takes. The
+# host used to supply them and a container does not, which is how they were
+# each found one CI run at a time.
 require_tools() {
   local missing=()
-  for t in qemu-system-x86_64 qemu-img cloud-localds ssh scp ssh-keygen; do
+  for t in qemu-system-x86_64 qemu-img cloud-localds ssh scp ssh-keygen envsubst nfpm; do
     command -v "$t" >/dev/null 2>&1 || missing+=("$t")
   done
   [ "${#missing[@]}" -eq 0 ] || die "missing tools: ${missing[*]} (see test-rig/README.md)"
