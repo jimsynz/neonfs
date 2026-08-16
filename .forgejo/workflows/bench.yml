@@ -30,6 +30,12 @@ jobs:
 
   bench:
     needs: setup
+    # `require_tools` warns about a missing /dev/kvm and falls through to
+    # TCG. For a benchmark that is worse than a timeout: the numbers would be
+    # ~10x off and would enter the rolling window as a regression that is
+    # really an emulation artefact.
+    env:
+      REQUIRE_KVM: 1
     # The rig needs QEMU + /dev/kvm (TCG is ~10x slower). `jeb` names the
     # amd64 host that has that device — every label on this instance
     # resolves to a container, so the device is passed through rather than
@@ -56,18 +62,6 @@ jobs:
             curl -fsSL -o /tmp/nfpm.tgz \
               https://github.com/goreleaser/nfpm/releases/download/v2.46.3/nfpm_2.46.3_Linux_x86_64.tar.gz
             tar -C /usr/local/bin -xzf /tmp/nfpm.tgz nfpm
-          fi
-
-      # `require_tools` only warns about a missing /dev/kvm and falls through
-      # to TCG. For a benchmark that is worse than a failure: the numbers
-      # would be ~10x off and would feed the rolling window as a regression
-      # that is really an emulation artefact.
-      - name: Require /dev/kvm
-        run: |
-          if [ ! -w /dev/kvm ]; then
-            echo "/dev/kvm is not present or not writable in this container." >&2
-            echo "The job's container needs --device /dev/kvm; TCG numbers are not comparable." >&2
-            exit 1
           fi
 
       # The image carries Elixir and Rust, so nothing installs a toolchain

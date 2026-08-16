@@ -84,6 +84,12 @@ jobs:
   rig_acceptance:
     needs: setup
     runs-on: jeb
+    # `require_tools` warns about a missing /dev/kvm and falls through to
+    # TCG, which is ~10x slower — this job would not fail, it would time out
+    # at 240 minutes without saying why. Refuse instead, naming the device,
+    # so a runner that stops passing it through is legible in one minute.
+    env:
+      REQUIRE_KVM: 1
     # Three VMs to boot and provision from freshly-built `.deb`s, then every
     # interface in the matrix. The rig is sequential by design, so give it
     # room; `bench.yml` allows 720 minutes for the same host.
@@ -109,18 +115,6 @@ jobs:
             curl -fsSL -o /tmp/nfpm.tgz \
               https://github.com/goreleaser/nfpm/releases/download/v2.46.3/nfpm_2.46.3_Linux_x86_64.tar.gz
             tar -C /usr/local/bin -xzf /tmp/nfpm.tgz nfpm
-          fi
-
-      # `require_tools` only warns about a missing /dev/kvm and falls through
-      # to TCG, which is ~10x slower — this job would not fail, it would time
-      # out at 240 minutes without saying why. Fail here instead, naming the
-      # device, so a runner that stops passing it through is legible.
-      - name: Require /dev/kvm
-        run: |
-          if [ ! -w /dev/kvm ]; then
-            echo "/dev/kvm is not present or not writable in this container." >&2
-            echo "The job's container needs --device /dev/kvm; TCG fallback would time out." >&2
-            exit 1
           fi
 
       # The image carries Elixir and Rust, so nothing installs a toolchain
