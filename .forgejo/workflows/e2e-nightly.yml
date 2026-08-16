@@ -106,11 +106,16 @@ jobs:
       # The CI base images live in another repository and carry no QEMU, so
       # this much is provisioned in-job. Same list as bench.yml, which boots
       # the same VMs. No `sudo`: the container runs as root.
+      #
+      # `openssh-client` is not incidental: the rig drives every guest over
+      # ssh, so without it `require_tools` refuses before a VM is booted.
+      # The host used to supply it, which is why the bare-metal-shaped list
+      # this descends from never named it.
       - name: Install rig prerequisites
         run: |
           apt-get update -y
           apt-get install -y --no-install-recommends \
-            qemu-system-x86 qemu-utils cloud-image-utils jq
+            qemu-system-x86 qemu-utils cloud-image-utils jq openssh-client
           if ! command -v nfpm >/dev/null 2>&1; then
             curl -fsSL -o /tmp/nfpm.tgz \
               https://github.com/goreleaser/nfpm/releases/download/v2.46.3/nfpm_2.46.3_Linux_x86_64.tar.gz
