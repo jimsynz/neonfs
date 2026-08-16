@@ -21,9 +21,15 @@ defmodule NeonFS.WebDAV.IntegrationTest do
     node1 = PeerCluster.get_node!(cluster, :node1)
     WebDAVCoreBridge.store_core_node(node1.node)
 
+    # uid 0 deliberately: these tests exercise WebDAV verbs against a real
+    # cluster, not POSIX authorisation, and a non-root uid would be refused
+    # by the volume root's own mode before any verb was reached. That the
+    # credential's uid is what reaches core is asserted in the backend unit
+    # tests, where it can be observed rather than inferred.
     {:ok, %{access_key_id: access_key, secret_access_key: secret}} =
       PeerCluster.rpc(cluster, :node1, NeonFS.Core.CredentialManager, :create, [
-        %{user: "webdav-test"}
+        %{user: "webdav-test"},
+        [uid: 0, gids: [0]]
       ])
 
     Application.put_env(:neonfs_webdav, :core_call_fn, &WebDAVCoreBridge.call/2)

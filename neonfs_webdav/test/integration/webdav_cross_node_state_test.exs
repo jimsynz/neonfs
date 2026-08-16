@@ -73,7 +73,12 @@ defmodule NeonFS.WebDAV.CrossNodeStateTest do
       )
 
     {:ok, %{access_key_id: access_key, secret_access_key: secret}} =
-      PeerCluster.rpc(cluster, :node1, NeonFS.Core.CredentialManager, :create, [%{user: "xnode"}])
+      PeerCluster.rpc(cluster, :node1, NeonFS.Core.CredentialManager, :create, [
+        %{user: "xnode"},
+        # uid 0: this test is about lock and dead-property state following a
+        # session across nodes, not about POSIX authorisation.
+        [uid: 0, gids: [0]]
+      ])
 
     auth = "Basic " <> Base.encode64("#{access_key}:#{secret}")
 

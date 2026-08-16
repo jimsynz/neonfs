@@ -7,7 +7,10 @@ defmodule NeonFS.WebDAV.BackendTest do
   alias NeonFS.WebDAV.LockStore
   alias NeonFS.WebDAV.Test.{FakeKV, MockCore}
 
-  @auth %{user: "anonymous"}
+  # WebDAV authorises as the credential's uid; a credential with none is
+  # refused, so the fixture carries one.
+  @auth %{user: "anonymous", identity: %{user: "anonymous"}, uid: 1000, gids: [1000]}
+  @auth_without_uid %{user: "nouid", identity: %{user: "nouid"}, uid: nil, gids: []}
 
   setup :set_mimic_global
   setup :verify_on_exit!
@@ -75,6 +78,65 @@ defmodule NeonFS.WebDAV.BackendTest do
   end
 
   # Resource resolution
+
+  describe "identity threading" do
+    setup do
+      Process.register(self(), :webdav_identity_probe)
+      MockCore.create_volume("docs")
+      MockCore.write_file("docs", "/readme.txt", "hello")
+      :ok
+    end
+
+    # The defect this closes: core defaults an absent uid to 0, and
+    # `Authorise.check(0, _, _, _)` returns `:ok` unconditionally, so a
+    # request that arrives without an identity is authorised as root.
+    test "a read carries the credential's uid to core" do
+      assert {:ok, _resource} = Backend.resolve(@auth, ["docs", "readme.txt"])
+      assert_received {:core_identity, :get_file_meta, uid: 1000, gids: [1000]}
+    end
+
+    test "a listing carries the credential's uid to core" do
+      {:ok, resource} = Backend.resolve(@auth, ["docs"])
+      Backend.get_members(@auth, resource)
+      assert_received {:core_identity, :list_dir, uid: 1000, gids: [1000]}
+    end
+
+    test "a delete carries the credential's uid to core" do
+      {:ok, resource} = Backend.resolve(@auth, ["docs", "readme.txt"])
+      Backend.delete(@auth, resource)
+      assert_received {:core_identity, :delete_file, uid: 1000, gids: [1000]}
+    end
+
+    test "a mkdir carries the credential's uid to core" do
+      Backend.create_collection(@auth, ["docs", "newdir"])
+      assert_received {:core_identity, :mkdir, uid: 1000, gids: [1000]}
+    end
+  end
+
+  describe "a credential with no uid" do
+    setup do
+      Process.register(self(), :webdav_identity_probe)
+      MockCore.create_volume("docs")
+      MockCore.write_file("docs", "/readme.txt", "hello")
+      :ok
+    end
+
+    # Authentication succeeds and authorisation fails, rather than
+    # defaulting the uid — a default would be a root bypass wearing an
+    # identity, which is how this gap survived in the first place.
+    test "is refused rather than authorised as root" do
+      assert {:error, %Davy.Error{code: :forbidden}} =
+               Backend.resolve(@auth_without_uid, ["docs", "readme.txt"])
+
+      assert {:error, %Davy.Error{code: :forbidden}} =
+               Backend.create_collection(@auth_without_uid, ["docs", "newdir"])
+    end
+
+    test "never reaches core at all" do
+      Backend.resolve(@auth_without_uid, ["docs", "readme.txt"])
+      refute_received {:core_identity, _function, _identity}
+    end
+  end
 
   describe "resolve/2" do
     test "resolves root path to root collection" do

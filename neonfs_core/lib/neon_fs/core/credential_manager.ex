@@ -7,10 +7,35 @@ defmodule NeonFS.Core.CredentialManager do
   There is no ETS cache and no DETS snapshot — state lives entirely
   in Ra and every read reflects the locally-committed view.
 
-  Maps access key IDs to secret keys and opaque user identities. The
-  same store backs AWS SigV4 authentication in the S3-compatible API
-  and HTTP Basic authentication in the WebDAV interface — the identity
-  is an opaque term, so the store is interface-agnostic.
+  Maps access key IDs to secret keys, POSIX identity, and an opaque
+  owner label. The same store backs AWS SigV4 authentication in the
+  S3-compatible API and HTTP Basic authentication in the WebDAV
+  interface.
+
+  ## `identity` is never consulted for authorisation
+
+  `identity` is a free-form label — what `credential create` takes as
+  its argument and what `credential list --identity` filters on, and
+  what audit metadata carries. It is typed `term()` and nothing maps it
+  to a system account.
+
+  **`uid` and `gids` are the enforcement fields.** They are what reaches
+  `NeonFS.Core.Authorise.check/4`, which evaluates POSIX mode bits and
+  POSIX.1e entries against a uid and supplementary gids — a label is
+  neither. Unlike NFS and CIFS, whose protocols carry POSIX identity
+  (AUTH_SYS, the SMB session's Unix token), WebDAV and S3 authenticate a
+  key pair and have no equivalent, so the mapping lives here.
+
+  A credential with no `uid` authenticates and is then refused: core
+  defaults an absent uid to 0, and `Authorise.check/4` passes 0
+  unconditionally, so defaulting would silently authorise as root. That
+  is the bypass these fields exist to close, and failing closed is what
+  keeps it closed.
+
+  Nothing validates that a uid means anything — the operator maintains
+  the map by hand, and a typo yields a working credential with the wrong
+  permissions. That is the standing cost of credential fields over a
+  real identity subsystem.
   """
 
   alias NeonFS.Core.{MetadataStateMachine, RaSupervisor}
@@ -23,6 +48,8 @@ defmodule NeonFS.Core.CredentialManager do
           access_key_id: access_key_id(),
           secret_access_key: secret_access_key(),
           identity: term(),
+          uid: non_neg_integer() | nil,
+          gids: [non_neg_integer()],
           created_at: DateTime.t()
         }
 
@@ -32,13 +59,19 @@ defmodule NeonFS.Core.CredentialManager do
   Generates a random access key ID and secret access key, persists
   them via Ra, and returns the full credential (including the secret
   — only shown once).
+
+  `:uid` and `:gids` carry the POSIX identity every request made with
+  this credential is authorised as. A credential created without a uid
+  can authenticate but not read or write anything — see the moduledoc.
   """
-  @spec create(term()) :: {:ok, credential()} | {:error, term()}
-  def create(identity) do
+  @spec create(term(), keyword()) :: {:ok, credential()} | {:error, term()}
+  def create(identity, opts \\ []) do
     credential = %{
       access_key_id: generate_access_key_id(),
       secret_access_key: generate_secret_access_key(),
       identity: identity,
+      uid: Keyword.get(opts, :uid),
+      gids: Keyword.get(opts, :gids, []),
       created_at: DateTime.utc_now()
     }
 
@@ -141,6 +174,8 @@ defmodule NeonFS.Core.CredentialManager do
       access_key_id: cred_map.access_key_id,
       secret_access_key: cred_map.secret_access_key,
       identity: cred_map[:identity],
+      uid: cred_map[:uid],
+      gids: cred_map[:gids] || [],
       created_at: cred_map[:created_at] || DateTime.utc_now()
     }
   end

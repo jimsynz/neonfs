@@ -31,12 +31,21 @@ defmodule NeonFS.S3.Backend do
   @impl true
   def lookup_credential(access_key_id) do
     case call_core(:lookup_credential, [access_key_id]) do
-      {:ok, %{secret_access_key: secret, identity: identity}} ->
+      {:ok, %{secret_access_key: secret} = credential} ->
         {:ok,
          %Firkin.Credential{
            access_key_id: access_key_id,
            secret_access_key: secret,
-           identity: identity
+           # Firkin puts this in every callback's `ctx` verbatim and treats
+           # it as opaque, so it is the only channel the POSIX identity has
+           # to reach a callback. `NeonFS.Core.CredentialManager`'s own
+           # `identity` field is unchanged and still the label — this is the
+           # ctx, not the record.
+           identity: %{
+             identity: credential.identity,
+             uid: credential[:uid],
+             gids: credential[:gids] || []
+           }
          }}
 
       {:error, :not_found} ->
@@ -111,11 +120,12 @@ defmodule NeonFS.S3.Backend do
   # Object operations
 
   @impl true
-  def get_object(_ctx, bucket, key, opts) do
-    with :ok <- ensure_bucket_exists(bucket),
-         {:ok, meta} <- fetch_object_meta(bucket, key),
+  def get_object(ctx, bucket, key, opts) do
+    with {:ok, ident} <- identity_opts(ctx),
+         :ok <- ensure_bucket_exists(bucket),
+         {:ok, meta} <- fetch_object_meta(bucket, key, ident),
          {:ok, read_opts} <- resolve_range(opts.range, meta.size) do
-      build_object(bucket, key, meta, read_opts)
+      build_object(bucket, key, meta, read_opts, ident)
     end
   end
 
@@ -138,8 +148,11 @@ defmodule NeonFS.S3.Backend do
     end
   end
 
-  defp build_object(bucket, key, meta, read_opts) do
-    case try_stream_read(bucket, key, read_opts) do
+  # The identity goes to the read and nowhere else: `read_opts` doubles as
+  # the resolved range, and the object's content length is read back off it,
+  # so anything else in that list is a length this object does not have.
+  defp build_object(bucket, key, meta, read_opts, ident) do
+    case try_stream_read(bucket, key, read_opts ++ ident) do
       {:ok, %{stream: stream}} ->
         etag = resolve_etag(bucket, key, meta)
         {:ok, file_meta_to_stream_object(meta, stream, read_opts, etag)}
@@ -164,16 +177,19 @@ defmodule NeonFS.S3.Backend do
   defp not_found_reason?(_), do: false
 
   @impl true
-  def put_object(_ctx, bucket, key, body, opts) do
-    with :ok <- ensure_bucket_exists(bucket) do
-      write_with_etag(bucket, key, body, put_object_write_opts(opts), &write_via_chunk_writer/4)
+  def put_object(ctx, bucket, key, body, opts) do
+    with {:ok, ident} <- identity_opts(ctx),
+         :ok <- ensure_bucket_exists(bucket) do
+      write_opts = put_object_write_opts(opts) ++ ident
+      write_with_etag(bucket, key, body, write_opts, &write_via_chunk_writer/4)
     end
   end
 
   @impl true
-  def put_object_stream(_ctx, bucket, key, body, opts) do
-    with :ok <- ensure_bucket_exists(bucket) do
-      write_opts = put_object_write_opts(opts)
+  def put_object_stream(ctx, bucket, key, body, opts) do
+    with {:ok, ident} <- identity_opts(ctx),
+         :ok <- ensure_bucket_exists(bucket) do
+      write_opts = put_object_write_opts(opts) ++ ident
       do_put_object_stream(bucket, key, body, write_opts)
     end
   end
@@ -256,8 +272,14 @@ defmodule NeonFS.S3.Backend do
   end
 
   @impl true
-  def delete_object(_ctx, bucket, key) do
-    case call_core(:delete_file, [bucket, key]) do
+  def delete_object(ctx, bucket, key) do
+    with {:ok, ident} <- identity_opts(ctx) do
+      delete_one(bucket, key, ident)
+    end
+  end
+
+  defp delete_one(bucket, key, ident) do
+    case call_core(:delete_file, [bucket, key, ident]) do
       :ok -> :ok
       {:error, :not_found} -> :ok
       {:error, %{class: :not_found}} -> :ok
@@ -266,10 +288,16 @@ defmodule NeonFS.S3.Backend do
   end
 
   @impl true
-  def delete_objects(_ctx, bucket, keys) do
+  def delete_objects(ctx, bucket, keys) do
+    with {:ok, ident} <- identity_opts(ctx) do
+      delete_many(bucket, keys, ident)
+    end
+  end
+
+  defp delete_many(bucket, keys, ident) do
     results =
       Enum.map(keys, fn key ->
-        case call_core(:delete_file, [bucket, key]) do
+        case call_core(:delete_file, [bucket, key, ident]) do
           :ok ->
             {:deleted, %{key: key}}
 
@@ -291,9 +319,10 @@ defmodule NeonFS.S3.Backend do
   end
 
   @impl true
-  def head_object(_ctx, bucket, key) do
-    with :ok <- ensure_bucket_exists(bucket) do
-      case call_core(:get_file_meta, [bucket, key]) do
+  def head_object(ctx, bucket, key) do
+    with {:ok, ident} <- identity_opts(ctx),
+         :ok <- ensure_bucket_exists(bucket) do
+      case call_core(:get_file_meta, [bucket, key, ident]) do
         {:ok, meta} ->
           {:ok, file_meta_to_object_meta(meta, key, resolve_etag(bucket, key, meta))}
 
@@ -310,11 +339,12 @@ defmodule NeonFS.S3.Backend do
   end
 
   @impl true
-  def list_objects_v2(_ctx, bucket, opts) do
-    with :ok <- ensure_bucket_exists(bucket) do
+  def list_objects_v2(ctx, bucket, opts) do
+    with {:ok, ident} <- identity_opts(ctx),
+         :ok <- ensure_bucket_exists(bucket) do
       list_path = prefix_to_path(opts.prefix)
 
-      case call_core(:list_files_recursive, [bucket, list_path]) do
+      case call_core(:list_files_recursive, [bucket, list_path, ident]) do
         {:ok, entries} ->
           {:ok, build_list_result(bucket, entries, opts)}
 
@@ -337,11 +367,12 @@ defmodule NeonFS.S3.Backend do
      }}
   end
 
-  def copy_object(_ctx, bucket, dest_key, bucket, source_key) do
-    with :ok <- ensure_bucket_exists(bucket),
-         {:ok, source_meta} <- fetch_object_meta(bucket, source_key),
-         {:ok, %{stream: source_stream}} <- try_stream_read(bucket, source_key, []),
-         write_opts = content_type_write_opts(source_meta),
+  def copy_object(ctx, bucket, dest_key, bucket, source_key) do
+    with {:ok, ident} <- identity_opts(ctx),
+         :ok <- ensure_bucket_exists(bucket),
+         {:ok, source_meta} <- fetch_object_meta(bucket, source_key, ident),
+         {:ok, %{stream: source_stream}} <- try_stream_read(bucket, source_key, ident),
+         write_opts = content_type_write_opts(source_meta) ++ ident,
          {tracked, finish} = track_md5_and_size(source_stream),
          {:ok, dest_meta} <- stream_write(bucket, dest_key, tracked, write_opts) do
       %{md5: md5} = finish.()
@@ -627,6 +658,25 @@ defmodule NeonFS.S3.Backend do
   defp stream_content_length(file_size, []), do: file_size
   defp stream_content_length(_file_size, opts), do: Keyword.fetch!(opts, :length)
 
+  # The POSIX identity every core call is made under, or a refusal.
+  #
+  # A credential carrying no uid authenticates and is then refused, rather
+  # than defaulting: core reads an absent uid as 0 and
+  # `NeonFS.Core.Authorise.check/4` passes 0 unconditionally, so a default
+  # is a root bypass wearing an identity.
+  defp identity_opts(%{identity: %{uid: uid, gids: gids}})
+       when is_integer(uid) and is_list(gids) do
+    {:ok, [uid: uid, gids: gids]}
+  end
+
+  defp identity_opts(_ctx) do
+    {:error,
+     %Firkin.Error{
+       code: :access_denied,
+       message: "credential has no uid; set one with `neonfs credential create --uid`"
+     }}
+  end
+
   defp call_core(function, args) do
     case Application.get_env(:neonfs_s3, :core_call_fn) do
       # core_call/3 routes volume-scoped metadata writes to a root holder.
@@ -743,8 +793,8 @@ defmodule NeonFS.S3.Backend do
     end
   end
 
-  defp fetch_object_meta(bucket, key) do
-    case call_core(:get_file_meta, [bucket, key]) do
+  defp fetch_object_meta(bucket, key, ident) do
+    case call_core(:get_file_meta, [bucket, key, ident]) do
       {:ok, meta} -> {:ok, meta}
       {:error, :not_found} -> {:error, %Firkin.Error{code: :no_such_key}}
       {:error, %{class: :not_found}} -> {:error, %Firkin.Error{code: :no_such_key}}

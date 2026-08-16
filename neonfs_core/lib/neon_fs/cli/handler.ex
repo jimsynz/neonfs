@@ -1181,8 +1181,8 @@ defmodule NeonFS.CLI.Handler do
   - `{:ok, map}` - Credential details including secret key (shown once)
   - `{:error, reason}` - Error tuple
   """
-  @spec handle_credential_create(term()) :: {:ok, map()} | {:error, term()}
-  defdelegate handle_credential_create(identity), to: CredentialHandler
+  @spec handle_credential_create(term(), map()) :: {:ok, map()} | {:error, term()}
+  defdelegate handle_credential_create(identity, opts \\ %{}), to: CredentialHandler
 
   @doc """
   Lists credentials, optionally filtered by identity.

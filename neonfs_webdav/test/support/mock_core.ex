@@ -201,7 +201,9 @@ defmodule NeonFS.WebDAV.Test.MockCore do
   end
 
   @spec delete_file(String.t(), String.t()) :: :ok | {:error, :not_found}
-  def delete_file(volume_name, path) do
+  def delete_file(volume_name, path, opts \\ []) do
+    record_identity(:delete_file, opts)
+
     files = Process.get(:mock_files, %{})
     normalised = normalise_path(path)
     key = {volume_name, normalised}
@@ -224,7 +226,9 @@ defmodule NeonFS.WebDAV.Test.MockCore do
   end
 
   @spec get_file_meta(String.t(), String.t()) :: {:ok, FileMeta.t()} | {:error, :not_found}
-  def get_file_meta(volume_name, path) do
+  def get_file_meta(volume_name, path, opts \\ []) do
+    record_identity(:get_file_meta, opts)
+
     files = Process.get(:mock_files, %{})
     key = {volume_name, normalise_path(path)}
 
@@ -237,6 +241,8 @@ defmodule NeonFS.WebDAV.Test.MockCore do
   @spec update_file_meta(String.t(), String.t(), keyword()) ::
           {:ok, FileMeta.t()} | {:error, :not_found}
   def update_file_meta(volume_name, path, updates) do
+    record_identity(:update_file_meta, updates)
+
     files = Process.get(:mock_files, %{})
     key = {volume_name, normalise_path(path)}
 
@@ -276,7 +282,9 @@ defmodule NeonFS.WebDAV.Test.MockCore do
   end
 
   @spec list_dir(String.t(), String.t()) :: {:ok, [FileMeta.t()]} | {:error, :not_found}
-  def list_dir(volume_name, path \\ "/") do
+  def list_dir(volume_name, path \\ "/", opts \\ []) do
+    record_identity(:list_dir, opts)
+
     volumes = Process.get(:mock_volumes, %{})
 
     if Map.has_key?(volumes, volume_name) do
@@ -298,7 +306,9 @@ defmodule NeonFS.WebDAV.Test.MockCore do
   end
 
   @spec mkdir(String.t(), String.t()) :: {:ok, FileMeta.t()} | {:error, term()}
-  def mkdir(volume_name, path) do
+  def mkdir(volume_name, path, opts \\ []) do
+    record_identity(:mkdir, opts)
+
     volumes = Process.get(:mock_volumes, %{})
 
     if Map.has_key?(volumes, volume_name) do
@@ -325,7 +335,9 @@ defmodule NeonFS.WebDAV.Test.MockCore do
   end
 
   @spec rename_file(String.t(), String.t(), String.t()) :: :ok | {:error, :not_found}
-  def rename_file(volume_name, old_path, new_path) do
+  def rename_file(volume_name, old_path, new_path, opts \\ []) do
+    record_identity(:rename_file, opts)
+
     files = Process.get(:mock_files, %{})
     old_normalised = normalise_path(old_path)
     new_normalised = normalise_path(new_path)
@@ -379,5 +391,17 @@ defmodule NeonFS.WebDAV.Test.MockCore do
 
     String.starts_with?(file_path, parent_with_slash) and
       not String.contains?(String.trim_leading(file_path, parent_with_slash), "/")
+  end
+
+  # Lets a test assert that a request reached core carrying an identity
+  # rather than defaulting to uid 0, which is the bypass this exists to
+  # catch. Delivered to the test process when one has registered interest.
+  def record_identity(function, opts) do
+    case Process.whereis(:webdav_identity_probe) do
+      nil -> :ok
+      pid -> send(pid, {:core_identity, function, Keyword.take(opts, [:uid, :gids])})
+    end
+
+    :ok
   end
 end

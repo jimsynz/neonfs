@@ -39,7 +39,13 @@ defmodule NeonFS.Core do
   def lookup_credential(access_key_id) do
     case CredentialManager.lookup(access_key_id) do
       {:ok, credential} ->
-        {:ok, %{secret_access_key: credential.secret_access_key, identity: credential.identity}}
+        {:ok,
+         %{
+           secret_access_key: credential.secret_access_key,
+           identity: credential.identity,
+           uid: credential.uid,
+           gids: credential.gids
+         }}
 
       {:error, :not_found} ->
         {:error, NotFound.exception(message: "Credential not found")}
