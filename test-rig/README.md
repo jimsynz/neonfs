@@ -81,7 +81,20 @@ sudo usermod -aG kvm "$USER"
 ```
 
 The rig auto-detects a writable `/dev/kvm` and uses `accel=kvm` when available,
-falling back to TCG otherwise.
+warning and falling back to TCG otherwise. Slow beats refusing to start when
+you are driving it by hand.
+
+A non-interactive caller usually cannot tolerate that fallback, so set
+`REQUIRE_KVM=1` to make a missing device an immediate error instead:
+
+```bash
+REQUIRE_KVM=1 ./neonfs-rig up
+```
+
+Both CI jobs that boot the rig set it. Without it a nightly acceptance run
+times out at 240 minutes with nothing in the log to say why, and the weekly
+benchmark produces numbers ~10× off that enter the regression window looking
+like a regression rather than like emulation.
 
 ## Commands
 
@@ -117,6 +130,7 @@ All knobs are environment variables (defaults in parentheses):
 | `COMPRESSION` | `zstd` | Compression for volumes the rig creates (`zstd`/`none`) |
 | `ENCRYPTION` | `none` | Encryption mode (`none`/`server-side`) |
 | `INITIAL_TIER` | _(unset)_ | Initial storage tier (`hot`/`warm`/`cold`); applied via `volume update` post-create |
+| `REQUIRE_KVM` | `0` | Refuse to start without a writable `/dev/kvm` instead of falling back to TCG (`1`/`true`/`yes`/`on`) |
 | `DIST_PORT` | `9100` | Pinned Erlang distribution port (`NEONFS_DIST_PORT`) |
 | `SSH_BASE_PORT` | `2230` | Host port for node `n` SSH is `SSH_BASE_PORT + n` |
 

@@ -35,6 +35,14 @@ REPLICAS="${REPLICAS:-${NODES}}"
 # encryption are `volume create` flags; tiering is a post-create `volume update`
 # (no create flag). Erasure has no CLI create flag yet (tracked separately), so
 # it isn't a rig knob.
+# Refuse to boot without /dev/kvm rather than falling through to TCG, which
+# is roughly ten times slower. The interactive default is to warn and carry
+# on — slow beats refusing to start on a laptop — but a non-interactive
+# caller usually cannot tolerate it: a CI job times out with nothing in the
+# log to say why, and a benchmark produces numbers ~10x off that read as a
+# regression rather than as emulation.
+REQUIRE_KVM="${REQUIRE_KVM:-0}"
+
 COMPRESSION="${COMPRESSION:-zstd}"
 ENCRYPTION="${ENCRYPTION:-none}"
 INITIAL_TIER="${INITIAL_TIER:-}"
@@ -104,7 +112,25 @@ require_tools() {
     command -v "$t" >/dev/null 2>&1 || missing+=("$t")
   done
   [ "${#missing[@]}" -eq 0 ] || die "missing tools: ${missing[*]} (see test-rig/README.md)"
-  [ -w /dev/kvm ] || warn "/dev/kvm not writable — VMs will fall back to slow TCG emulation"
+  [ -w /dev/kvm ] || no_kvm
+}
+
+# Truthy spellings beyond `1` are accepted because the alternative is a
+# caller who asked for the check, did not get it, and cannot tell.
+require_kvm_requested() {
+  case "$(printf '%s' "${REQUIRE_KVM}" | tr '[:upper:]' '[:lower:]')" in
+    1 | true | yes | on) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+no_kvm() {
+  if require_kvm_requested; then
+    die "/dev/kvm is not present or not writable, and REQUIRE_KVM is set — \
+TCG emulation is ~10x slower, so this would not fail so much as never finish"
+  fi
+
+  warn "/dev/kvm not writable — VMs will fall back to slow TCG emulation"
 }
 
 ensure_image() {
