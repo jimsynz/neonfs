@@ -1039,16 +1039,20 @@ defmodule NeonFS.Client.ChunkReaderTest do
       assert metadata.source == :buffered
     end
 
-    # Core rebuilds a whole stripe from parity to serve any part of it, so
-    # a ten-byte read of a stripe costs the stripe.
-    test "the degraded-erasure walk reports the whole stripe per call", %{ref_tel: ref_tel} do
+    # Core rebuilds a degraded stripe from whole chunks to serve any part of
+    # it, and only core knows the geometry — so the figure comes from the
+    # refusal, per stripe, not from the stripe's byte range. Each stripe here
+    # spans 100 bytes but costs thousands to rebuild, which is the gap this
+    # measurement exists to close: a file's final stripe can hold a few
+    # hundred bytes and still cost every one of its chunks.
+    test "the degraded-erasure walk reports what core sized each stripe at", %{ref_tel: ref_tel} do
       stripes = [
         %{stripe_id: "s1", byte_range: {0, 100}},
         %{stripe_id: "s2", byte_range: {100, 200}}
       ]
 
       expect(Router, :call, fn NeonFS.Core, :read_file_refs, _ ->
-        {:error, {:stripe_refs_unsupported, nil}}
+        {:error, {:stripe_refs_unsupported, %{"s1" => 4096, "s2" => 8192}}}
       end)
 
       expect(Router, :call, fn NeonFS.Core, :get_file_meta, ["vol", "/ec.bin" | _] ->
@@ -1067,22 +1071,86 @@ defmodule NeonFS.Client.ChunkReaderTest do
       assert_received {[:neonfs, :client, :chunk_reader, :range_fetched], ^ref_tel, first, meta}
       assert meta.source == :stripe
       assert first.read_length == 10
-      assert first.chunk_bytes == 100
+      assert first.chunk_bytes == 4096
 
       assert_received {[:neonfs, :client, :chunk_reader, :range_fetched], ^ref_tel, second, _meta}
       assert second.read_length == 10
-      assert second.chunk_bytes == 100
+      assert second.chunk_bytes == 8192
+    end
+
+    # The breakdown comes from `read_file_refs` and the stripe list from a
+    # separate `get_file_meta`, so a file changing between the two calls can
+    # leave a stripe unaccounted. That is a real race with no correct number
+    # available — so that stripe's measurement is omitted and its siblings
+    # still report, rather than the walk going dark or claiming zero.
+    test "a stripe missing from the breakdown omits only its own chunk_bytes", %{
+      ref_tel: ref_tel
+    } do
+      stripes = [
+        %{stripe_id: "s1", byte_range: {0, 100}},
+        %{stripe_id: "s2", byte_range: {100, 200}}
+      ]
+
+      expect(Router, :call, fn NeonFS.Core, :read_file_refs, _ ->
+        {:error, {:stripe_refs_unsupported, %{"s1" => 4096}}}
+      end)
+
+      expect(Router, :call, fn NeonFS.Core, :get_file_meta, ["vol", "/ec.bin" | _] ->
+        {:ok, %{size: 200, stripes: stripes}}
+      end)
+
+      expect(Router, :call, 2, fn NeonFS.Core, :read_file, ["vol", "/ec.bin", opts] ->
+        {:ok, String.duplicate("A", opts[:length])}
+      end)
+
+      assert {:ok, %{stream: stream}} =
+               ChunkReader.read_file_stream("vol", "/ec.bin", offset: 90, length: 20)
+
+      assert Enum.into(stream, <<>>) == String.duplicate("A", 20)
+
+      assert_received {[:neonfs, :client, :chunk_reader, :range_fetched], ^ref_tel, first, _meta}
+      assert first.chunk_bytes == 4096
+
+      assert_received {[:neonfs, :client, :chunk_reader, :range_fetched], ^ref_tel, second, _meta}
+      assert second.read_length == 10
+
+      refute Map.has_key?(second, :chunk_bytes),
+             "a stripe with no entry must not be reported as zero"
+    end
+
+    # A walk core could not size at all reports nothing rather than zero,
+    # the same convention one unsized stripe follows.
+    test "an unsizable degraded walk omits chunk_bytes on every stripe", %{ref_tel: ref_tel} do
+      expect(Router, :call, fn NeonFS.Core, :read_file_refs, _ ->
+        {:error, {:stripe_refs_unsupported, nil}}
+      end)
+
+      expect(Router, :call, fn NeonFS.Core, :get_file_meta, ["vol", "/ec.bin" | _] ->
+        {:ok, %{size: 100, stripes: [%{stripe_id: "s1", byte_range: {0, 100}}]}}
+      end)
+
+      expect(Router, :call, fn NeonFS.Core, :read_file, ["vol", "/ec.bin", opts] ->
+        {:ok, String.duplicate("A", opts[:length])}
+      end)
+
+      assert {:ok, %{stream: stream}} = ChunkReader.read_file_stream("vol", "/ec.bin")
+      assert Enum.into(stream, <<>>) == String.duplicate("A", 100)
+
+      assert_received {[:neonfs, :client, :chunk_reader, :range_fetched], ^ref_tel, only, meta}
+      assert meta.source == :stripe
+      refute Map.has_key?(only, :chunk_bytes)
     end
 
     # The size rides out on the refusal, so this path needs no extra round
     # trip to report what it moved — which is the whole reason the error
-    # carries a payload. 4096 here stands for a degraded stripe's whole
-    # chunks, which is what core counts.
+    # carries a payload. The 4096 here stands for a degraded stripe's whole
+    # chunks, which is what core counts; the buffered path sums the
+    # per-stripe breakdown.
     test "the buffered degraded read reports the size core sent with its refusal", %{
       ref_tel: ref_tel
     } do
       expect(Router, :call, fn NeonFS.Core, :read_file_refs, _ ->
-        {:error, {:stripe_refs_unsupported, 4096}}
+        {:error, {:stripe_refs_unsupported, %{"stripe-a" => 3072, "stripe-b" => 1024}}}
       end)
 
       expect(Router, :call, fn NeonFS.Core, :read_file, _ -> {:ok, "ec-file-bytes"} end)
@@ -1124,7 +1192,7 @@ defmodule NeonFS.Client.ChunkReaderTest do
     # APIs cannot report different numbers for the same read.
     test "the streaming buffered fallback reports core's size too", %{ref_tel: ref_tel} do
       expect(Router, :call, fn NeonFS.Core, :read_file_refs, _ ->
-        {:error, {:stripe_refs_unsupported, 8192}}
+        {:error, {:stripe_refs_unsupported, %{"stripe-a" => 8192}}}
       end)
 
       expect(Router, :call, fn NeonFS.Core, :get_file_meta, _ ->
