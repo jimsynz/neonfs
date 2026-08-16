@@ -8,6 +8,21 @@ defmodule NeonFS.Block.Supervisor do
   The registry starts whether or not the listener does, and before it: a
   device outlives any one connection, so the thing tracking attachments must
   already exist when the first connection arrives.
+
+  ## Why `:rest_for_one`
+
+  That ordering is a dependency, not a preference, so a registry that dies
+  has to take the listener with it. The registry holds each attached device's
+  exclusive attachment claim, and the coordinator releases every claim a dead
+  holder owned — while the connections it served are their own processes and
+  carry on reading and writing. `:one_for_one` would leave exactly that: live
+  NBD traffic against a device the cluster believes is unattached, which the
+  next attach through either route would then be admitted to.
+
+  Restarting the listener closes those connections, which is the honest
+  outcome — their claims are already gone. The reverse direction needs
+  nothing: a listener that dies takes its connections with it, and the
+  registry's monitors release their claims.
   """
 
   use Supervisor
@@ -29,7 +44,7 @@ defmodule NeonFS.Block.Supervisor do
       |> maybe_add_registrar(register?)
       |> Kernel.++(metrics_children())
 
-    Supervisor.init(children, strategy: :one_for_one)
+    Supervisor.init(children, strategy: :rest_for_one)
   end
 
   defp maybe_add_registrar(children, false), do: children
