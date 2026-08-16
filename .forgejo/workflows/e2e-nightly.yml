@@ -37,9 +37,10 @@ on:
   workflow_dispatch:
 
 jobs:
-  # The versioned toolchain image the Samba build needs. Same shape as the
-  # cache-warm workflow: a container image cannot be computed inside the job
-  # that runs in it.
+  # The versioned toolchain image the Samba build needs. Same shape as every
+  # other workflow's `setup`, and the same `ci-toolchain-image` behind it: a
+  # container image cannot be computed inside the job that runs in it, so the
+  # job is per-workflow even though the naming scheme is shared.
   setup:
     runs-on: docker
     timeout-minutes: 10
@@ -56,12 +57,7 @@ jobs:
       - uses: actions/checkout@v7
       - id: parse
         run: |
-          ELIXIR=$(awk '/^elixir/ {print $2}' .tool-versions)
-          ERLANG=$(awk '/^erlang/ {print $2}' .tool-versions)
-          RUST=$(awk '/^rust/ {print $2}' .tool-versions)
-          echo "elixir_rust_image=harton.dev/james/workflows/elixir-rust:${ELIXIR}-erlang-${ERLANG}-rust-${RUST}" >> "$GITHUB_OUTPUT"
-          echo "elixir=${ELIXIR}" >> "$GITHUB_OUTPUT"
-          echo "rust=${RUST}" >> "$GITHUB_OUTPUT"
+          resources/scripts/ci-toolchain-image >> "$GITHUB_OUTPUT"
 
   # =======================================================================
   # The `test-rig` acceptance matrix, in CI for the first time. Everything

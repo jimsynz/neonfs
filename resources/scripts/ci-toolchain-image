@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# Resolve the toolchain versions and CI image tags from `.tool-versions`,
+# and emit them as GITHUB_OUTPUT lines:
+#
+#   elixir=<version>
+#   erlang=<version>
+#   rust=<version>
+#   elixir_image=harton.dev/james/workflows/elixir:<elixir>-erlang-<erlang>
+#   elixir_rust_image=harton.dev/james/workflows/elixir-rust:<elixir>-erlang-<erlang>-rust-<rust>
+#   rust_image=harton.dev/james/workflows/rust:<rust>
+#
+# Used by every workflow's `setup` job:
+#
+#   - id: parse
+#     run: resources/scripts/ci-toolchain-image >> "$GITHUB_OUTPUT"
+#
+# That job cannot go away — a `container:` key is evaluated before any step
+# in the job that uses it, so the image is not computable inside the job it
+# names. What the script removes is five copies of the parsing and the
+# registry path, which would otherwise drift when the naming scheme changes.
+# The drift is silent: a workflow computing a stale tag pulls an image that
+# exists and is wrong, rather than failing.
+#
+# Every workflow gets every line whether it consumes them or not. An output
+# nothing reads costs nothing, and a per-workflow subset is the divergence
+# this exists to end.
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+tool_versions="$repo_root/.tool-versions"
+
+[ -f "$tool_versions" ] || {
+  echo "no .tool-versions at $tool_versions" >&2
+  exit 1
+}
+
+version_of() {
+  local tool="$1" version
+  version="$(awk -v tool="$tool" '$1 == tool {print $2; exit}' "$tool_versions")"
+
+  # An empty version yields a tag like `elixir:-erlang-` — a name that is
+  # merely absent from the registry, so the job fails on a pull whose error
+  # says nothing about `.tool-versions`. Fail here, naming the tool.
+  [ -n "$version" ] || {
+    echo "no '$tool' entry in .tool-versions" >&2
+    exit 1
+  }
+
+  printf '%s' "$version"
+}
+
+elixir="$(version_of elixir)"
+erlang="$(version_of erlang)"
+rust="$(version_of rust)"
+
+registry="harton.dev/james/workflows"
+
+cat <<EOF
+elixir=${elixir}
+erlang=${erlang}
+rust=${rust}
+elixir_image=${registry}/elixir:${elixir}-erlang-${erlang}
+elixir_rust_image=${registry}/elixir-rust:${elixir}-erlang-${erlang}-rust-${rust}
+rust_image=${registry}/rust:${rust}
+EOF

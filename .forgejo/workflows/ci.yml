@@ -68,15 +68,7 @@ jobs:
           fetch-depth: 0
       - id: parse
         run: |
-          ELIXIR=$(awk '/^elixir/ {print $2}' .tool-versions)
-          ERLANG=$(awk '/^erlang/ {print $2}' .tool-versions)
-          RUST=$(awk '/^rust/ {print $2}' .tool-versions)
-          echo "elixir=${ELIXIR}" >> "$GITHUB_OUTPUT"
-          echo "erlang=${ERLANG}" >> "$GITHUB_OUTPUT"
-          echo "rust=${RUST}" >> "$GITHUB_OUTPUT"
-          echo "elixir_image=harton.dev/james/workflows/elixir:${ELIXIR}-erlang-${ERLANG}" >> "$GITHUB_OUTPUT"
-          echo "elixir_rust_image=harton.dev/james/workflows/elixir-rust:${ELIXIR}-erlang-${ERLANG}-rust-${RUST}" >> "$GITHUB_OUTPUT"
-          echo "rust_image=harton.dev/james/workflows/rust:${RUST}" >> "$GITHUB_OUTPUT"
+          resources/scripts/ci-toolchain-image >> "$GITHUB_OUTPUT"
       - id: affected
         run: |
           # Outside the checkout, so nothing downstream sees a stray file.
