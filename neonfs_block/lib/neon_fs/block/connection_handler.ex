@@ -302,6 +302,12 @@ defmodule NeonFS.Block.ConnectionHandler do
   # reissue the request. This says what happened rather than claiming the
   # retry: after the span-scoped commit compare, only two writers to the
   # *same* span can reach here, which a guest filesystem should not produce.
+  # A core-side authorisation refusal. Not reachable while NBD passes no
+  # identity and core reads an absent uid as 0 — but that is a property of
+  # the caller, not of this mapping, and an unmapped denial falls through to
+  # `EIO` below, which reports a permission problem as a device fault.
+  defp error_code(%{class: :forbidden}), do: :eperm
+
   defp error_code(:stale_chunks), do: :eagain
   defp error_code(_reason), do: :eio
 

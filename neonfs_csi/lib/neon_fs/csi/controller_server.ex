@@ -151,9 +151,7 @@ defmodule NeonFS.CSI.ControllerServer do
         existing_volume_response(name, req)
 
       {:error, reason} ->
-        raise GRPC.RPCError,
-          status: :internal,
-          message: "create_volume failed: #{inspect(reason)}"
+        core_error!("create_volume", reason)
     end
   end
 
@@ -243,9 +241,7 @@ defmodule NeonFS.CSI.ControllerServer do
           message: "source volume #{source_volume_id} not found"
 
       {:error, reason} ->
-        raise GRPC.RPCError,
-          status: :internal,
-          message: "clone failed: #{inspect(reason)}"
+        core_error!("clone", reason)
     end
   end
 
@@ -286,7 +282,7 @@ defmodule NeonFS.CSI.ControllerServer do
         raise GRPC.RPCError, status: :not_found, message: "source volume not found"
 
       {:error, reason} ->
-        raise GRPC.RPCError, status: :internal, message: "promote failed: #{inspect(reason)}"
+        core_error!("promote", reason)
     end
   end
 
@@ -318,9 +314,7 @@ defmodule NeonFS.CSI.ControllerServer do
         %DeleteVolumeResponse{}
 
       {:error, reason} ->
-        raise GRPC.RPCError,
-          status: :internal,
-          message: "delete_volume failed: #{inspect(reason)}"
+        core_error!("delete_volume", reason)
     end
   end
 
@@ -372,7 +366,7 @@ defmodule NeonFS.CSI.ControllerServer do
         raise GRPC.RPCError, status: :not_found, message: "volume #{volume_id} not found"
 
       {:error, reason} ->
-        raise GRPC.RPCError, status: :internal, message: "lookup failed: #{inspect(reason)}"
+        core_error!("lookup", reason)
     end
   end
 
@@ -517,9 +511,7 @@ defmodule NeonFS.CSI.ControllerServer do
             "volume #{vol_id} is attached to #{holder_node_id}; detach it before attaching to #{node_id}"
 
       {:error, reason} ->
-        raise GRPC.RPCError,
-          status: :internal,
-          message: "attach failed: #{inspect(reason)}"
+        core_error!("attach", reason)
     end
   end
 
@@ -598,7 +590,7 @@ defmodule NeonFS.CSI.ControllerServer do
         raise GRPC.RPCError, status: :not_found, message: "volume #{vol_id} not found"
 
       {:error, reason} ->
-        raise GRPC.RPCError, status: :internal, message: "lookup failed: #{inspect(reason)}"
+        core_error!("lookup", reason)
     end
   end
 
@@ -637,7 +629,7 @@ defmodule NeonFS.CSI.ControllerServer do
           message: "source volume #{source_volume_id} not found"
 
       {:error, reason} ->
-        raise GRPC.RPCError, status: :internal, message: "lookup failed: #{inspect(reason)}"
+        core_error!("lookup", reason)
     end
   end
 
@@ -660,9 +652,7 @@ defmodule NeonFS.CSI.ControllerServer do
             %CreateSnapshotResponse{snapshot: csi_snapshot_from(snap, volume)}
 
           {:error, reason} ->
-            raise GRPC.RPCError,
-              status: :internal,
-              message: "create_snapshot failed: #{inspect(reason)}"
+            core_error!("create_snapshot", reason)
         end
     end
   end
@@ -719,9 +709,7 @@ defmodule NeonFS.CSI.ControllerServer do
         %DeleteSnapshotResponse{}
 
       {:error, reason} ->
-        raise GRPC.RPCError,
-          status: :internal,
-          message: "delete_snapshot failed: #{inspect(reason)}"
+        core_error!("delete_snapshot", reason)
     end
   end
 
@@ -746,9 +734,7 @@ defmodule NeonFS.CSI.ControllerServer do
             paginate_snapshots(snapshots, volume, req)
 
           {:error, reason} ->
-            raise GRPC.RPCError,
-              status: :internal,
-              message: "list_snapshots failed: #{inspect(reason)}"
+            core_error!("list_snapshots", reason)
         end
 
       {:error, :not_found} ->
@@ -1025,5 +1011,19 @@ defmodule NeonFS.CSI.ControllerServer do
       nil -> Router.call(module, function, args)
       fun when is_function(fun, 3) -> fun.(module, function, args)
     end
+  end
+
+  # A core error becomes a gRPC status. A refusal is `PERMISSION_DENIED`, not
+  # `INTERNAL`: an authorisation denial is an answer, and reporting it as a
+  # server fault makes the CO retry something that will never succeed — and
+  # hides the reason from an operator reading the event.
+  defp core_error!(operation, %{class: :forbidden} = reason) do
+    raise GRPC.RPCError,
+      status: :permission_denied,
+      message: "#{operation} refused: #{Exception.message(reason)}"
+  end
+
+  defp core_error!(operation, reason) do
+    raise GRPC.RPCError, status: :internal, message: "#{operation} failed: #{inspect(reason)}"
   end
 end

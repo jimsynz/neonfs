@@ -23,6 +23,7 @@ defmodule NeonFS.CSI.ControllerServerTest do
   alias NeonFS.Core.Volume
   alias NeonFS.CSI.{ControllerServer, VolumeHealth}
   alias NeonFS.Error.AlreadyExists
+  alias NeonFS.Error.PermissionDenied
 
   setup do
     VolumeHealth.reset_table()
@@ -133,6 +134,25 @@ defmodule NeonFS.CSI.ControllerServerTest do
         )
 
       assert reply.volume.volume_id == "pvc-2"
+    end
+
+    # A denial is an answer, not a server fault. `INTERNAL` makes the CO
+    # retry something that will never succeed, and buries the reason.
+    test "raises permission_denied when core refuses, not internal" do
+      put_core(fn NeonFS.Core, :create_volume, _ ->
+        {:error, PermissionDenied.exception(operation: :create_volume, uid: 1000)}
+      end)
+
+      error =
+        assert_raise GRPC.RPCError, fn ->
+          ControllerServer.create_volume(
+            %CreateVolumeRequest{name: "pvc-denied", volume_capabilities: caps()},
+            nil
+          )
+        end
+
+      assert error.status == GRPC.Status.permission_denied()
+      assert error.message =~ "refused"
     end
 
     test "raises invalid_argument when name is missing" do

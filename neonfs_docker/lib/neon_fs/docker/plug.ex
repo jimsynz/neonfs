@@ -159,6 +159,9 @@ defmodule NeonFS.Docker.Plug do
             "mount pool full — refuse to allocate a new FUSE mount past the configured `:max_mounts`"
         })
 
+      {:error, %{class: :forbidden} = reason} ->
+        reply(conn, 200, %{"Err" => "mount refused: #{Exception.message(reason)}"})
+
       {:error, reason} ->
         reply(conn, 200, %{"Err" => "mount failed: #{inspect(reason)}"})
     end
@@ -173,6 +176,9 @@ defmodule NeonFS.Docker.Plug do
     else
       {:error, message} when is_binary(message) ->
         reply(conn, 200, %{"Err" => message})
+
+      {:error, %{class: :forbidden} = reason} ->
+        reply(conn, 200, %{"Err" => "unmount refused: #{Exception.message(reason)}"})
 
       {:error, reason} ->
         reply(conn, 200, %{"Err" => "unmount failed: #{inspect(reason)}"})
@@ -227,10 +233,20 @@ defmodule NeonFS.Docker.Plug do
     # `:badrpc` failover retry. A retry after a timed-out but
     # server-side-successful create resolves via the conflict clause.
     case NeonFS.Client.Router.call(NeonFS.Core, :create_volume, [name, opts], timeout: 35_000) do
-      {:ok, _volume} -> :ok
-      {:error, %{class: :conflict}} -> :ok
-      {:error, :already_exists} -> :ok
-      {:error, reason} -> {:error, "core create_volume failed: #{inspect(reason)}"}
+      {:ok, _volume} ->
+        :ok
+
+      {:error, %{class: :conflict}} ->
+        :ok
+
+      {:error, :already_exists} ->
+        :ok
+
+      {:error, %{class: :forbidden} = reason} ->
+        {:error, "core create_volume refused: #{Exception.message(reason)}"}
+
+      {:error, reason} ->
+        {:error, "core create_volume failed: #{inspect(reason)}"}
     end
   end
 
