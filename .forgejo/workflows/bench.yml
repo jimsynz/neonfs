@@ -59,7 +59,7 @@ jobs:
         run: |
           apt-get update -y
           apt-get install -y --no-install-recommends \
-            qemu-system-x86 qemu-utils cloud-image-utils jq openssh-client unzip
+            qemu-system-x86 qemu-utils cloud-image-utils jq openssh-client gettext-base unzip
           if ! command -v nfpm >/dev/null 2>&1; then
             curl -fsSL -o /tmp/nfpm.tgz \
               https://github.com/goreleaser/nfpm/releases/download/v2.46.3/nfpm_2.46.3_Linux_x86_64.tar.gz

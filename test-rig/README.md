@@ -45,11 +45,17 @@ itself), then verifies the node is registered as an `nfs` service in
 
 ## Requirements
 
-The rig needs QEMU and the cloud-init seed tooling on the host:
+The rig needs QEMU, the cloud-init seed tooling, an ssh client and
+`envsubst` on the host:
 
 ```bash
-sudo apt-get install qemu-system-x86 qemu-utils cloud-image-utils
+sudo apt-get install qemu-system-x86 qemu-utils cloud-image-utils \
+  openssh-client gettext-base
 ```
+
+An interactive Linux host usually has the last two already, which is why
+they went unnamed until the CI job started running in a container that did
+not. `require_tools` checks for all of them before doing any work.
 
 It also needs `nfpm` to build the `.deb` packages (only the first time, or
 after a clean):
