@@ -114,6 +114,7 @@ defmodule NeonFS.Block.Protocol do
     ok: 0,
     eperm: 1,
     eio: 5,
+    eagain: 11,
     enomem: 12,
     einval: 22,
     enospc: 28,

@@ -291,6 +291,18 @@ defmodule NeonFS.Block.ConnectionHandler do
   defp error_code({:out_of_range, _offset, _length, _size}), do: :einval
   defp error_code({:unaligned_request, _offset, _length}), do: :einval
   defp error_code({:invalid_device_size, _size}), do: :einval
+
+  # A write that exhausted its retry budget against a genuinely contended
+  # span. Nothing was lost, so `EIO` — which is what an unmapped reason gets
+  # — would fail a write that never failed, and a guest ext4 typically
+  # remounts read-only over one.
+  #
+  # NBD defines no "retry" status, and the Linux client's handling of an
+  # error outside its known set is not a guarantee that the block layer will
+  # reissue the request. This says what happened rather than claiming the
+  # retry: after the span-scoped commit compare, only two writers to the
+  # *same* span can reach here, which a guest filesystem should not produce.
+  defp error_code(:stale_chunks), do: :eagain
   defp error_code(_reason), do: :eio
 
   defp attach(name, state) do
