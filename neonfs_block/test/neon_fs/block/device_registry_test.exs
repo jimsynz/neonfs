@@ -16,14 +16,7 @@ defmodule NeonFS.Block.DeviceRegistryTest do
     Application.put_env(:neonfs_block, :core_call_fn, fn _module, function, args ->
       send(test, {:core_call, function, args})
 
-      case function do
-        :device_path ->
-          "/dev.img"
-
-        :open_device ->
-          {:ok,
-           %{file_id: "file", size: 4096, logical_block_bytes: 512, physical_block_bytes: 512}}
-      end
+      {:ok, %{file_id: "file", size: 4096, logical_block_bytes: 512, physical_block_bytes: 512}}
     end)
 
     on_exit(fn -> Application.delete_env(:neonfs_block, :core_call_fn) end)
@@ -56,24 +49,24 @@ defmodule NeonFS.Block.DeviceRegistryTest do
                DeviceRegistry.attach("vol:", self(), registry)
     end
 
+    # Resolved from the shared constant rather than asked of core: the value
+    # is cluster-wide and `neonfs_client` carries it, so a bare export costs
+    # no round trip of its own.
     test "a bare volume names that volume's own device", %{registry: registry} do
       test = self()
 
       Application.put_env(:neonfs_block, :core_call_fn, fn _module, function, args ->
         send(test, {:core_call, function, args})
-
-        case function do
-          :device_path -> "/dev.img"
-          :open_device -> {:error, :not_found}
-        end
+        {:error, :not_found}
       end)
 
       on_exit(fn -> Application.delete_env(:neonfs_block, :core_call_fn) end)
 
       DeviceRegistry.attach("blockvol", self(), registry)
 
-      assert_receive {:core_call, :device_path, []}
-      assert_receive {:core_call, :open_device, ["blockvol", "/dev.img"]}
+      expected_path = BlockAttachment.default_device_path()
+      assert_receive {:core_call, :open_device, ["blockvol", ^expected_path]}
+      refute_received {:core_call, :device_path, []}
     end
 
     test "a failed attach leaves nothing attached", %{registry: registry} do
@@ -98,7 +91,7 @@ defmodule NeonFS.Block.DeviceRegistryTest do
 
       assert {:ok, _device} = DeviceRegistry.attach("blockvol", self(), registry)
 
-      expected = BlockAttachment.path("blockvol", "/dev.img")
+      expected = BlockAttachment.path("blockvol", BlockAttachment.default_device_path())
       assert_receive {:coordinator_call, :claim_path_for, [^expected, :exclusive, _holder]}
     end
 
