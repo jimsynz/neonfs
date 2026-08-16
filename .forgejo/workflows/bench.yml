@@ -9,31 +9,74 @@ on:
   workflow_dispatch:
 
 jobs:
+  # The versioned toolchain image, parsed out of `.tool-versions`. It has to
+  # be its own job because a `container:` key is evaluated before any step in
+  # that job runs, so the image cannot be computed inside the job that uses
+  # it. Same shape as `e2e-nightly.yml`'s `setup`; that duplication is the
+  # accepted cost of the image name being needed in three workflows.
+  setup:
+    runs-on: docker
+    timeout-minutes: 10
+    container:
+      image: harton.dev/james/workflows/ci-base:latest
+    outputs:
+      elixir_rust_image: ${{ steps.parse.outputs.elixir_rust_image }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: parse
+        run: |
+          ELIXIR=$(awk '/^elixir/ {print $2}' .tool-versions)
+          ERLANG=$(awk '/^erlang/ {print $2}' .tool-versions)
+          RUST=$(awk '/^rust/ {print $2}' .tool-versions)
+          echo "elixir_rust_image=harton.dev/james/workflows/elixir-rust:${ELIXIR}-erlang-${ERLANG}-rust-${RUST}" >> "$GITHUB_OUTPUT"
+
   bench:
-    # The rig needs QEMU + /dev/kvm (TCG is ~10x slower), so it can't run on the
-    # containerised `docker` runners. `jeb` is the KVM-capable bare-metal runner.
+    needs: setup
+    # The rig needs QEMU + /dev/kvm (TCG is ~10x slower). `jeb` names the
+    # amd64 host that has that device — every label on this instance
+    # resolves to a container, so the device is passed through rather than
+    # the job running on the host.
     runs-on: jeb
     # The standard config matrix (baseline/durable/spread) runs serially — the
     # rig is sequential, no competing VMs — so allow plenty of wall time.
     timeout-minutes: 720
+    container:
+      image: ${{ needs.setup.outputs.elixir_rust_image }}
+      options: --privileged --device /dev/kvm
 
     steps:
       - uses: actions/checkout@v7
 
+      # No `sudo`: the container runs as root. The toolchain comes from the
+      # image, so only QEMU and nfpm are provisioned here.
       - name: Install rig prerequisites
         run: |
-          sudo apt-get update -y
-          sudo apt-get install -y --no-install-recommends \
+          apt-get update -y
+          apt-get install -y --no-install-recommends \
             qemu-system-x86 qemu-utils cloud-image-utils jq unzip
           if ! command -v nfpm >/dev/null 2>&1; then
             curl -fsSL -o /tmp/nfpm.tgz \
               https://github.com/goreleaser/nfpm/releases/download/v2.46.3/nfpm_2.46.3_Linux_x86_64.tar.gz
-            sudo tar -C /usr/local/bin -xzf /tmp/nfpm.tgz nfpm
+            tar -C /usr/local/bin -xzf /tmp/nfpm.tgz nfpm
           fi
 
-      - name: Provision toolchain from .tool-versions
+      # `require_tools` only warns about a missing /dev/kvm and falls through
+      # to TCG. For a benchmark that is worse than a failure: the numbers
+      # would be ~10x off and would feed the rolling window as a regression
+      # that is really an emulation artefact.
+      - name: Require /dev/kvm
         run: |
-          asdf install
+          if [ ! -w /dev/kvm ]; then
+            echo "/dev/kvm is not present or not writable in this container." >&2
+            echo "The job's container needs --device /dev/kvm; TCG numbers are not comparable." >&2
+            exit 1
+          fi
+
+      # The image carries Elixir and Rust, so nothing installs a toolchain
+      # here — but hex and rebar are per-user and the bench harness runs
+      # `mix deps.get` on the host side.
+      - name: Install hex and rebar
+        run: |
           mix local.hex --force
           mix local.rebar --force
 
