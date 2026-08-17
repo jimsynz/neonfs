@@ -49,6 +49,30 @@ defmodule NeonFS.CSI.SupervisorTest do
     assert children == []
   end
 
+  # The defect this closes: the child spec passed `ip:` at the top level,
+  # which `GRPC.Server.Supervisor` raises on, and omitted `start_server:`,
+  # which defaults to false and loads the supervisor with no listener at all.
+  # Either way the socket never appeared, so every CSI sidecar sat in "Still
+  # connecting" until it timed out. Asserting the socket exists is the only
+  # form of this test that would have failed.
+  test "opens the unix socket the CO's sidecars dial" do
+    socket_path =
+      Path.join(
+        System.tmp_dir!(),
+        "neonfs_csi_listener_#{System.unique_integer([:positive])}/csi.sock"
+      )
+
+    Application.put_env(:neonfs_csi, :socket_path, socket_path)
+    on_exit(fn -> File.rm_rf(Path.dirname(socket_path)) end)
+
+    start_supervised!({NeonFS.CSI.Supervisor, []})
+
+    assert [_listener] = Supervisor.which_children(NeonFS.CSI.Supervisor)
+
+    assert File.exists?(socket_path),
+           "the gRPC listener did not create #{socket_path}"
+  end
+
   describe "service registration metadata" do
     setup do
       on_exit(fn -> Application.delete_env(:neonfs_csi, :mode) end)
