@@ -14,7 +14,11 @@ defmodule NeonFS.CSI.RuntimeConfigTest do
   @runtime_config "config/runtime.exs"
 
   setup do
-    on_exit(fn -> System.delete_env("NEONFS_CSI_MODE") end)
+    on_exit(fn ->
+      System.delete_env("NEONFS_CSI_MODE")
+      System.delete_env("NEONFS_CORE_NODE")
+    end)
+
     :ok
   end
 
@@ -29,6 +33,18 @@ defmodule NeonFS.CSI.RuntimeConfigTest do
 
     System.put_env("NEONFS_CSI_MODE", "controller")
     assert Config.Reader.read!(@runtime_config) == [neonfs_csi: [mode: :controller]]
+  end
+
+  # `NeonFS.Client.Connection` dials `:bootstrap_nodes`, and nothing populated
+  # it: the driver reported "No core node connection" forever no matter what
+  # `NEONFS_CORE_NODE` said.
+  test "NEONFS_CORE_NODE becomes the client's bootstrap node" do
+    System.put_env("NEONFS_CORE_NODE", "neonfs@10.0.0.1")
+
+    config = Config.Reader.read!(@runtime_config)
+
+    assert config[:neonfs_client][:bootstrap_nodes] == [:"neonfs@10.0.0.1"]
+    assert config[:neonfs_csi][:core_node] == :"neonfs@10.0.0.1"
   end
 
   # A typo'd mode would otherwise be indistinguishable from an unset one, and
