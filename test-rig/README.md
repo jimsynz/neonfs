@@ -61,6 +61,24 @@ within a bounded wait, not the installer exiting 0.
 
 `down` and `clean` stop and remove it like any other node.
 
+```bash
+./neonfs-rig up                 # a NeonFS cluster the driver can reach
+./neonfs-rig k3s
+./neonfs-rig csi-deploy         # join, side-load a HEAD image, install the chart
+```
+
+`csi-deploy` gives the k3s VM a cluster identity (`neonfs-nfs` installed purely
+as the join vehicle — `cluster join` redeems through a *local* daemon, and there
+is no `neonfs-csi` deb), builds the CSI image from HEAD with
+`containers/bake.sh --load csi`, imports it with `k3s ctr images import`, then
+validates the chart with `helm install --dry-run=server` before installing it.
+The pods mount the VM's `/var/lib/neonfs/tls` and share its identity, which is
+why they run `hostNetwork` on distinct distribution ports.
+
+Publishing the released image was rejected deliberately: the nightly would then
+test the last *release*, so a CSI regression merged today would stay invisible
+until the next one.
+
 ## Requirements
 
 The rig needs QEMU, the cloud-init seed tooling, an ssh client and

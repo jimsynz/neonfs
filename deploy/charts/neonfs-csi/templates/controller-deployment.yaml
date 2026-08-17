@@ -108,8 +108,10 @@ spec:
         - name: neonfs-csi
           image: {{ include "neonfs-csi.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          args:
-            - controller
+          {{- with .Values.controller.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           env:
             - name: CSI_ENDPOINT
               value: unix://{{ .Values.controller.socketPath }}
@@ -121,6 +123,9 @@ spec:
                   name: {{ include "neonfs-csi.bootstrapSecretName" . }}
                   key: {{ .Values.bootstrap.secretKey }}
                   optional: true
+            {{- with .Values.controller.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           ports:
             - containerPort: {{ .Values.controller.livenessProbe.healthPort }}
               name: healthz
@@ -140,6 +145,12 @@ spec:
           volumeMounts:
             - name: socket-dir
               mountPath: {{ dir .Values.controller.socketPath }}
+            {{- with .Values.controller.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
       volumes:
         - name: socket-dir
           emptyDir: {}
+        {{- with .Values.controller.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}

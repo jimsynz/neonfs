@@ -100,6 +100,11 @@ node_scp() {
   scp "${ssh_opts[@]}" -P "$(node_ssh_port "$i")" "$@"
 }
 
+node_scp_dir() {
+  local i="$1"; shift
+  scp -r "${ssh_opts[@]}" -P "$(node_ssh_port "$i")" "$@"
+}
+
 # Run the neonfs CLI on a node (as root, so it reads the runtime files the
 # daemon wrote under /run/neonfs and the TLS material under /var/lib/neonfs).
 node_cli() {
@@ -528,6 +533,225 @@ k3s_assert_ready() {
   node_ssh "$i" "sudo k3s kubectl get nodes" >&2 || true
   node_ssh "$i" "sudo journalctl -u k3s --no-pager -n 100" >&2 || true
   die "k3s node did not become Ready within 300s"
+}
+
+# --- CSI driver in k3s -------------------------------------------------------
+
+HELM_VERSION="${HELM_VERSION:-v3.16.4}"
+CSI_RELEASE="${CSI_RELEASE:-neonfs-csi}"
+# The name `containers/bake.hcl` gives the image, so the chart names what was
+# actually loaded. The tag is rig-specific so a side-loaded HEAD build can
+# never be confused with a pulled `latest`.
+CSI_IMAGE_REPO="${CSI_IMAGE_REPO:-ghcr.io/jimsynz/neonfs/csi}"
+CSI_IMAGE_TAG="${CSI_IMAGE_TAG:-rig}"
+CSI_NAMESPACE="${CSI_NAMESPACE:-neonfs-system}"
+
+# One Erlang distribution port per *process*, and with `hostNetwork` these
+# three share the k3s VM's network namespace: the join daemon keeps the rig's
+# usual DIST_PORT, and the two driver pods take the next two.
+CSI_CONTROLLER_DIST_PORT="${CSI_CONTROLLER_DIST_PORT:-9101}"
+CSI_NODE_DIST_PORT="${CSI_NODE_DIST_PORT:-9102}"
+
+# The k3s VM's cluster identity. `neonfs-nfs` is here only as the join
+# vehicle: `cluster join` redeems through a *local* daemon, and there is no
+# `neonfs-csi` deb. It serves nothing — it will show up as an `nfs` service in
+# `node list`, which is noise rather than NFS coverage, so nothing asserts on
+# it. What the driver pods actually consume is the TLS material the join
+# writes to /var/lib/neonfs/tls, mounted in by hostPath.
+k3s_join_cluster() {
+  local i="${K3S_INDEX}"
+
+  # Idempotent: the credentials are what the join is *for*, so their presence
+  # is the thing to test. Redeeming a second invite would work but would leave
+  # the cluster carrying a redundant identity for one VM.
+  if node_ssh "$i" "sudo test -d /var/lib/neonfs/tls"; then
+    log "k3s node already holds cluster credentials — skipping join"
+    return 0
+  fi
+
+  provision_iface_node "$i"
+
+  log "joining the k3s node to cluster '${CLUSTER_NAME}' via invite token"
+  local token
+  token="$(node_cli 1 "cluster create-invite --expires 1h" | grep -oE 'nfs_inv_[A-Za-z0-9_]+' | head -1)"
+  [ -n "${token}" ] || die "could not obtain invite token from node 1"
+  node_cli "$i" "cluster join --token '${token}' --via $(node_ip 1):${CLUSTER_API_PORT}"
+
+  local deadline=$(( SECONDS + 120 ))
+  while [ "${SECONDS}" -lt "${deadline}" ]; do
+    if node_ssh "$i" "sudo test -d /var/lib/neonfs/tls"; then
+      log "OK: cluster credentials present on the k3s node"
+      return 0
+    fi
+    sleep 3
+  done
+
+  die "the k3s node joined but no TLS material appeared under /var/lib/neonfs/tls"
+}
+
+# HEAD, not the published image: pulling `ghcr.io/jimsynz/neonfs/csi` would
+# make the nightly test the last *release*, so a CSI regression merged today
+# would stay invisible until the next one.
+k3s_sideload_csi_image() {
+  local i="${K3S_INDEX}" image="${CSI_IMAGE_REPO}:${CSI_IMAGE_TAG}"
+
+  log "building the CSI image from HEAD (${image})"
+  ( cd "${REPO_ROOT}" && PLATFORMS='linux/amd64' TAG="${CSI_IMAGE_TAG}" containers/bake.sh --load csi )
+
+  log "side-loading the image into k3s"
+  local tarball="${RUN_DIR}/neonfs-csi.tar"
+  docker save "${image}" -o "${tarball}"
+  node_scp "$i" "${tarball}" "rig@127.0.0.1:/tmp/neonfs-csi.tar"
+  rm -f "${tarball}"
+  node_ssh "$i" "sudo k3s ctr images import /tmp/neonfs-csi.tar && rm -f /tmp/neonfs-csi.tar"
+}
+
+# The chart is installed from inside the VM: the k3s API server is only
+# reachable there, the rig's networking being user-mode NAT with one
+# forwarded port.
+# `NeonFS.Epmd` resolves a peer's distribution port from `NEONFS_PEER_PORTS`
+# or from `cluster.json` under the meta directory. The pods mount only the TLS
+# material, not the meta directory, so without this they cannot work out which
+# port core listens on and every connect fails `:nxdomain` — with no error, the
+# driver just reports no core connection forever.
+k3s_peer_ports() {
+  local n out=""
+  for n in $(seq 1 "${NODES}"); do
+    out="${out}${out:+,}$(node_erl "$n"):${DIST_PORT}"
+  done
+  echo "${out}"
+}
+
+k3s_install_chart() {
+  local i="${K3S_INDEX}"
+
+  node_ssh "$i" "command -v helm >/dev/null 2>&1" || {
+    log "installing helm ${HELM_VERSION} on the k3s node"
+    node_ssh "$i" "curl -sfL https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz \
+      | sudo tar -xz -C /usr/local/bin --strip-components=1 linux-amd64/helm"
+  }
+
+  node_ssh "$i" "rm -rf /tmp/neonfs-csi-chart && mkdir -p /tmp/neonfs-csi-chart"
+  node_scp_dir "$i" "${REPO_ROOT}/deploy/charts/neonfs-csi" "rig@127.0.0.1:/tmp/neonfs-csi-chart/"
+
+  # Divergences from the chart defaults, each forced by the rig's shape and
+  # none of them what an operator would install:
+  #   * `pullPolicy: Never` — the image is side-loaded, and `IfNotPresent`
+  #     would still reach for ghcr.io on a digest mismatch.
+  #   * `hostNetwork: true` on the controller — the core VMs have no route to
+  #     a k3s pod CIDR, and core dials interface nodes for RPC.
+  #   * the hostPath TLS mount and `NEONFS_CORE_NODE` — the pods have no
+  #     identity of their own; the chart's own bootstrap path does not work
+  #     (tracked separately) and needs a decision about single-use tokens.
+  #   * `replicaCount: 1` — two controllers on one node would collide on the
+  #     one dist port a host network gives them.
+  node_ssh "$i" "cat > /tmp/neonfs-csi-values.yaml" <<EOF
+image:
+  repository: ${CSI_IMAGE_REPO}
+  tag: ${CSI_IMAGE_TAG}
+  pullPolicy: Never
+controller:
+  replicaCount: 1
+  hostNetwork: true
+  # The image runs as \`nobody\`; the joined VM's distribution key is 0600 and
+  # owned by the \`neonfs\` user, so a \`nobody\` controller cannot start TLS
+  # distribution and never reaches core. Borrowing an identity from the host
+  # means borrowing the uid that can read it.
+  securityContext:
+    runAsUser: 0
+  extraEnv:
+    - name: RELEASE_DISTRIBUTION
+      value: name
+    # Named explicitly, and differently per workload: the default derives
+    # the node name from the pod's hostname, which core cannot dial, and
+    # both pods share the k3s VM's network namespace — two BEAM nodes of
+    # one name on one host would collide.
+    - name: RELEASE_NODE
+      value: neonfs_csi_controller@$(node_ip "${K3S_INDEX}")
+    - name: NEONFS_CORE_NODE
+      value: $(node_erl 1)
+    - name: NEONFS_PEER_PORTS
+      value: "$(k3s_peer_ports)"
+    - name: NEONFS_DIST_PORT
+      value: "${CSI_CONTROLLER_DIST_PORT}"
+  extraVolumes:
+    - name: neonfs-tls
+      hostPath:
+        path: /var/lib/neonfs/tls
+        type: Directory
+  extraVolumeMounts:
+    - name: neonfs-tls
+      mountPath: /var/lib/neonfs/tls
+      readOnly: true
+node:
+  extraEnv:
+    - name: RELEASE_DISTRIBUTION
+      value: name
+    - name: RELEASE_NODE
+      value: neonfs_csi_node@$(node_ip "${K3S_INDEX}")
+    - name: NEONFS_CORE_NODE
+      value: $(node_erl 1)
+    - name: NEONFS_PEER_PORTS
+      value: "$(k3s_peer_ports)"
+    - name: NEONFS_DIST_PORT
+      value: "${CSI_NODE_DIST_PORT}"
+  extraVolumes:
+    - name: neonfs-tls
+      hostPath:
+        path: /var/lib/neonfs/tls
+        type: Directory
+  extraVolumeMounts:
+    - name: neonfs-tls
+      mountPath: /var/lib/neonfs/tls
+      readOnly: true
+storageClass:
+  parameters:
+    replication_factor: "${REPLICAS}"
+EOF
+
+  # Server-side first, so a chart the API server rejects fails saying so
+  # rather than as pods that never appear.
+  log "validating the chart against the API server"
+  node_ssh "$i" "sudo env KUBECONFIG=/etc/rancher/k3s/k3s.yaml helm install ${CSI_RELEASE} /tmp/neonfs-csi-chart/neonfs-csi \
+    --namespace ${CSI_NAMESPACE} --create-namespace \
+    -f /tmp/neonfs-csi-values.yaml --dry-run=server >/dev/null"
+
+  # Uninstalled first rather than upgraded: with `hostNetwork` the controller
+  # binds one fixed dist port on the one node, so a rolling update deadlocks —
+  # the new pod stays Pending on the port the old pod still holds, and the old
+  # one is never retired. Redeploying a rig is not a production upgrade, so
+  # replace rather than roll.
+  node_ssh "$i" "sudo env KUBECONFIG=/etc/rancher/k3s/k3s.yaml helm status ${CSI_RELEASE} \
+    --namespace ${CSI_NAMESPACE} >/dev/null 2>&1" && {
+    log "removing the previous release"
+    node_ssh "$i" "sudo env KUBECONFIG=/etc/rancher/k3s/k3s.yaml helm uninstall ${CSI_RELEASE} \
+      --namespace ${CSI_NAMESPACE} --wait"
+  }
+
+  log "installing the chart"
+  node_ssh "$i" "sudo env KUBECONFIG=/etc/rancher/k3s/k3s.yaml helm install ${CSI_RELEASE} /tmp/neonfs-csi-chart/neonfs-csi \
+    --namespace ${CSI_NAMESPACE} --create-namespace \
+    -f /tmp/neonfs-csi-values.yaml"
+}
+
+# Readiness is the pods' own, waited for by the API server rather than
+# polled: `kubectl wait` fails with the pod's status attached, which is the
+# diagnostic a nightly needs.
+k3s_assert_csi_ready() {
+  local i="${K3S_INDEX}"
+  log "waiting for the CSI controller and node pods to be Ready"
+
+  if ! node_ssh "$i" "sudo k3s kubectl wait --namespace ${CSI_NAMESPACE} \
+    --for=condition=Ready pod --selector app.kubernetes.io/instance=${CSI_RELEASE} \
+    --timeout=300s"; then
+    node_ssh "$i" "sudo k3s kubectl get pods -n ${CSI_NAMESPACE} -o wide" >&2 || true
+    node_ssh "$i" "sudo k3s kubectl describe pods -n ${CSI_NAMESPACE}" >&2 || true
+    node_ssh "$i" "sudo k3s kubectl logs -n ${CSI_NAMESPACE} --selector app.kubernetes.io/instance=${CSI_RELEASE} --all-containers --tail=100" >&2 || true
+    die "CSI pods did not become Ready"
+  fi
+
+  node_ssh "$i" "sudo k3s kubectl get pods -n ${CSI_NAMESPACE} -o wide"
+  log "OK: CSI driver deployed and Ready"
 }
 
 # --- cluster bootstrap -----------------------------------------------------
