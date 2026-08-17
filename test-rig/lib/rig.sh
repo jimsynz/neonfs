@@ -79,6 +79,9 @@ node_ip()       { echo "10.10.10.$(( 10 + $1 ))"; }
 node_erl()      { echo "neonfs@$(node_ip "$1")"; }
 node_ssh_port() { echo "$(( SSH_BASE_PORT + $1 ))"; }
 node_mac_nat()  { printf '52:54:00:13:37:%02x' "$1"; }
+# Memory is per node, because one VM needing more of it is not a reason for
+# every VM to have more: `VM_MEM_<index>` wins over the global `VM_MEM`.
+node_mem()      { local v="VM_MEM_$1"; echo "${!v:-${VM_MEM}}"; }
 node_mac_clus() { printf '52:54:00:13:38:%02x' "$1"; }
 
 ssh_opts=(-i "${SSH_KEY}"
@@ -262,7 +265,7 @@ boot_node() {
     -name "neonfs-${i}"
     -machine "q35,accel=${accel}"
     -cpu "${cpu}"
-    -smp "${VM_CPUS}" -m "${VM_MEM}"
+    -smp "${VM_CPUS}" -m "$(node_mem "$i")"
     -display none
     -drive "if=virtio,file=${dir}/root.qcow2,format=qcow2"
   )
@@ -459,6 +462,72 @@ iface_assert_serving() {
 
   node_cli 1 "node list" >&2 || true
   die "interface node not serving: ${label}"
+}
+
+# --- k3s node ---------------------------------------------------------------
+
+# Its own VM, and not core node 1: k3s rewrites iptables and brings its own
+# containerd, which would sit beside the containerd the docker-storage step
+# installs and break it in ways that look unrelated. Index 8 so it never
+# collides with core nodes (counting up from 1) or the interface node (9).
+K3S_INDEX="${K3S_INDEX:-8}"
+
+# k3s plus a side-loaded image does not fit the 2 GiB every other VM gets, so
+# this VM's per-index memory defaults higher. Expressed through the same
+# `VM_MEM_<index>` override any VM has rather than a k3s-specific knob, which
+# the next VM wanting different memory would only have to duplicate.
+k3s_mem_var="VM_MEM_${K3S_INDEX}"
+[ -n "${!k3s_mem_var:-}" ] || declare -g "${k3s_mem_var}=4096"
+
+# Pinned rather than tracking `stable`, so a k3s release cannot change what
+# the nightly is testing without a commit saying so.
+K3S_VERSION="${K3S_VERSION:-v1.31.5+k3s1}"
+
+# Only k3s — no NeonFS. This slice deliberately proves the k3s half alone, so
+# that a k3s failure stays distinguishable from a join failure; the cluster
+# identity the driver pods need is #1919's, via a `neonfs-nfs` daemon on this
+# same VM.
+provision_k3s_node() {
+  local i="$1"
+  log "installing k3s ${K3S_VERSION} on node ${i}"
+
+  node_ssh "$i" "sudo apt-get update -qq"
+  node_ssh "$i" "sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q curl"
+
+  # `--disable traefik --disable servicelb`: neither is used by anything the
+  # rig installs, and both cost boot time and memory on a VM that is short of
+  # the latter.
+  node_ssh "$i" "curl -sfL https://get.k3s.io | \
+    INSTALL_K3S_VERSION='${K3S_VERSION}' \
+    INSTALL_K3S_EXEC='--disable traefik --disable servicelb' \
+    sudo -E sh -"
+
+  # Readable by the rig user so later steps (and #1919's image import) do not
+  # each have to remember sudo.
+  node_ssh "$i" "sudo install -d -m 0755 /home/rig/.kube"
+  node_ssh "$i" "sudo install -m 0600 -o rig -g rig /etc/rancher/k3s/k3s.yaml /home/rig/.kube/config"
+}
+
+# Readiness is the node reporting `Ready`, not the installer exiting 0: k3s
+# starts its service long before the kubelet registers, so a successful
+# install says nothing about whether anything can be scheduled.
+k3s_assert_ready() {
+  local i="${K3S_INDEX}" deadline=$(( SECONDS + 300 ))
+  log "waiting for the k3s node to report Ready"
+
+  while [ "${SECONDS}" -lt "${deadline}" ]; do
+    if node_ssh "$i" "sudo k3s kubectl get nodes --no-headers 2>/dev/null" |
+      awk '{print $2}' | grep -qx Ready; then
+      log "OK: k3s node Ready"
+      node_ssh "$i" "sudo k3s kubectl get nodes" || true
+      return 0
+    fi
+    sleep 5
+  done
+
+  node_ssh "$i" "sudo k3s kubectl get nodes" >&2 || true
+  node_ssh "$i" "sudo journalctl -u k3s --no-pager -n 100" >&2 || true
+  die "k3s node did not become Ready within 300s"
 }
 
 # --- cluster bootstrap -----------------------------------------------------
