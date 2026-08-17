@@ -20,3 +20,17 @@ case System.get_env("NEONFS_CSI_MODE") do
   other ->
     raise "NEONFS_CSI_MODE must be \"controller\" or \"node\", got #{inspect(other)}"
 end
+
+# `NeonFS.Client.Connection` dials `:neonfs_client, :bootstrap_nodes`, which
+# nothing populated here — so a release had no idea which core node to reach
+# and `Discovery` reported "No core node connection" forever, whatever
+# `NEONFS_CORE_NODE` said. `neonfs_nfs`'s runtime config has always mapped it;
+# this brings the CSI driver into line.
+case System.get_env("NEONFS_CORE_NODE") do
+  nil ->
+    :ok
+
+  core_node ->
+    config :neonfs_client, bootstrap_nodes: [String.to_atom(core_node)]
+    config :neonfs_csi, core_node: String.to_atom(core_node)
+end
