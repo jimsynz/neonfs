@@ -226,7 +226,9 @@ defmodule NeonFS.Block.ConnectionHandler do
   end
 
   defp handle_request(%{type: :write} = request, socket, state) do
-    case Device.write(state.device, request.offset, request.data) do
+    case retrying_stale(:write, fn ->
+           Device.write(state.device, request.offset, request.data)
+         end) do
       :ok -> ack(socket, request, state)
       {:error, reason} -> reply_error(socket, request, reason, state)
     end
@@ -243,11 +245,48 @@ defmodule NeonFS.Block.ConnectionHandler do
 
   defp handle_request(%{type: type} = request, socket, state)
        when type in [:trim, :write_zeroes] do
-    case Device.write_zeroes(state.device, request.offset, request.length) do
+    case retrying_stale(type, fn ->
+           Device.write_zeroes(state.device, request.offset, request.length)
+         end) do
       :ok -> ack(socket, request, state)
       {:error, reason} -> reply_error(socket, request, reason, state)
     end
   end
+
+  # NBD's error set has no "retry this" status, so a `:stale_chunks` reply —
+  # a write that exhausted core's retry budget against a contended span,
+  # having lost nothing — has nowhere honest to go on the wire: `EIO` fails a
+  # write that never failed, and a guest ext4 typically remounts read-only
+  # over one. This connection owns the request until it answers, so it is the
+  # only layer that can perform the retry the protocol gives the guest no way
+  # to ask for.
+  #
+  # Past the budget the reply is still `EAGAIN` — honest about what happened,
+  # without claiming a retry the client cannot be relied on to make.
+  defp retrying_stale(command, fun, attempt \\ 0) do
+    case fun.() do
+      {:error, :stale_chunks} = error ->
+        if attempt < stale_retries() do
+          :telemetry.execute(
+            [:neonfs, :block, :stale_write_retry],
+            %{attempt: attempt + 1},
+            %{command: command}
+          )
+
+          Process.sleep(stale_backoff_ms() * 2 ** attempt)
+          retrying_stale(command, fun, attempt + 1)
+        else
+          error
+        end
+
+      result ->
+        result
+    end
+  end
+
+  defp stale_retries, do: Application.get_env(:neonfs_block, :stale_write_retries, 3)
+
+  defp stale_backoff_ms, do: Application.get_env(:neonfs_block, :stale_write_backoff_ms, 10)
 
   # A write carrying FUA is acknowledged only after the flush it implies.
   defp ack(socket, %{type: :write, flags: flags} = request, state) do
@@ -299,9 +338,11 @@ defmodule NeonFS.Block.ConnectionHandler do
   #
   # NBD defines no "retry" status, and the Linux client's handling of an
   # error outside its known set is not a guarantee that the block layer will
-  # reissue the request. This says what happened rather than claiming the
-  # retry: after the span-scoped commit compare, only two writers to the
-  # *same* span can reach here, which a guest filesystem should not produce.
+  # reissue the request — so the retry happens here, in `retrying_stale/3`,
+  # before any of this is reached. A reply that gets this far has exhausted
+  # that budget too, and says what happened rather than claiming a retry:
+  # after the span-scoped commit compare, only two writers to the *same*
+  # span can reach here, which a guest filesystem should not produce.
   # A core-side authorisation refusal. Not reachable while NBD passes no
   # identity and core reads an absent uid as 0 — but that is a property of
   # the caller, not of this mapping, and an unmapped denial falls through to
