@@ -11,6 +11,11 @@ defmodule NeonFS.Core.Authorise do
     `path` against its **parent directory's** POSIX mode (POSIX: creating,
     deleting, or renaming a name needs write on the containing directory,
     not on the not-yet-existent — or about-to-vanish — target).
+  - `{:traverse, volume_id, path}` — authorise *describing* `path` against its
+    **parent directory's** execute bit (POSIX: `stat()` needs search on each
+    directory component and no permission at all on the target, which is what
+    makes `ls -l` work in a directory full of unreadable files). Only the
+    immediate parent is checked, not every ancestor.
 
   UID 0 (root) bypasses all checks. For volume resources, the volume owner UID
   has implicit full control. For file resources, POSIX mode bits and extended
@@ -24,12 +29,13 @@ defmodule NeonFS.Core.Authorise do
   - `:write` — write file data to a volume
   - `:admin` — administrative operations (delete volume, modify ACLs)
   - `:mount` — mount a volume (requires `:read` permission)
+  - `:execute` — search a directory (requires `:read` at volume level)
   """
 
   alias NeonFS.Core.{ACLManager, AuditLog, FileACL, FileIndex, VolumeACL}
   alias NeonFS.Error.PermissionDenied
 
-  @type action :: :read | :write | :admin | :mount
+  @type action :: :read | :write | :admin | :execute | :mount
 
   @doc """
   Checks if a UID is authorised for an action on a resource.
@@ -56,6 +62,10 @@ defmodule NeonFS.Core.Authorise do
     # child), so this resolves a real `FileACL`; only if it somehow
     # doesn't will `{:file, …}` fall through to the volume check.
     check(uid, gids, action, {:file, volume_id, parent_dir(path)})
+  end
+
+  def check(uid, gids, _action, {:traverse, volume_id, path}) do
+    check(uid, gids, :execute, {:file, volume_id, parent_dir(path)})
   end
 
   def check(uid, gids, action, {:volume, volume_id} = resource) do
@@ -157,11 +167,13 @@ defmodule NeonFS.Core.Authorise do
   defp action_to_permission(:write), do: :write
   defp action_to_permission(:admin), do: :admin
   defp action_to_permission(:mount), do: :read
+  defp action_to_permission(:execute), do: :read
 
   defp action_to_file_permission(:read), do: :r
   defp action_to_file_permission(:write), do: :w
   defp action_to_file_permission(:admin), do: :w
   defp action_to_file_permission(:mount), do: :r
+  defp action_to_file_permission(:execute), do: :x
 
   defp emit_granted(uid, action, resource) do
     :telemetry.execute(

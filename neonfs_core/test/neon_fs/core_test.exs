@@ -220,10 +220,21 @@ defmodule NeonFS.CoreTest do
       assert {:error, %VolumeNotFound{}} = Core.get_file_meta_by_id("no-such-volume", "any-id")
     end
 
-    test "holds a non-root identity to the file's POSIX mode",
+    test "describes a file the caller cannot read, as POSIX stat does",
          %{volume_name: vol_name} do
       {:ok, %{id: id}} =
         Core.write_file_streamed(vol_name, "/private.txt", ["secret"], uid: 0, mode: 0o600)
+
+      assert {:ok, %{id: ^id, mode: 0o600}} =
+               Core.get_file_meta_by_id(vol_name, id, uid: 1000, gids: [1000])
+    end
+
+    test "holds a non-root identity to the parent directory's search bit",
+         %{volume_name: vol_name} do
+      {:ok, _} = Core.mkdir(vol_name, "/by-id-closed", uid: 0, mode: 0o700)
+
+      {:ok, %{id: id}} =
+        Core.write_file_streamed(vol_name, "/by-id-closed/f.txt", ["x"], uid: 0, mode: 0o644)
 
       assert {:error, %PermissionDenied{}} =
                Core.get_file_meta_by_id(vol_name, id, uid: 1000, gids: [1000])
@@ -472,15 +483,22 @@ defmodule NeonFS.CoreTest do
                )
     end
 
-    test "a non-root uid can read a world-readable file but not a private one",
+    test "a non-root uid can stat a file it cannot read, as POSIX does",
          %{volume_name: vol_name} do
       {:ok, _} = Core.write_file_streamed(vol_name, "/pub.txt", ["pub"], uid: 0, mode: 0o644)
       {:ok, _} = Core.write_file_streamed(vol_name, "/priv.txt", ["priv"], uid: 0, mode: 0o600)
 
       assert {:ok, _} = Core.get_file_meta(vol_name, "/pub.txt", uid: 1000, gids: [1000])
+      assert {:ok, _} = Core.get_file_meta(vol_name, "/priv.txt", uid: 1000, gids: [1000])
+    end
+
+    test "a non-root uid cannot stat through a directory it cannot search",
+         %{volume_name: vol_name} do
+      {:ok, _} = Core.mkdir(vol_name, "/closed", uid: 0, mode: 0o700)
+      {:ok, _} = Core.write_file_streamed(vol_name, "/closed/f.txt", ["x"], uid: 0, mode: 0o644)
 
       assert {:error, %PermissionDenied{}} =
-               Core.get_file_meta(vol_name, "/priv.txt", uid: 1000, gids: [1000])
+               Core.get_file_meta(vol_name, "/closed/f.txt", uid: 1000, gids: [1000])
     end
 
     test "a non-root uid cannot write a file owned by another (no other-write)",

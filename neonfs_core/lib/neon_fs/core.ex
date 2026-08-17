@@ -776,6 +776,12 @@ defmodule NeonFS.Core do
   Runs `Authorise.check/4` for `:read` against the volume so callers
   presenting a non-root identity (NFS AUTH_SYS) are held to the volume
   ACL.
+
+  The file itself is authorised as a **traverse**: POSIX `stat()` needs
+  search on the parent directory and no permission on the target, which
+  is what makes `ls -l` list files the caller cannot read. Where no ACL
+  resolves for the parent the volume ACL applies instead, so a
+  volume-scoped denial still hides metadata.
   """
   @spec get_file_meta(String.t(), String.t(), keyword()) ::
           {:ok, NeonFS.Core.FileMeta.t()} | {:error, FileNotFound.t() | term()}
@@ -785,7 +791,13 @@ defmodule NeonFS.Core do
 
     with {:ok, volume} <- resolve_volume(volume_name),
          :ok <-
-           authorise_posix(uid, gids, :read, volume.id, {:file, volume.id, normalize_path(path)}) do
+           authorise_posix(
+             uid,
+             gids,
+             :read,
+             volume.id,
+             {:traverse, volume.id, normalize_path(path)}
+           ) do
       lookup_file(volume.id, normalize_path(path))
     end
   end
@@ -870,13 +882,17 @@ defmodule NeonFS.Core do
 
   Returns `{:error, :wrong_volume}` when the id resolves into a
   different volume than `volume_name`.
+
+  Authorises as a traverse of the resolved path's parent directory,
+  exactly as `get_file_meta/3` does — one file must not authorise
+  differently by lookup route.
   """
   @spec get_file_meta_by_id(String.t(), binary(), keyword()) ::
           {:ok, FileMeta.t()} | {:error, FileNotFound.t() | term()}
   def get_file_meta_by_id(volume_name, file_id, opts \\ []) do
     with {:ok, volume} <- resolve_volume(volume_name),
          {:ok, file} <- lookup_file_by_id(volume.id, file_id),
-         :ok <- authorise_file(opts, :read, volume.id, file) do
+         :ok <- authorise_traverse(opts, volume.id, file) do
       {:ok, file}
     end
   end
@@ -915,6 +931,18 @@ defmodule NeonFS.Core do
   # the check lands on the same POSIX resource its path-based sibling
   # would use. Resolution therefore has to happen first — the reverse
   # of the path-based order.
+  # A detached file keeps the path it had when it was unlinked, so the
+  # directory it was removed from still governs describing it.
+  defp authorise_traverse(opts, volume_id, %FileMeta{path: path}) do
+    authorise_posix(
+      Keyword.get(opts, :uid, 0),
+      Keyword.get(opts, :gids, []),
+      :read,
+      volume_id,
+      {:traverse, volume_id, path}
+    )
+  end
+
   defp authorise_file(opts, action, volume_id, %FileMeta{path: path}) do
     authorise_posix(
       Keyword.get(opts, :uid, 0),
