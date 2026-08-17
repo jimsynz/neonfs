@@ -192,7 +192,14 @@ s_s3_setup() {
   node_ssh 1 "command -v s3cmd >/dev/null 2>&1 || sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q s3cmd >/dev/null 2>&1" 2>/dev/null
   # One credential serves both S3 SigV4 and WebDAV Basic auth (see
   # `neonfs credential create` — the `s3 create-credential` verb is gone).
-  local out; out=$(ncli 1 "credential create --user accept" 2>/dev/null)
+  #
+  # `--uid` is required, not decorative: S3 and WebDAV authorise as the
+  # credential's uid and refuse one that carries none, so a credential
+  # without it authenticates and is then denied every operation. uid 0
+  # because every other step in this suite writes as root — `ncli` runs
+  # `sudo neonfs` in the guest — so anything else would fail on the modes
+  # those steps created rather than on what this step is testing.
+  local out; out=$(ncli 1 "credential create --user accept --uid 0 --gids 0" 2>/dev/null)
   S3_KEY=$(echo "${out}" | awk '/Access Key ID:/ {print $NF}')
   S3_SECRET=$(echo "${out}" | awk '/Secret Access Key:/ {print $NF}')
   [ -n "${S3_KEY}" ] && [ -n "${S3_SECRET}" ] \
