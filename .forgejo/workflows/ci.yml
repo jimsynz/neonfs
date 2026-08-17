@@ -32,6 +32,8 @@ jobs:
   #   apt          optional extra apt packages to install first
   #   dind         optional; true starts a Docker daemon for e2e tests
   #   csi_sanity   optional; true installs the csi-sanity conformance binary
+  #   helm_chart   optional; path to a Helm chart whose rendered-output
+  #                snapshot (`<chart>/tests/render.sh check`) this job verifies
   #   cache_paths  newline-separated actions/cache paths (own artefacts plus
   #                any sibling path-dep artefacts the build compiles)
   #   lockfiles    space-separated lockfiles hashed into the cache key; every
@@ -159,6 +161,7 @@ jobs:
             echo "apt=$(jq -r '.apt // ""' <<<"$entry")"
             echo "dind=$(jq -r '.dind // false' <<<"$entry")"
             echo "csi_sanity=$(jq -r '.csi_sanity // false' <<<"$entry")"
+            echo "helm_chart=$(jq -r '.helm_chart // \"\"' <<<"$entry")"
             echo "lockfiles=$(jq -r '.lockfiles' <<<"$entry")"
             echo 'cache_paths<<NEONFS_CACHE_PATHS'
             jq -r '.cache_paths' <<<"$entry"
@@ -232,6 +235,16 @@ jobs:
       - name: Build csi-sanity
         if: steps.meta.outputs.csi_sanity == 'true' && steps.cache-csi-sanity.outputs.cache-hit != 'true'
         run: resources/scripts/ci-install-k8s-tools csi-sanity
+
+      # The chart's snapshot is only a test if something runs it. Nothing did:
+      # `deploy/charts/*` was classified inert, so a chart change selected no
+      # job at all, and the snapshot drifted two sidecars behind the chart
+      # before anyone noticed.
+      - name: Check the Helm chart's rendered snapshot
+        if: steps.meta.outputs.helm_chart != ''
+        run: |
+          resources/scripts/ci-install-k8s-tools helm
+          "${{ steps.meta.outputs.helm_chart }}/tests/render.sh" check
 
       - name: Start Docker daemon (dind for the VolumeDriver e2e test, #312)
         if: steps.meta.outputs.dind == 'true'

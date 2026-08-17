@@ -36,6 +36,7 @@
   {
     "name": "neonfs_csi",
     "csi_sanity": true,
+    "helm_chart": "deploy/charts/neonfs-csi",
     "cache_paths": "neonfs_client/deps\nneonfs_client/_build\nneonfs_client/native/neonfs_chunker/target\nneonfs_client/priv/native\nneonfs_csi/deps\nneonfs_csi/_build",
     "lockfiles": "neonfs_csi/mix.lock neonfs_client/native/neonfs_chunker/Cargo.lock"
   },

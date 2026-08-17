@@ -93,6 +93,12 @@ rules:
   - apiGroups: ["storage.k8s.io"]
     resources: ["csinodes"]
     verbs: ["get", "list", "watch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["volumeattachments"]
+    verbs: ["get", "list", "watch", "patch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["volumeattachments/status"]
+    verbs: ["patch"]
   - apiGroups: [""]
     resources: ["nodes"]
     verbs: ["get", "list", "watch"]
@@ -238,8 +244,6 @@ spec:
         - name: neonfs-csi
           image: ghcr.io/jimsynz/neonfs/csi:0.1.0
           imagePullPolicy: IfNotPresent
-          args:
-            - node
           securityContext:
             privileged: true
             capabilities:
@@ -361,8 +365,21 @@ spec:
           volumeMounts:
             - name: socket-dir
               mountPath: /var/lib/csi/sockets/pluginproxy
+        - name: csi-attacher
+          image: registry.k8s.io/sig-storage/csi-attacher:v4.9.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - --csi-address=$(ADDRESS)
+            - --leader-election=true
+            - --v=2
+          env:
+            - name: ADDRESS
+              value: /var/lib/csi/sockets/pluginproxy/csi.sock
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /var/lib/csi/sockets/pluginproxy
         - name: csi-resizer
-          image: registry.k8s.io/sig-storage/csi-resizer:v2.2.0
+          image: registry.k8s.io/sig-storage/csi-resizer:v2.2.1
           imagePullPolicy: IfNotPresent
           args:
             - --csi-address=$(ADDRESS)
@@ -389,8 +406,6 @@ spec:
         - name: neonfs-csi
           image: ghcr.io/jimsynz/neonfs/csi:0.1.0
           imagePullPolicy: IfNotPresent
-          args:
-            - controller
           env:
             - name: CSI_ENDPOINT
               value: unix:///var/lib/csi/sockets/pluginproxy/csi.sock
@@ -440,7 +455,7 @@ metadata:
     app.kubernetes.io/version: "0.1.0"
     helm.sh/chart: neonfs-csi-0.1.0
 spec:
-  attachRequired: false
+  attachRequired: true
   podInfoOnMount: true
   fsGroupPolicy: File
   storageCapacity: false
