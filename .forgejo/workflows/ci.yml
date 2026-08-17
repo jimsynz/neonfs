@@ -238,7 +238,28 @@ jobs:
         env:
           DOCKER_HOST: unix:///var/run/docker.sock
         run: |
+          # Start containerd ourselves rather than letting dockerd manage
+          # it. dockerd's wait for a managed containerd is a fixed internal
+          # timeout, and on a loaded runner containerd's own boot has taken
+          # over 14s — past it. dockerd then exits with "failed to start
+          # containerd: timeout waiting for containerd to start" *after*
+          # containerd logged a successful boot, and the job burns its full
+          # poll window waiting for a daemon that is already gone. Waiting
+          # for the socket here puts that budget under our control.
+          containerd >/tmp/containerd.log 2>&1 &
+          for i in $(seq 1 120); do
+            [ -S /run/containerd/containerd.sock ] && break
+            sleep 1
+          done
+          if [ ! -S /run/containerd/containerd.sock ]; then
+            echo "containerd failed to start. Tail of log:"
+            tail -100 /tmp/containerd.log
+            exit 1
+          fi
+          echo "containerd ready after ${i}s"
+
           dockerd --host=unix:///var/run/docker.sock \
+            --containerd=/run/containerd/containerd.sock \
             --storage-driver=vfs \
             --iptables=false --ip-masq=false --bridge=none \
             >/tmp/dockerd.log 2>&1 &
@@ -259,6 +280,9 @@ jobs:
           done
           echo "Docker daemon failed to start. Tail of log:"
           tail -100 /tmp/dockerd.log
+          echo ""
+          echo "Tail of containerd log:"
+          tail -50 /tmp/containerd.log
           echo ""
           echo "Last docker info attempt output:"
           docker info 2>&1 || true
