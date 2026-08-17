@@ -66,6 +66,30 @@ cmd_iface_join() {
   iface_join_scenario
 }
 
+# A k3s VM for the CSI end-to-end path. Boots and provisions only — the
+# cluster identity the driver pods need, and the driver itself, arrive
+# separately; keeping them apart is what makes a k3s failure legible as one.
+# Does not need a running NeonFS cluster.
+cmd_k3s() {
+  require_tools
+  ensure_image
+  ensure_ssh_key
+
+  local i="${K3S_INDEX}"
+  # No NeonFS drives on this VM: it stores nothing, and each one costs
+  # DRIVE_SIZE of host disk beside a root disk k3s already fills.
+  DRIVES_PER_NODE=0 create_node_disks "$i"
+  write_seed "$i"
+  DRIVES_PER_NODE=0 boot_node "$i"
+  wait_ssh "$i"
+  wait_cloud_init "$i"
+  provision_k3s_node "$i"
+
+  k3s_assert_ready
+
+  log "k3s node ${i} is up (ssh 127.0.0.1:$(node_ssh_port "$i"))"
+}
+
 BENCH_BIG_FILE="neonfs_bench_big"
 BENCH_SCRATCH=".neonfs_bench"
 
@@ -349,6 +373,7 @@ Commands:
   boot               Boot + provision VMs only (skip cluster init)
   init               Initialise/join the cluster on already-provisioned VMs
   iface-join         Boot an interface-only VM (neonfs-nfs) and join it via invite token
+  k3s                Boot a k3s VM (its own index, more memory) and wait for the node to report Ready
   docker-storage     Docker image blobs via the containerd content proxy + a shared NeonFS docker volume (needs NODES>=2)
   bench [--rev <sha>]  Run the benchee suite against the running cluster; --rev checks out/builds/boots that revision first (for bisect)
   bench-matrix       Boot/bench/teardown across the standard cluster-config matrix (baseline/durable/spread)
@@ -364,6 +389,8 @@ Key environment variables (defaults):
   ROOT_SIZE=${ROOT_SIZE}        VM_MEM=${VM_MEM}            VM_CPUS=${VM_CPUS}
   REPLICAS=${REPLICAS}              CLUSTER_NAME=${CLUSTER_NAME}      VOLUME_NAME=${VOLUME_NAME}
   DIST_PORT=${DIST_PORT}         SSH_BASE_PORT=${SSH_BASE_PORT}
+  K3S_INDEX=${K3S_INDEX}            K3S_VERSION=${K3S_VERSION}
+  VM_MEM_<n> overrides VM_MEM for one VM, e.g. VM_MEM_${K3S_INDEX}=$(node_mem "${K3S_INDEX}")
 
 Examples:
   ./neonfs-rig up                 # single-node cluster
@@ -380,6 +407,7 @@ main() {
     boot)   cmd_boot "$@" ;;
     init)   cmd_init "$@" ;;
     iface-join) cmd_iface_join "$@" ;;
+    k3s)    cmd_k3s "$@" ;;
     docker-storage) cmd_docker_storage "$@" ;;
     bench)  cmd_bench "$@" ;;
     bench-matrix) cmd_bench_matrix "$@" ;;

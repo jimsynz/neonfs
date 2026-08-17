@@ -43,6 +43,24 @@ itself), then verifies the node is registered as an `nfs` service in
 `node list`, that its NFS port serves, and that both survive a
 `systemctl restart neonfs-nfs` with no manual intervention.
 
+Kubernetes:
+
+```bash
+./neonfs-rig k3s                # boot a k3s VM and wait for it to be Ready
+```
+
+`k3s` boots a VM at index 8 and installs a pinned k3s (`K3S_VERSION`,
+`traefik` and `servicelb` disabled) on it. It needs no NeonFS cluster and
+installs no NeonFS packages: this is the Kubernetes half on its own, so a k3s
+failure stays legible as one rather than as a join failure. It gets its own VM
+because k3s rewrites iptables and brings its own containerd, which would sit
+beside the containerd the docker-storage scenario installs, and 4 GiB rather
+than the usual 2 — through `VM_MEM_8`, since `VM_MEM_<index>` overrides
+`VM_MEM` for any single VM. Readiness is `kubectl get nodes` reporting `Ready`
+within a bounded wait, not the installer exiting 0.
+
+`down` and `clean` stop and remove it like any other node.
+
 ## Requirements
 
 The rig needs QEMU, the cloud-init seed tooling, an ssh client and
