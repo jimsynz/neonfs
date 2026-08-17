@@ -77,15 +77,19 @@ defmodule NeonFS.WebDAV.BackendTest do
     |> Plug.Conn.put_req_header("authorization", "Basic #{encoded}")
   end
 
+  defp probe_identity(_context) do
+    Application.put_env(:neonfs_webdav, :identity_probe, self())
+    on_exit(fn -> Application.delete_env(:neonfs_webdav, :identity_probe) end)
+
+    MockCore.create_volume("docs")
+    MockCore.write_file("docs", "/readme.txt", "hello")
+    :ok
+  end
+
   # Resource resolution
 
   describe "identity threading" do
-    setup do
-      Process.register(self(), :webdav_identity_probe)
-      MockCore.create_volume("docs")
-      MockCore.write_file("docs", "/readme.txt", "hello")
-      :ok
-    end
+    setup :probe_identity
 
     # The defect this closes: core defaults an absent uid to 0, and
     # `Authorise.check(0, _, _, _)` returns `:ok` unconditionally, so a
@@ -114,12 +118,7 @@ defmodule NeonFS.WebDAV.BackendTest do
   end
 
   describe "a credential with no uid" do
-    setup do
-      Process.register(self(), :webdav_identity_probe)
-      MockCore.create_volume("docs")
-      MockCore.write_file("docs", "/readme.txt", "hello")
-      :ok
-    end
+    setup :probe_identity
 
     # Authentication succeeds and authorisation fails, rather than
     # defaulting the uid — a default would be a root bypass wearing an
