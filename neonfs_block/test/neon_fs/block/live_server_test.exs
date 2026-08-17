@@ -315,6 +315,62 @@ defmodule NeonFS.Block.LiveServerTest do
       assert {:ok, <<_magic::32, 1::32, 7::64>>} = :gen_tcp.recv(socket, 16, 2_000)
     end
 
+    # NBD has no "retry this" status, so a contended span that core gave up
+    # on has to be retried by the only party that still owns the request.
+    test "a write that hits a contended span is retried, not failed", %{port: port} do
+      test = self()
+      ref = :telemetry_test.attach_event_handlers(self(), [[:neonfs, :block, :stale_write_retry]])
+      {:ok, attempts} = Agent.start_link(fn -> 0 end)
+
+      socket = connect(port)
+      {:ok, _export} = handshake(socket, @export)
+
+      stub_core(fn _module, :write, _args ->
+        case Agent.get_and_update(attempts, &{&1, &1 + 1}) do
+          n when n < 2 ->
+            send(test, {:stale, n})
+            {:error, :stale_chunks}
+
+          _settled ->
+            write_reply()
+        end
+      end)
+
+      :ok = :gen_tcp.send(socket, request(@write, 8, 0, @block) <> :binary.copy(<<2>>, @block))
+
+      assert_receive {:stale, 0}, 2_000
+      assert_receive {:stale, 1}, 2_000
+
+      assert_receive {[:neonfs, :block, :stale_write_retry], ^ref, %{attempt: 1},
+                      %{command: :write}},
+                     2_000
+
+      assert {:ok, <<_magic::32, 0::32, 8::64>>} = :gen_tcp.recv(socket, 16, 2_000)
+
+      :telemetry.detach(ref)
+    end
+
+    # EAGAIN past the budget: honest about what happened, and the caveat that
+    # a client may not act on it is why the retry above exists at all.
+    test "a span contended past the retry budget answers EAGAIN", %{port: port} do
+      Application.put_env(:neonfs_block, :stale_write_retries, 1)
+      Application.put_env(:neonfs_block, :stale_write_backoff_ms, 1)
+
+      on_exit(fn ->
+        Application.delete_env(:neonfs_block, :stale_write_retries)
+        Application.delete_env(:neonfs_block, :stale_write_backoff_ms)
+      end)
+
+      socket = connect(port)
+      {:ok, _export} = handshake(socket, @export)
+
+      stub_core(fn _module, :write, _args -> {:error, :stale_chunks} end)
+
+      :ok = :gen_tcp.send(socket, request(@write, 9, 0, @block) <> :binary.copy(<<3>>, @block))
+
+      assert {:ok, <<_magic::32, 11::32, 9::64>>} = :gen_tcp.recv(socket, 16, 2_000)
+    end
+
     test "a disconnect closes the connection", %{port: port} do
       socket = connect(port)
       {:ok, _export} = handshake(socket, @export)
