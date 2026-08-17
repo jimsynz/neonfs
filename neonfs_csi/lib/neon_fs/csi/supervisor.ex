@@ -63,6 +63,13 @@ defmodule NeonFS.CSI.Supervisor do
     Supervisor.init(children, strategy: :one_for_one)
   end
 
+  # `GRPC.Server.Supervisor` accepts only `:endpoint, :servers, :start_server,
+  # :port, :adapter_opts, :exception_log_filter, :max_body_size` at the top
+  # level and raises on anything else, so the `:ip` binding — including the
+  # `{:local, path}` that makes this a unix socket — belongs under
+  # `:adapter_opts`. `:start_server` defaults to false, which loads the
+  # supervisor with no children: the driver would boot, log nothing, and never
+  # open the socket every CSI sidecar dials.
   defp endpoint_child_spec do
     case Application.get_env(:neonfs_csi, :listener, :socket) do
       :socket ->
@@ -73,7 +80,11 @@ defmodule NeonFS.CSI.Supervisor do
 
       {:tcp, port} ->
         {:ok,
-         {GRPC.Server.Supervisor, endpoint: NeonFS.CSI.Endpoint, port: port, ip: {127, 0, 0, 1}}}
+         {GRPC.Server.Supervisor,
+          endpoint: NeonFS.CSI.Endpoint,
+          port: port,
+          start_server: true,
+          adapter_opts: [ip: {127, 0, 0, 1}]}}
     end
   end
 
@@ -84,7 +95,12 @@ defmodule NeonFS.CSI.Supervisor do
       :ok ->
         File.rm(socket_path)
 
-        {:ok, {GRPC.Server.Supervisor, endpoint: NeonFS.CSI.Endpoint, ip: {:local, socket_path}}}
+        {:ok,
+         {GRPC.Server.Supervisor,
+          endpoint: NeonFS.CSI.Endpoint,
+          port: 0,
+          start_server: true,
+          adapter_opts: [ip: {:local, socket_path}]}}
 
       {:error, reason} when reason in @skip_errors ->
         {:skip,
