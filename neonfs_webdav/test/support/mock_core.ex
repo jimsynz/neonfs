@@ -395,9 +395,12 @@ defmodule NeonFS.WebDAV.Test.MockCore do
 
   # Lets a test assert that a request reached core carrying an identity
   # rather than defaulting to uid 0, which is the bypass this exists to
-  # catch. Delivered to the test process when one has registered interest.
+  # catch. Delivered to the test process that put its pid in
+  # `:identity_probe`. A global process name would do as well, except that
+  # the name is only released once its previous holder has finished
+  # exiting, so consecutive tests registering it raced.
   def record_identity(function, opts) do
-    case Process.whereis(:webdav_identity_probe) do
+    case Application.get_env(:neonfs_webdav, :identity_probe) do
       nil -> :ok
       pid -> send(pid, {:core_identity, function, Keyword.take(opts, [:uid, :gids])})
     end
