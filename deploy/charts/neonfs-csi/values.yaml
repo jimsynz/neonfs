@@ -73,6 +73,21 @@ controller:
   livenessProbe:
     healthPort: 29652
   hostNetwork: false
+  # Extra environment, volumes and mounts for the plugin container. The
+  # driver reaches a NeonFS cluster over Erlang distribution, so a deployment
+  # whose cluster is not itself in Kubernetes needs to say where it is
+  # (`NEONFS_CORE_NODE`), which port this process listens on
+  # (`NEONFS_DIST_PORT` — one per process, so co-located pods must differ),
+  # and where its TLS material comes from. None of that is derivable from the
+  # chart, so it is passed in rather than guessed at.
+  extraEnv: []
+  extraVolumes: []
+  extraVolumeMounts: []
+  # Container security context for the plugin. The image runs as `nobody`,
+  # which is right for a controller that only talks gRPC — but a deployment
+  # that mounts cluster TLS material in from a host has to run as a uid that
+  # can read the private key, and only the operator knows which that is.
+  securityContext: {}
 
 # Node plugin (DaemonSet).
 node:
@@ -98,6 +113,12 @@ node:
   # alive during evictions; override to "" if your cluster doesn't
   # honour it.
   priorityClassName: system-node-critical
+  # As `controller.extraEnv` / `extraVolumes` / `extraVolumeMounts`. The node
+  # plugin is already `hostNetwork: true`, so its `NEONFS_DIST_PORT` must
+  # differ from anything else on the host.
+  extraEnv: []
+  extraVolumes: []
+  extraVolumeMounts: []
 
 # `CSIDriver` object characteristics. Refer to
 # https://kubernetes.io/docs/reference/access-authn-authz/extensible-admission-controllers/

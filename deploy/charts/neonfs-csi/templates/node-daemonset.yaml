@@ -80,8 +80,6 @@ spec:
         - name: neonfs-csi
           image: {{ include "neonfs-csi.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          args:
-            - node
           securityContext:
             privileged: true
             capabilities:
@@ -102,6 +100,9 @@ spec:
                   name: {{ include "neonfs-csi.bootstrapSecretName" . }}
                   key: {{ .Values.bootstrap.secretKey }}
                   optional: true
+            {{- with .Values.node.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           ports:
             - containerPort: {{ .Values.node.livenessProbe.healthPort }}
               name: healthz
@@ -126,6 +127,9 @@ spec:
               mountPropagation: Bidirectional
             - name: fuse-device
               mountPath: /dev/fuse
+            {{- with .Values.node.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
       volumes:
         - name: registration-dir
           hostPath:
@@ -143,3 +147,6 @@ spec:
           hostPath:
             path: /dev/fuse
             type: CharDevice
+        {{- with .Values.node.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}

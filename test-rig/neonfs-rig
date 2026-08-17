@@ -90,6 +90,22 @@ cmd_k3s() {
   log "k3s node ${i} is up (ssh 127.0.0.1:$(node_ssh_port "$i"))"
 }
 
+# The CSI driver in the rig's k3s, from a HEAD-built image. Needs both a
+# running NeonFS cluster (for the identity the pods borrow) and a k3s VM.
+cmd_csi_deploy() {
+  require_tools
+  ensure_image
+  ensure_debs
+  ensure_ssh_key
+  node_running 1 || die "no running cluster — bring one up first with './neonfs-rig up'"
+  node_running "${K3S_INDEX}" || die "no k3s VM — bring one up first with './neonfs-rig k3s'"
+
+  k3s_join_cluster
+  k3s_sideload_csi_image
+  k3s_install_chart
+  k3s_assert_csi_ready
+}
+
 BENCH_BIG_FILE="neonfs_bench_big"
 BENCH_SCRATCH=".neonfs_bench"
 
@@ -374,6 +390,7 @@ Commands:
   init               Initialise/join the cluster on already-provisioned VMs
   iface-join         Boot an interface-only VM (neonfs-nfs) and join it via invite token
   k3s                Boot a k3s VM (its own index, more memory) and wait for the node to report Ready
+  csi-deploy         Join the k3s VM to the cluster and deploy the CSI chart from a HEAD-built image
   docker-storage     Docker image blobs via the containerd content proxy + a shared NeonFS docker volume (needs NODES>=2)
   bench [--rev <sha>]  Run the benchee suite against the running cluster; --rev checks out/builds/boots that revision first (for bisect)
   bench-matrix       Boot/bench/teardown across the standard cluster-config matrix (baseline/durable/spread)
@@ -408,6 +425,7 @@ main() {
     init)   cmd_init "$@" ;;
     iface-join) cmd_iface_join "$@" ;;
     k3s)    cmd_k3s "$@" ;;
+    csi-deploy) cmd_csi_deploy "$@" ;;
     docker-storage) cmd_docker_storage "$@" ;;
     bench)  cmd_bench "$@" ;;
     bench-matrix) cmd_bench_matrix "$@" ;;
