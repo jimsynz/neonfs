@@ -298,6 +298,51 @@ defmodule NeonFS.Integration.CIFSSmbdTest do
       File.write!(listing, "ok")
       assert {:ok, _} = Smbd.client(server, "put #{listing} after-logon-failure.txt")
     end
+
+    # Not the account the rest of the suite uses. That account is whoever ran
+    # the tests, which in CI is **root**, and `Authorise.check/4` grants uid 0
+    # everything — so a denial test built on it cannot fail where it matters.
+    # `nobody` is a real local user everywhere, and smbd can only switch to it
+    # when running as root, hence the tag.
+    @tag :requires_root
+    test "an authenticated user without NeonFS permission is refused by core", %{
+      server: server,
+      cluster: cluster,
+      dir: dir
+    } do
+      # Written and locked down through the cluster rather than over SMB: the
+      # session cannot create a file it is then unable to read, so the fixture
+      # has to come from the side that can.
+      {:ok, _} =
+        PeerCluster.rpc(cluster, :node1, NeonFS.Core, :write_file_at, [
+          @volume_name,
+          "/classified.txt",
+          0,
+          "not for you"
+        ])
+
+      {:ok, _} =
+        PeerCluster.rpc(cluster, :node1, NeonFS.Core, :update_file_meta, [
+          @volume_name,
+          "/classified.txt",
+          [uid: 0, gid: 0, mode: 0o100600]
+        ])
+
+      fetched = Path.join(dir, "classified.txt")
+
+      assert {:error, {_status, output}} =
+               Smbd.client(server, "get classified.txt #{fetched}",
+                 credentials: Smbd.unprivileged_credentials()
+               )
+
+      assert output =~ "NT_STATUS_ACCESS_DENIED", Smbd.logs(server)
+      refute File.exists?(fetched)
+
+      # The privileged session reads the same file, so the refusal is about who
+      # asked rather than about the file being unreadable.
+      assert {:ok, _} = Smbd.client(server, "get classified.txt #{fetched}")
+      assert File.read!(fetched) == "not for you"
+    end
   end
 
   # The rest of the suite runs one core peer and one interface peer, which
