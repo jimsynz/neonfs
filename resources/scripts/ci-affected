@@ -45,9 +45,15 @@ classify() {
   case "$1" in
     # Inert: nothing in CI consumes these.
     *.md) ;;
-    docs/* | deploy/charts/* | test-rig/* | containers/* | compose.yml | \
+    docs/* | test-rig/* | containers/* | compose.yml | \
       .devcontainer/* | .gitignore | LICENSE | renovate.json | \
       resources/release/*) ;;
+
+    # The `neonfs_csi` job verifies the chart's rendered snapshot, so a chart
+    # change does change a build result. It was inert, which is exactly how
+    # the snapshot came to sit two sidecars behind the templates with nothing
+    # complaining.
+    deploy/charts/*) mark neonfs_csi ;;
 
     # neonfs_fuse's alerts_yml_test asserts on deploy/prometheus/alerts.yml.
     deploy/prometheus/*) mark neonfs_fuse ;;
