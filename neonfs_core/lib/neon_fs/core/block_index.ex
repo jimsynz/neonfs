@@ -62,7 +62,15 @@ defmodule NeonFS.Core.BlockIndex do
   entries are stored one per key.
   """
 
-  alias NeonFS.Core.{BlockBacking, ChunkIndex, ReadOperation, VolumeCommitter, VolumeRegistry}
+  alias NeonFS.Core.{
+    BlockBacking,
+    BlockEpoch,
+    ChunkIndex,
+    ReadOperation,
+    VolumeCommitter,
+    VolumeRegistry
+  }
+
   alias NeonFS.Core.Volume.{BlockExtent, MetadataReader}
   alias NeonFS.Error.VolumeNotFound
 
@@ -157,6 +165,15 @@ defmodule NeonFS.Core.BlockIndex do
   must already be durable — see the module doc.
 
   Returns `%{shard => root_chunk_hash}` for the shards the commit touched.
+
+  ## Fencing
+
+  Pass `:epoch` (with `:device_path`) to stamp the commit with the epoch the
+  caller attached under. A commit whose epoch is behind the device's current
+  one is refused with `{:error, {:fenced, current}}`: the caller has been
+  preempted and must tear its end down rather than retry. Without `:epoch`
+  the commit is unfenced, which is what a caller that does not hold a device
+  — GC, repair, provisioning — wants.
   """
   @spec commit(String.t(), [extent()], keyword()) ::
           {:ok, %{optional(non_neg_integer()) => binary()}} | {:error, term()}
@@ -164,8 +181,26 @@ defmodule NeonFS.Core.BlockIndex do
       when is_binary(volume_name) and is_list(extents) do
     committer = Keyword.get(opts, :volume_committer, VolumeCommitter)
 
-    with {:ok, volume} <- resolve_volume(volume_name) do
+    with {:ok, volume} <- resolve_volume(volume_name),
+         :ok <- check_epoch(volume, opts) do
       committer.commit(volume.id, mutations(extents), writer_opts(opts))
+    end
+  end
+
+  # The check is a consensus read on the commit path, so it is paid once per
+  # *batch* rather than per guest write — the same property that makes the
+  # coalescing window worth having. An unfenced caller pays nothing.
+  defp check_epoch(volume, opts) do
+    case {Keyword.get(opts, :epoch), Keyword.get(opts, :device_path)} do
+      {nil, _} ->
+        :ok
+
+      {epoch, path} when is_integer(epoch) and is_binary(path) ->
+        checker = Keyword.get(opts, :epoch_checker, &BlockEpoch.check/2)
+        checker.({volume.id, path}, epoch)
+
+      {epoch, nil} when is_integer(epoch) ->
+        {:error, :epoch_without_device_path}
     end
   end
 
@@ -257,7 +292,14 @@ defmodule NeonFS.Core.BlockIndex do
     end)
   end
 
-  @injection_opts [:volume_committer, :metadata_reader, :chunk_reader]
+  @injection_opts [
+    :volume_committer,
+    :metadata_reader,
+    :chunk_reader,
+    :epoch_checker,
+    :epoch,
+    :device_path
+  ]
 
   defp writer_opts(opts), do: Keyword.drop(opts, @injection_opts)
   defp reader_opts(opts), do: Keyword.drop(opts, @injection_opts)

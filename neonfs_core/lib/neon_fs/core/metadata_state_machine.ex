@@ -92,6 +92,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
           | {:claim_namespace_pinned, path :: String.t(), holder :: term()}
           | {:claim_namespace_byte_range, path :: String.t(), range :: byte_range(),
              scope :: namespace_scope(), holder :: term()}
+          | {:bump_block_epoch, device_key :: block_device_key()}
           | {:release_namespace_claim, claim_id :: String.t()}
           | {:release_namespace_claims_for_holder, holder :: term()}
           | {:release_namespace_claims_for_node, node :: node()}
@@ -173,6 +174,10 @@ defmodule NeonFS.Core.MetadataStateMachine do
           optional(:range) => byte_range()
         }
 
+  # A block device is `{volume_id, resolved_path}`: one volume can hold
+  # several devices, so the volume alone does not name one.
+  @type block_device_key :: {volume_id :: binary(), path :: String.t()}
+
   @type state :: %{
           data: %{optional(term()) => term()},
           chunks: %{optional(binary()) => map()},
@@ -192,6 +197,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
           kv: %{optional(binary()) => term()},
           namespace_claims: %{optional(String.t()) => namespace_claim()},
           namespace_claim_seq: non_neg_integer(),
+          block_epochs: %{optional(block_device_key()) => non_neg_integer()},
           drives: %{optional(String.t()) => drive_entry()},
           drive_trust: %{optional({node(), String.t()}) => :unverified},
           nodes: %{optional(node()) => node_entry()},
@@ -509,6 +515,17 @@ defmodule NeonFS.Core.MetadataStateMachine do
   end
 
   @doc """
+  The current fencing epoch for a block device, or 0 when it has never been
+  preempted. An attacher records this and stamps its metadata commits with
+  it; a commit whose epoch is behind the current one is refused.
+  """
+  @spec get_block_epoch(state(), block_device_key()) :: non_neg_integer()
+  def get_block_epoch(state, {volume_id, path} = key)
+      when is_binary(volume_id) and is_binary(path) do
+    state |> Map.get(:block_epochs, %{}) |> Map.get(key, 0)
+  end
+
+  @doc """
   Returns the snapshot for `volume_id` / `snapshot_id`, or nil.
   """
   @spec get_snapshot(state(), binary(), binary()) :: snapshot_entry() | nil
@@ -694,6 +711,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
       volume_roots: %{},
       snapshots: %{},
       redeemed_invites: %{},
+      block_epochs: %{},
       generation: 0,
       version: 0
     }
@@ -1037,6 +1055,18 @@ defmodule NeonFS.Core.MetadataStateMachine do
     )
 
     {Map.put_new(state, :cluster_mode, nil), :ok, []}
+  end
+
+  def apply(_meta, {:machine_version, 21, 22}, state) do
+    require Logger
+
+    Logger.info("Ra machine version upgrade",
+      from: 21,
+      to: 22,
+      change: "add per-device fencing epochs for block volumes"
+    )
+
+    {Map.put_new(state, :block_epochs, %{}), :ok, []}
   end
 
   def apply(_meta, {:machine_version, from_version, to_version}, state) do
@@ -1837,6 +1867,30 @@ defmodule NeonFS.Core.MetadataStateMachine do
   # active interface workloads (collection locks, atomic creates,
   # rename windows), and reads happen on followers via local query.
 
+  # Fencing epoch for one block device. Bumped by an attacher preempting a
+  # previous holder; the previous holder's next metadata commit carries the
+  # epoch it attached under, no longer matches, and is refused — which is what
+  # makes a partitioned-but-alive writer harmless rather than merely
+  # unwelcome.
+  #
+  # Keyed on the resolved `{volume_id, device_path}` and not the volume: one
+  # volume can hold several devices, and a volume-wide epoch would fence
+  # every one of them when a single device is preempted.
+  def apply(_meta, {:bump_block_epoch, {volume_id, path} = key}, state)
+      when is_binary(volume_id) and is_binary(path) do
+    epochs = Map.get(state, :block_epochs, %{})
+    epoch = Map.get(epochs, key, 0) + 1
+    new_state = %{state | block_epochs: Map.put(epochs, key, epoch), version: state.version + 1}
+
+    :telemetry.execute(
+      [:neonfs, :ra, :command, :bump_block_epoch],
+      %{epoch: epoch, version: new_state.version},
+      %{volume_id: volume_id, path: path}
+    )
+
+    {new_state, {:ok, epoch}, []}
+  end
+
   def apply(_meta, {:claim_namespace_path, path, scope, holder}, state)
       when is_binary(path) and scope in [:exclusive, :shared] do
     apply_namespace_claim(:path, path, scope, holder, state)
@@ -2533,7 +2587,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
   Return the state machine version for upgrade/migration support.
   """
   @impl :ra_machine
-  def version, do: 21
+  def version, do: 22
 
   @doc """
   Return the module to handle a specific state machine version.

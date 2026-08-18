@@ -55,6 +55,90 @@ defmodule NeonFS.Core.BlockIndexTest do
     [volume_committer: StubCommitter, metadata_reader: StubReader]
   end
 
+  # A partitioned holder still believes it owns the device. The epoch is what
+  # turns its next commit into a refusal rather than a write.
+  describe "commit/3 fencing" do
+    test "a commit stamped with the current epoch is published" do
+      register_volume()
+
+      assert {:ok, _roots} =
+               BlockIndex.commit(
+                 @volume_name,
+                 [{0, {:chunk, @hash}}],
+                 opts() ++
+                   [
+                     epoch: 3,
+                     device_path: "/dev.img",
+                     epoch_checker: fn {@volume_id, "/dev.img"}, 3 -> :ok end
+                   ]
+               )
+
+      assert_received {:committed, @volume_id, _mutations, _opts}
+    end
+
+    test "a commit from a preempted holder is refused, and nothing is published" do
+      register_volume()
+
+      assert {:error, {:fenced, 4}} =
+               BlockIndex.commit(
+                 @volume_name,
+                 [{0, {:chunk, @hash}}],
+                 opts() ++
+                   [
+                     epoch: 3,
+                     device_path: "/dev.img",
+                     epoch_checker: fn _key, 3 -> {:error, {:fenced, 4}} end
+                   ]
+               )
+
+      refute_received {:committed, _, _, _}
+    end
+
+    # GC, repair and provisioning hold no device, so they commit unfenced —
+    # and must not pay a consensus read to do it.
+    test "a commit with no epoch is not checked" do
+      register_volume()
+
+      assert {:ok, _roots} =
+               BlockIndex.commit(
+                 @volume_name,
+                 [{0, {:chunk, @hash}}],
+                 opts() ++
+                   [epoch_checker: fn _key, _epoch -> flunk("checked an unfenced commit") end]
+               )
+
+      assert_received {:committed, @volume_id, _mutations, _opts}
+    end
+
+    # An epoch without the device it belongs to would silently fence nothing,
+    # which is worse than refusing: the caller believes it is protected.
+    test "an epoch without a device path is refused" do
+      register_volume()
+
+      assert {:error, :epoch_without_device_path} =
+               BlockIndex.commit(@volume_name, [{0, {:chunk, @hash}}], opts() ++ [epoch: 3])
+    end
+
+    # The injected keys are test seams and a `VolumeCommitter` option list is
+    # not the place for them.
+    test "fencing options do not reach the committer" do
+      register_volume()
+
+      assert {:ok, _roots} =
+               BlockIndex.commit(
+                 @volume_name,
+                 [{0, {:chunk, @hash}}],
+                 opts() ++
+                   [epoch: 1, device_path: "/dev.img", epoch_checker: fn _key, _epoch -> :ok end]
+               )
+
+      assert_received {:committed, @volume_id, _mutations, committer_opts}
+      refute Keyword.has_key?(committer_opts, :epoch)
+      refute Keyword.has_key?(committer_opts, :device_path)
+      refute Keyword.has_key?(committer_opts, :epoch_checker)
+    end
+  end
+
   describe "commit/3" do
     test "publishes every extent as one batch of mutations" do
       register_volume()

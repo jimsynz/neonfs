@@ -48,8 +48,8 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
   end
 
   describe "version/0" do
-    test "returns 21" do
-      assert MetadataStateMachine.version() == 21
+    test "returns 22" do
+      assert MetadataStateMachine.version() == 22
     end
   end
 
@@ -176,6 +176,60 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
     end
   end
 
+  # A claim releases when its holder's node dies, which covers a crashed
+  # attacher but not a partitioned one. The epoch is what a preempting
+  # attacher bumps so the old holder's next commit is refused.
+  describe "block fencing epochs (v22)" do
+    test "a device that has never been preempted is at epoch 0" do
+      assert MetadataStateMachine.get_block_epoch(base_state(), {"vol", "/dev.img"}) == 0
+    end
+
+    test "bumping returns the new epoch and records it" do
+      state = Map.put(base_state(), :block_epochs, %{})
+
+      assert {state, {:ok, 1}, []} =
+               MetadataStateMachine.apply(%{}, {:bump_block_epoch, {"vol", "/dev.img"}}, state)
+
+      assert MetadataStateMachine.get_block_epoch(state, {"vol", "/dev.img"}) == 1
+
+      assert {state, {:ok, 2}, []} =
+               MetadataStateMachine.apply(%{}, {:bump_block_epoch, {"vol", "/dev.img"}}, state)
+
+      assert MetadataStateMachine.get_block_epoch(state, {"vol", "/dev.img"}) == 2
+    end
+
+    # One volume can hold several devices, so preempting one must not fence
+    # the others.
+    test "epochs are per device, not per volume" do
+      state = Map.put(base_state(), :block_epochs, %{})
+
+      assert {state, {:ok, 1}, []} =
+               MetadataStateMachine.apply(%{}, {:bump_block_epoch, {"vol", "/a.img"}}, state)
+
+      assert MetadataStateMachine.get_block_epoch(state, {"vol", "/a.img"}) == 1
+      assert MetadataStateMachine.get_block_epoch(state, {"vol", "/b.img"}) == 0
+    end
+
+    test "migration 21 -> 22 adds the epoch table to existing state" do
+      old_state = base_state()
+      refute Map.has_key?(old_state, :block_epochs)
+
+      assert {new_state, :ok, []} =
+               MetadataStateMachine.apply(%{}, {:machine_version, 21, 22}, old_state)
+
+      assert new_state.block_epochs == %{}
+    end
+
+    test "migration preserves epochs already recorded" do
+      old_state = Map.put(base_state(), :block_epochs, %{{"vol", "/dev.img"} => 7})
+
+      assert {new_state, :ok, []} =
+               MetadataStateMachine.apply(%{}, {:machine_version, 21, 22}, old_state)
+
+      assert new_state.block_epochs == %{{"vol", "/dev.img"} => 7}
+    end
+  end
+
   describe "which_module/1" do
     test "returns the same module for all versions" do
       for v <- 1..7 do
@@ -201,6 +255,7 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
       assert state.volume_acls == %{}
       assert state.drives == %{}
       assert state.volume_roots == %{}
+      assert state.block_epochs == %{}
       assert state.version == 0
     end
   end
