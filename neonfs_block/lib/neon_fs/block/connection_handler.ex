@@ -26,7 +26,7 @@ defmodule NeonFS.Block.ConnectionHandler do
 
   require Logger
 
-  alias NeonFS.Block.{Device, DeviceRegistry, Protocol}
+  alias NeonFS.Block.{DeviceRegistry, Frontend, Protocol}
   alias ThousandIsland.Socket
 
   # Bounds a single read or write, and is advertised to the client as
@@ -123,7 +123,7 @@ defmodule NeonFS.Block.ConnectionHandler do
       {:ok, device} ->
         reply =
           device
-          |> Device.export_info()
+          |> io_core().export_info()
           |> Protocol.encode_export_name_reply(no_zeroes: state.no_zeroes)
 
         :ok = Socket.send(socket, reply)
@@ -138,7 +138,7 @@ defmodule NeonFS.Block.ConnectionHandler do
   defp handle_option({:go, %{name: name}}, socket, state) do
     case attach(name, state) do
       {:ok, device} ->
-        export = Device.export_info(device)
+        export = io_core().export_info(device)
 
         :ok =
           Socket.send(
@@ -162,9 +162,9 @@ defmodule NeonFS.Block.ConnectionHandler do
   end
 
   defp handle_option({:info, %{name: name}}, socket, state) do
-    case Device.open(name) do
+    case io_core().open(name) do
       {:ok, device} ->
-        export = Device.export_info(device)
+        export = io_core().export_info(device)
 
         :ok =
           Socket.send(
@@ -209,26 +209,24 @@ defmodule NeonFS.Block.ConnectionHandler do
   defp handle_request(%{type: :read} = request, socket, state) do
     start_time = System.monotonic_time()
 
-    case Device.read_stream(state.device, request.offset, request.length) do
+    case io_core().read_stream(state.device, request.offset, request.length) do
       {:ok, stream} ->
         # The header goes first and the payload follows chunk by chunk: a
         # simple reply carries no length, so the client reads exactly what it
         # asked for and nothing has to be held here to compute one.
         :ok = Socket.send(socket, Protocol.encode_simple_reply(:ok, request.cookie))
         bytes = stream_to_socket(stream, socket)
-        Device.measure_read(state.device, bytes, start_time, :ok)
+        io_core().measure_read(state.device, bytes, start_time, :ok)
         {:continue, state}
 
       {:error, reason} ->
-        Device.measure_read(state.device, 0, start_time, :error)
+        io_core().measure_read(state.device, 0, start_time, :error)
         reply_error(socket, request, reason, state)
     end
   end
 
   defp handle_request(%{type: :write} = request, socket, state) do
-    case retrying_stale(:write, fn ->
-           Device.write(state.device, request.offset, request.data)
-         end) do
+    case io_core().write(state.device, request.offset, request.data) do
       :ok -> ack(socket, request, state)
       {:error, reason} -> reply_error(socket, request, reason, state)
     end
@@ -237,7 +235,7 @@ defmodule NeonFS.Block.ConnectionHandler do
   # FUA on a write means the write must be durable before it is acknowledged,
   # which is the same barrier `flush` asks for.
   defp handle_request(%{type: :flush} = request, socket, state) do
-    case Device.flush(state.device) do
+    case io_core().flush(state.device) do
       :ok -> ack(socket, request, state)
       {:error, reason} -> reply_error(socket, request, reason, state)
     end
@@ -245,53 +243,16 @@ defmodule NeonFS.Block.ConnectionHandler do
 
   defp handle_request(%{type: type} = request, socket, state)
        when type in [:trim, :write_zeroes] do
-    case retrying_stale(type, fn ->
-           Device.write_zeroes(state.device, request.offset, request.length)
-         end) do
+    case io_core().write_zeroes(state.device, request.offset, request.length) do
       :ok -> ack(socket, request, state)
       {:error, reason} -> reply_error(socket, request, reason, state)
     end
   end
 
-  # NBD's error set has no "retry this" status, so a `:stale_chunks` reply —
-  # a write that exhausted core's retry budget against a contended span,
-  # having lost nothing — has nowhere honest to go on the wire: `EIO` fails a
-  # write that never failed, and a guest ext4 typically remounts read-only
-  # over one. This connection owns the request until it answers, so it is the
-  # only layer that can perform the retry the protocol gives the guest no way
-  # to ask for.
-  #
-  # Past the budget the reply is still `EAGAIN` — honest about what happened,
-  # without claiming a retry the client cannot be relied on to make.
-  defp retrying_stale(command, fun, attempt \\ 0) do
-    case fun.() do
-      {:error, :stale_chunks} = error ->
-        if attempt < stale_retries() do
-          :telemetry.execute(
-            [:neonfs, :block, :stale_write_retry],
-            %{attempt: attempt + 1},
-            %{command: command}
-          )
-
-          Process.sleep(stale_backoff_ms() * 2 ** attempt)
-          retrying_stale(command, fun, attempt + 1)
-        else
-          error
-        end
-
-      result ->
-        result
-    end
-  end
-
-  defp stale_retries, do: Application.get_env(:neonfs_block, :stale_write_retries, 3)
-
-  defp stale_backoff_ms, do: Application.get_env(:neonfs_block, :stale_write_backoff_ms, 10)
-
   # A write carrying FUA is acknowledged only after the flush it implies.
   defp ack(socket, %{type: :write, flags: flags} = request, state) do
     if :fua in flags do
-      case Device.flush(state.device) do
+      case io_core().flush(state.device) do
         :ok -> send_ok(socket, request, state)
         {:error, reason} -> reply_error(socket, request, reason, state)
       end
@@ -351,6 +312,11 @@ defmodule NeonFS.Block.ConnectionHandler do
 
   defp error_code(:stale_chunks), do: :eagain
   defp error_code(_reason), do: :eio
+
+  # Every device operation goes through the behaviour rather than naming the
+  # core directly: this module is the NBD frontend, and a second frontend
+  # answers the same callbacks against the same core.
+  defp io_core, do: Frontend.impl()
 
   defp attach(name, state) do
     DeviceRegistry.attach(name, connection_key(state))

@@ -93,7 +93,25 @@ defmodule NeonFS.Block.SupervisorTest do
     assert_receive {:DOWN, ^ref, :process, ^listener, :killed}, 1_000
 
     wait_for_restart(supervisor)
-    assert DeviceRegistry.attached() == %{}
+
+    # The registry releases on its own monitor firing, which is ordered
+    # against the listener's death but not against the listener coming back —
+    # so waiting for the restart does not imply the release has been
+    # processed. Asserting straight after it passed only because nothing else
+    # was competing for the scheduler.
+    wait_for_release()
+  end
+
+  defp wait_for_release(attempts \\ 100)
+
+  defp wait_for_release(0),
+    do: flunk("registry still holds #{inspect(DeviceRegistry.attached())}")
+
+  defp wait_for_release(attempts) do
+    case DeviceRegistry.attached() do
+      empty when empty == %{} -> :ok
+      _still_held -> wait_for_release(attempts - 1)
+    end
   end
 
   defp wait_for_restart(supervisor, attempts \\ 100)

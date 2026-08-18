@@ -45,7 +45,7 @@ defmodule NeonFS.Block.DeviceRegistry do
 
   use GenServer
 
-  alias NeonFS.Block.Device
+  alias NeonFS.Block.{Device, Frontend}
   alias NeonFS.Client.Router
   alias NeonFS.Core.BlockAttachment
   alias NeonFS.Core.NamespaceCoordinator
@@ -105,7 +105,7 @@ defmodule NeonFS.Block.DeviceRegistry do
         {:reply, {:ok, device}, note_attach(state, export, holder)}
 
       :error ->
-        with {:ok, device} <- Device.open(export),
+        with {:ok, device} <- Frontend.impl().open(export),
              {:ok, claim_id} <- claim_device(device) do
           state =
             put_in(state.devices[export], %{
