@@ -22,7 +22,7 @@ defmodule NeonFS.Integration.MixProject do
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
       version: @version,
-      hex: [ignore_advisories: ["EEF-CVE-2026-43969", "EEF-CVE-2026-43966"]]
+      hex: [ignore_advisories: ignored_advisories()]
     ]
   end
 
@@ -44,6 +44,23 @@ defmodule NeonFS.Integration.MixProject do
   def application do
     [
       extra_applications: [:logger, :crypto]
+    ]
+  end
+
+  # cowlib is transitive (`grpc_server` -> `cowboy` -> `cowlib`) and the newest
+  # published release carries these, so there is nothing to upgrade to. Each
+  # names a cowlib function this project never reaches: cookie building,
+  # structured-header escaping, and `Link` headers — the cowboy here serves
+  # gRPC and nothing else. Remove an entry when a fixed cowlib ships; an
+  # ignore list nobody revisits is how a real exposure gets inherited.
+  defp ignored_advisories do
+    [
+      # Cookie Request Header Injection in cow_cookie:cookie/1
+      "EEF-CVE-2026-43969",
+      # HTTP Response Splitting in cow_http_struct_hd:escape_string/2
+      "EEF-CVE-2026-43966",
+      # Link Header Directive Smuggling in cow_link:link/1
+      "EEF-CVE-2026-43971"
     ]
   end
 
