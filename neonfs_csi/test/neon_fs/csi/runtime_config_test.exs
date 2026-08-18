@@ -17,6 +17,7 @@ defmodule NeonFS.CSI.RuntimeConfigTest do
     on_exit(fn ->
       System.delete_env("NEONFS_CSI_MODE")
       System.delete_env("NEONFS_CORE_NODE")
+      System.delete_env("CSI_ENDPOINT")
     end)
 
     :ok
@@ -45,6 +46,27 @@ defmodule NeonFS.CSI.RuntimeConfigTest do
 
     assert config[:neonfs_client][:bootstrap_nodes] == [:"neonfs@10.0.0.1"]
     assert config[:neonfs_csi][:core_node] == :"neonfs@10.0.0.1"
+  end
+
+  # The CO tells a plugin where to listen through `CSI_ENDPOINT`; the chart
+  # points the node plugin at `/csi`, which is the kubelet's plugin directory
+  # mounted in. Ignoring it meant opening a socket inside the container, where
+  # `csi-node-driver-registrar` could not see it.
+  test "CSI_ENDPOINT sets the socket the plugin opens" do
+    System.put_env("CSI_ENDPOINT", "unix:///csi/csi.sock")
+
+    assert Config.Reader.read!(@runtime_config)[:neonfs_csi][:socket_path] == "/csi/csi.sock"
+  end
+
+  test "a bare path in CSI_ENDPOINT is accepted, a non-unix scheme is not" do
+    System.put_env("CSI_ENDPOINT", "/csi/csi.sock")
+    assert Config.Reader.read!(@runtime_config)[:neonfs_csi][:socket_path] == "/csi/csi.sock"
+
+    System.put_env("CSI_ENDPOINT", "tcp://127.0.0.1:9000")
+
+    assert_raise RuntimeError, ~r/must be a unix:\/\/ endpoint/, fn ->
+      Config.Reader.read!(@runtime_config)
+    end
   end
 
   # A typo'd mode would otherwise be indistinguishable from an unset one, and
