@@ -34,3 +34,24 @@ case System.get_env("NEONFS_CORE_NODE") do
     config :neonfs_client, bootstrap_nodes: [String.to_atom(core_node)]
     config :neonfs_csi, core_node: String.to_atom(core_node)
 end
+
+# `CSI_ENDPOINT` is the CO's own way of telling a plugin where to listen, and
+# the chart has always set it — `unix:///csi/csi.sock` for the node plugin,
+# whose `/csi` is the kubelet's plugin directory mounted in. Nothing read it,
+# so the plugin opened its compiled-in default instead: a path inside the
+# container rather than on the hostPath, where `csi-node-driver-registrar`
+# could never see it. The socket existed and the driver was unreachable.
+case System.get_env("CSI_ENDPOINT") do
+  nil ->
+    :ok
+
+  "unix://" <> path ->
+    config :neonfs_csi, socket_path: Path.absname(path)
+
+  path ->
+    if String.contains?(path, "://") do
+      raise "CSI_ENDPOINT must be a unix:// endpoint, got #{inspect(path)}"
+    else
+      config :neonfs_csi, socket_path: Path.absname(path)
+    end
+end
