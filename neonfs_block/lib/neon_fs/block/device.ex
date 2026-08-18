@@ -54,6 +54,8 @@ defmodule NeonFS.Block.Device do
   what it actually cost.
   """
 
+  @behaviour NeonFS.Block.Frontend
+
   alias NeonFS.Client
   alias NeonFS.Client.ChunkReader
   alias NeonFS.Core.BlockAttachment
@@ -141,8 +143,10 @@ defmodule NeonFS.Block.Device do
   """
   @spec write(t(), non_neg_integer(), binary()) :: :ok | {:error, term()}
   def write(device, offset, data) do
-    measure(device, :write, byte_size(data), fn ->
-      core_call(:write, [device.volume, device.file_id, offset, data])
+    retrying_stale(:write, fn ->
+      measure(device, :write, byte_size(data), fn ->
+        core_call(:write, [device.volume, device.file_id, offset, data])
+      end)
     end)
   end
 
@@ -161,10 +165,45 @@ defmodule NeonFS.Block.Device do
   """
   @spec write_zeroes(t(), non_neg_integer(), pos_integer()) :: :ok | {:error, term()}
   def write_zeroes(device, offset, length) do
-    measure(device, :write_zeroes, length, fn ->
-      core_call(:write_zeroes, [device.volume, device.file_id, offset, length])
+    retrying_stale(:write_zeroes, fn ->
+      measure(device, :write_zeroes, length, fn ->
+        core_call(:write_zeroes, [device.volume, device.file_id, offset, length])
+      end)
     end)
   end
+
+  # A write that exhausted core's retry budget against a contended span has
+  # lost nothing, so every frontend wants it retried rather than failed —
+  # which is why the retry lives here and not in one of them. NBD has no
+  # "retry this" status to hand back, and `ublk`'s `-EAGAIN` means something
+  # else again; the *reply* is the frontend's problem, the retrying is not.
+  #
+  # Past the budget the error is returned unchanged, for the frontend to
+  # render however its protocol can.
+  defp retrying_stale(command, fun, attempt \\ 0) do
+    case fun.() do
+      {:error, :stale_chunks} = error ->
+        if attempt < stale_retries() do
+          :telemetry.execute(
+            [:neonfs, :block, :stale_write_retry],
+            %{attempt: attempt + 1},
+            %{command: command}
+          )
+
+          Process.sleep(stale_backoff_ms() * 2 ** attempt)
+          retrying_stale(command, fun, attempt + 1)
+        else
+          error
+        end
+
+      result ->
+        result
+    end
+  end
+
+  defp stale_retries, do: Application.get_env(:neonfs_block, :stale_write_retries, 3)
+
+  defp stale_backoff_ms, do: Application.get_env(:neonfs_block, :stale_write_backoff_ms, 10)
 
   @doc """
   Emits the telemetry for a read, whose bytes are counted by the caller as it
