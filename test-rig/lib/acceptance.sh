@@ -650,6 +650,175 @@ acceptance_cleanup() {
 
 # --- driver ----------------------------------------------------------------
 
+
+# --- CSI driver in the k3s VM ------------------------------------------------
+#
+# These run against the k3s VM `neonfs-rig k3s` boots and `neonfs-rig
+# csi-deploy` provisions, not against node 1. Where that VM is absent they
+# skip: the CSI slice is opt-in in the sense that it needs a second scenario
+# to have been run, not in the sense that anyone chooses to exclude it.
+
+CSI_NAMESPACE="${CSI_NAMESPACE:-neonfs-system}"
+CSI_TEST_NS="${CSI_TEST_NS:-neonfs-csi-accept}"
+CSI_STORAGE_CLASS="${CSI_STORAGE_CLASS:-neonfs}"
+CSI_PVC_SIZE="${CSI_PVC_SIZE:-64Mi}"
+# The node plugin's socket inside the k3s VM — the endpoint csi-sanity drives.
+CSI_NODE_SOCK="${CSI_NODE_SOCK:-/var/lib/kubelet/plugins/neonfs.csi.harton.dev/csi.sock}"
+
+# Every CSI step needs the VM and a deployed driver, and each of the three
+# reasons it might be missing is a different answer to the operator.
+csi_ready() {
+  node_running "${K3S_INDEX}" || return 1
+  node_ssh "${K3S_INDEX}" "command -v k3s >/dev/null 2>&1" 2>/dev/null || return 1
+  node_ssh "${K3S_INDEX}" "sudo k3s kubectl get pods -n ${CSI_NAMESPACE} \
+    -l app.kubernetes.io/name=neonfs-csi -o name 2>/dev/null | grep -q ." 2>/dev/null
+}
+
+kube() { node_ssh "${K3S_INDEX}" "sudo k3s kubectl $*"; }
+
+s_csi_driver_ready() {
+  csi_ready || {
+    echo "  no k3s VM with a deployed CSI driver — run './neonfs-rig k3s' then './neonfs-rig csi-deploy'" >&2
+    return 77
+  }
+
+  kube "wait --namespace ${CSI_NAMESPACE} --for=condition=Ready pod \
+    --selector app.kubernetes.io/name=neonfs-csi --timeout=120s" 2>&1 | sed 's/^/  /' >&2 \
+    || { echo "  CSI pods are not Ready" >&2; return 1; }
+
+  # The driver is only usable if the kubelet knows about it: registration is
+  # the node-driver-registrar's job and fails silently from the pod's side.
+  kube "get csinode -o jsonpath='{.items[*].spec.drivers[*].name}'" 2>/dev/null \
+    | grep -q 'neonfs.csi.harton.dev' \
+    || { echo "  driver is not registered with the kubelet (csinode)" >&2; return 1; }
+}
+
+# The whole point of a CSI driver, end to end: a PVC bound from the NeonFS
+# StorageClass, one pod writing to it, a *second* pod reading the same bytes
+# back, then deletion reclaiming the volume. Two pods rather than one because
+# a single pod proves only that a mount accepted a write.
+s_csi_pvc_roundtrip() {
+  csi_ready || { echo "  no CSI driver deployed" >&2; return 77; }
+
+  local payload="neonfs-csi-${TAG}"
+
+  kube "create namespace ${CSI_TEST_NS} --dry-run=client -o yaml | sudo k3s kubectl apply -f -" \
+    >/dev/null 2>&1 || true
+
+  node_ssh "${K3S_INDEX}" "sudo k3s kubectl apply -n ${CSI_TEST_NS} -f -" <<EOF 2>&1 | sed 's/^/  /' >&2
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: csi-accept
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: ${CSI_STORAGE_CLASS}
+  resources:
+    requests:
+      storage: ${CSI_PVC_SIZE}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: csi-writer
+spec:
+  backoffLimit: 2
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: writer
+          image: busybox:latest
+          command: ["sh", "-c", "echo ${payload} > /data/probe.txt && sync"]
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: csi-accept
+EOF
+
+  kube "wait -n ${CSI_TEST_NS} --for=condition=complete job/csi-writer --timeout=300s" \
+    2>&1 | sed 's/^/  /' >&2 || {
+    csi_dump_diagnostics
+    echo "  writer job did not complete" >&2
+    return 1
+  }
+
+  node_ssh "${K3S_INDEX}" "sudo k3s kubectl apply -n ${CSI_TEST_NS} -f -" <<EOF 2>&1 | sed 's/^/  /' >&2
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: csi-reader
+spec:
+  backoffLimit: 2
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: reader
+          image: busybox:latest
+          command: ["sh", "-c", "grep -qx ${payload} /data/probe.txt"]
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: csi-accept
+EOF
+
+  kube "wait -n ${CSI_TEST_NS} --for=condition=complete job/csi-reader --timeout=300s" \
+    2>&1 | sed 's/^/  /' >&2 || {
+    csi_dump_diagnostics
+    echo "  reader job did not complete — the second pod did not see the first pod's bytes" >&2
+    return 1
+  }
+
+  # Deletion has to reclaim, not merely unbind: `reclaimPolicy: Delete` means
+  # the PV should disappear with the claim, and a driver that leaks volumes
+  # here leaks them in production too.
+  local pv
+  pv="$(kube "get pvc -n ${CSI_TEST_NS} csi-accept -o jsonpath='{.spec.volumeName}'" 2>/dev/null)"
+
+  kube "delete -n ${CSI_TEST_NS} job/csi-writer job/csi-reader --wait=true" >/dev/null 2>&1
+  kube "delete -n ${CSI_TEST_NS} pvc/csi-accept --wait=true --timeout=180s" 2>&1 | sed 's/^/  /' >&2
+
+  if [ -n "${pv}" ]; then
+    node_ssh "${K3S_INDEX}" "for i in \$(seq 1 60); do \
+      sudo k3s kubectl get pv ${pv} >/dev/null 2>&1 || exit 0; sleep 2; done; exit 1" 2>/dev/null \
+      || { echo "  PV ${pv} outlived its claim — the volume was not reclaimed" >&2; return 1; }
+  fi
+}
+
+# csi-sanity is the upstream conformance suite; it drives the sockets
+# directly, so it runs inside the VM against the node plugin. The binary is
+# built on the host (`ci-install-k8s-tools csi-sanity`) and copied in, because
+# nothing in the VM has Go.
+s_csi_sanity() {
+  csi_ready || { echo "  no CSI driver deployed" >&2; return 77; }
+  command -v csi-sanity >/dev/null 2>&1 \
+    || { echo "  csi-sanity not on PATH — build it with 'resources/scripts/ci-install-k8s-tools csi-sanity'" >&2; return 77; }
+
+  node_scp "${K3S_INDEX}" "$(command -v csi-sanity)" "rig@127.0.0.1:/tmp/csi-sanity" >/dev/null 2>&1 \
+    || { echo "  could not copy csi-sanity into the k3s VM" >&2; return 1; }
+  node_ssh "${K3S_INDEX}" "chmod +x /tmp/csi-sanity"
+
+  node_ssh "${K3S_INDEX}" "sudo /tmp/csi-sanity \
+    --csi.endpoint ${CSI_NODE_SOCK} \
+    --csi.mountdir /tmp/csi-sanity-mount \
+    --csi.stagingdir /tmp/csi-sanity-staging \
+    --ginkgo.no-color" 2>&1 | tail -40 | sed 's/^/  /' >&2
+}
+
+csi_dump_diagnostics() {
+  kube "get pvc,pv,pods -n ${CSI_TEST_NS} -o wide" 2>&1 | sed 's/^/  /' >&2 || true
+  kube "describe pvc -n ${CSI_TEST_NS} csi-accept" 2>&1 | tail -20 | sed 's/^/  /' >&2 || true
+  kube "logs -n ${CSI_NAMESPACE} --selector app.kubernetes.io/component=controller \
+    -c neonfs-csi --tail=60" 2>&1 | sed 's/^/  /' >&2 || true
+}
+
 acceptance_run() {
   local mode="$1"
   echo "NeonFS acceptance — mode=${mode}, nodes=${NODES}, tag=${TAG}" >&2
@@ -677,6 +846,9 @@ acceptance_run() {
   step "block device detach (data survives)"         s_block_detach
   step "volume show reflects stored data"           s_volume_stats
   step "FUSE unmount does not wedge control plane"  s_fuse_unmount_resilience
+  step "CSI driver deployed and registered (k3s)"     s_csi_driver_ready
+  step "CSI PVC write/read/delete round trip"         s_csi_pvc_roundtrip
+  step "csi-sanity conformance suite"                 s_csi_sanity
   step "replication across nodes"                   s_replication
 
   acceptance_cleanup
