@@ -146,7 +146,9 @@ defmodule NeonFS.Integration.ClusterJoinTest do
         PeerCluster.rpc(cluster, :node2, :application, :ensure_all_started, [:inets])
 
       node1_info = PeerCluster.get_node!(cluster, :node1)
-      bad_token = "nfs_inv_badtoken1234_9999999999_invalidsig00000"
+      # Well-formed but wrongly signed: a token that fails to *parse* would be
+      # rejected a layer earlier and would not exercise signature verification.
+      bad_token = "nfs_inv_badtoken1234_9999999999_1_invalidsig00000"
 
       result =
         PeerCluster.rpc(cluster, :node2, NeonFS.CLI.Handler, :join_cluster, [
@@ -223,7 +225,7 @@ defmodule NeonFS.Integration.ClusterJoinTest do
       csr = TLS.encode_csr(csr_obj)
 
       # Parse token components
-      ["nfs", "inv", random, expiry, _sig] = String.split(token, "_")
+      ["nfs", "inv", random, expiry, uses, _sig] = String.split(token, "_")
 
       # Compute HMAC proof
       proof = :crypto.mac(:hmac, :sha256, token, csr) |> Base.encode64()
@@ -232,6 +234,7 @@ defmodule NeonFS.Integration.ClusterJoinTest do
         "csr_pem" => csr,
         "token_random" => random,
         "token_expiry" => expiry,
+        "token_uses" => uses,
         "proof" => proof,
         "node_name" => "test_node@localhost"
       }

@@ -22,6 +22,7 @@ defmodule NeonFS.Cluster.InviteRedemption do
   import Bitwise
 
   alias NeonFS.Client.InviteCrypto
+  alias NeonFS.Cluster.Invite
   alias NeonFS.Cluster.State
   alias NeonFS.Core.CertificateAuthority
   alias NeonFS.Core.RaSupervisor
@@ -42,6 +43,7 @@ defmodule NeonFS.Cluster.InviteRedemption do
   - `"csr_pem"` — PEM-encoded CSR from the joining node
   - `"token_random"` — random component of the invite token
   - `"token_expiry"` — expiry timestamp (string) of the invite token
+  - `"token_uses"` — redemption budget (string) signed into the token
   - `"proof"` — Base64-encoded HMAC-SHA256(csr_pem, full_token)
   - `"node_name"` — Erlang node name of the joining node
 
@@ -55,18 +57,20 @@ defmodule NeonFS.Cluster.InviteRedemption do
         "csr_pem" => csr_pem,
         "token_random" => token_random,
         "token_expiry" => token_expiry_str,
+        "token_uses" => token_uses_str,
         "proof" => proof_b64,
         "node_name" => node_name
       })
       when is_binary(csr_pem) and is_binary(token_random) and
-             is_binary(token_expiry_str) and is_binary(proof_b64) and
-             is_binary(node_name) do
+             is_binary(token_expiry_str) and is_binary(token_uses_str) and
+             is_binary(proof_b64) and is_binary(node_name) do
     with {:ok, state} <- load_state(),
-         {:ok, token} <- reconstruct_token(state.master_key, token_random, token_expiry_str),
+         {:ok, token} <-
+           reconstruct_token(state.master_key, token_random, token_expiry_str, token_uses_str),
          :ok <- check_expiry(token_expiry_str),
          :ok <- verify_proof(csr_pem, token, proof_b64),
          {:ok, csr} <- decode_and_validate_csr(csr_pem),
-         :ok <- claim_single_use(token_random, token_expiry_str),
+         :ok <- claim_use(token_random, token_expiry_str, token_uses_str),
          {:ok, node_cert_pem, ca_cert_pem} <- sign_csr(csr, node_name) do
       response = build_response(ca_cert_pem, node_cert_pem)
       encrypted = InviteCrypto.encrypt_response(response, token)
@@ -88,37 +92,41 @@ defmodule NeonFS.Cluster.InviteRedemption do
     end
   end
 
-  defp reconstruct_token(master_key, random, expiry_str) do
-    payload = "#{random}_#{expiry_str}"
+  defp reconstruct_token(master_key, random, expiry_str, uses_str) do
+    payload = Invite.signing_payload(random, expiry_str, uses_str)
 
     signature =
       :crypto.mac(:hmac, :sha256, master_key, payload)
       |> Base.encode32(case: :lower, padding: false)
       |> binary_part(0, 16)
 
-    {:ok, "nfs_inv_#{random}_#{expiry_str}_#{signature}"}
+    {:ok, "nfs_inv_#{random}_#{expiry_str}_#{uses_str}_#{signature}"}
   end
 
-  # Atomically claims the token id as redeemed via Ra, rejecting any
-  # reuse. Runs after the expiry/proof checks (so only valid tokens are
-  # recorded) but before the CSR is signed (so a replay can never reach
-  # certificate issuance — the single Ra apply elects exactly one winner
-  # among concurrent redemptions). `token_random` is the token's unique
-  # component; `expiry_str` was already validated by `check_expiry/1`.
-  defp claim_single_use(token_random, expiry_str) do
-    case Integer.parse(expiry_str) do
-      {expiry, ""} ->
-        now = DateTime.utc_now() |> DateTime.to_unix()
+  # Atomically claims one of the token's redemptions via Ra, rejecting any
+  # beyond its budget. Runs after the expiry/proof checks (so only valid
+  # tokens are counted) but before the CSR is signed (so an over-budget
+  # redemption can never reach certificate issuance — the single Ra apply
+  # elects exactly one winner among concurrent claims on the last use).
+  #
+  # The budget is taken from the token rather than from the request, because
+  # it was signed into the token: a caller who inflates `token_uses` produces
+  # a payload whose signature no longer reconstructs, and `verify_proof/3`
+  # has already rejected it by the time this runs.
+  defp claim_use(token_random, expiry_str, uses_str) do
+    with {expiry, ""} <- Integer.parse(expiry_str),
+         {uses, ""} when uses > 0 <- Integer.parse(uses_str) do
+      now = DateTime.utc_now() |> DateTime.to_unix()
 
-        case RaSupervisor.command({:redeem_invite, token_random, expiry, now}) do
-          {:ok, :ok, _leader} -> :ok
-          {:ok, {:error, :already_redeemed}, _leader} -> {:error, :already_redeemed}
-          {:error, _reason} -> {:error, :redeem_unavailable}
-          _other -> {:error, :redeem_unavailable}
-        end
-
-      _ ->
-        {:error, :invalid_format}
+      case RaSupervisor.command({:redeem_invite, token_random, expiry, uses, now}) do
+        {:ok, :ok, _leader} -> :ok
+        {:ok, {:error, :already_redeemed}, _leader} -> {:error, :already_redeemed}
+        {:ok, {:error, :budget_exhausted}, _leader} -> {:error, :budget_exhausted}
+        {:error, _reason} -> {:error, :redeem_unavailable}
+        _other -> {:error, :redeem_unavailable}
+      end
+    else
+      _ -> {:error, :invalid_format}
     end
   end
 

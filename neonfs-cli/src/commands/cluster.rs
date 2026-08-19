@@ -121,6 +121,10 @@ pub enum ClusterCommand {
         /// Token expiration duration (e.g., "1h", "30m", "3600")
         #[arg(long, default_value = "1h")]
         expires: String,
+
+        /// How many nodes may redeem this token
+        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..))]
+        uses: u32,
     },
 
     /// Initialize a new cluster
@@ -441,7 +445,9 @@ impl ClusterCommand {
     pub fn execute(&self, format: OutputFormat) -> Result<()> {
         match self {
             ClusterCommand::Ca { command } => command.execute(format),
-            ClusterCommand::CreateInvite { expires } => self.create_invite(expires, format),
+            ClusterCommand::CreateInvite { expires, uses } => {
+                self.create_invite(expires, *uses, format)
+            }
             ClusterCommand::Init {
                 name,
                 drive,
@@ -605,7 +611,7 @@ impl ClusterCommand {
         Ok(())
     }
 
-    fn create_invite(&self, expires: &str, format: OutputFormat) -> Result<()> {
+    fn create_invite(&self, expires: &str, uses: u32, format: OutputFormat) -> Result<()> {
         // Parse expiration duration to seconds
         let expires_in = parse_duration(expires)?;
 
@@ -614,9 +620,12 @@ impl ClusterCommand {
             conn.call(
                 "Elixir.NeonFS.CLI.Handler",
                 "create_invite",
-                vec![Term::FixInteger(FixInteger {
-                    value: expires_in as i32,
-                })],
+                vec![
+                    Term::FixInteger(FixInteger {
+                        value: expires_in as i32,
+                    }),
+                    Term::FixInteger(FixInteger { value: uses as i32 }),
+                ],
             )
             .await
         })?;
@@ -638,11 +647,17 @@ impl ClusterCommand {
                 let result = serde_json::json!({
                     "token": token,
                     "expires_in": expires_in,
+                    "uses": uses,
                 });
                 println!("{}", json::format(&result)?);
             }
             OutputFormat::Table => {
-                println!("✓ Created invite token (expires in {})", expires);
+                println!(
+                    "✓ Created invite token (expires in {}, {} redemption{})",
+                    expires,
+                    uses,
+                    if uses == 1 { "" } else { "s" }
+                );
                 println!();
                 println!("  Token: {}", token);
                 println!();

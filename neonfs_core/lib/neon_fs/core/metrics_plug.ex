@@ -89,6 +89,18 @@ defmodule NeonFS.Core.MetricsPlug do
       {:error, :already_redeemed} ->
         send_json_error(conn, 409, "already_redeemed", "Invite token has already been redeemed")
 
+      # Deliberately not folded into `already_redeemed`. An operator whose
+      # budget ran out has to size a new token; someone replaying a spent
+      # single-use token has to be told they cannot. One status for both
+      # sends the first person hunting an attack that is not happening.
+      {:error, :budget_exhausted} ->
+        send_json_error(
+          conn,
+          409,
+          "budget_exhausted",
+          "Invite token has no redemptions left; mint a new one with a larger --uses"
+        )
+
       {:error, :redeem_unavailable} ->
         send_json_error(conn, 503, "redeem_unavailable", "Redemption temporarily unavailable")
 

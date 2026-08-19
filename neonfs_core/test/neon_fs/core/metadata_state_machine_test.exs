@@ -48,8 +48,8 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
   end
 
   describe "version/0" do
-    test "returns 22" do
-      assert MetadataStateMachine.version() == 22
+    test "returns 23" do
+      assert MetadataStateMachine.version() == 23
     end
   end
 
@@ -132,11 +132,11 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
       assert {new_state, :ok, []} =
                MetadataStateMachine.apply(
                  %{},
-                 {:redeem_invite, "tok-1", expiry, now},
+                 {:redeem_invite, "tok-1", expiry, 1, now},
                  base_state()
                )
 
-      assert new_state.redeemed_invites == %{"tok-1" => expiry}
+      assert new_state.redeemed_invites == %{"tok-1" => {expiry, 1}}
       assert new_state.version == 1
     end
 
@@ -145,10 +145,10 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
       expiry = now + 3600
 
       {state, :ok, []} =
-        MetadataStateMachine.apply(%{}, {:redeem_invite, "tok-1", expiry, now}, base_state())
+        MetadataStateMachine.apply(%{}, {:redeem_invite, "tok-1", expiry, 1, now}, base_state())
 
       assert {_state, {:error, :already_redeemed}, []} =
-               MetadataStateMachine.apply(%{}, {:redeem_invite, "tok-1", expiry, now}, state)
+               MetadataStateMachine.apply(%{}, {:redeem_invite, "tok-1", expiry, 1, now}, state)
     end
 
     test "distinct token ids are independent" do
@@ -156,23 +156,125 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
       expiry = now + 3600
 
       {state, :ok, []} =
-        MetadataStateMachine.apply(%{}, {:redeem_invite, "tok-1", expiry, now}, base_state())
+        MetadataStateMachine.apply(%{}, {:redeem_invite, "tok-1", expiry, 1, now}, base_state())
 
       assert {state, :ok, []} =
-               MetadataStateMachine.apply(%{}, {:redeem_invite, "tok-2", expiry, now}, state)
+               MetadataStateMachine.apply(%{}, {:redeem_invite, "tok-2", expiry, 1, now}, state)
 
       assert Map.keys(state.redeemed_invites) |> Enum.sort() == ["tok-1", "tok-2"]
     end
 
     test "expired entries are pruned, so the keyspace stays bounded" do
       now = DateTime.utc_now() |> DateTime.to_unix()
-      stale = %{base_state() | redeemed_invites: %{"old" => now - 10}}
+      stale = %{base_state() | redeemed_invites: %{"old" => {now - 10, 1}}}
 
       assert {new_state, :ok, []} =
-               MetadataStateMachine.apply(%{}, {:redeem_invite, "fresh", now + 3600, now}, stale)
+               MetadataStateMachine.apply(
+                 %{},
+                 {:redeem_invite, "fresh", now + 3600, 1, now},
+                 stale
+               )
 
       refute Map.has_key?(new_state.redeemed_invites, "old")
       assert Map.has_key?(new_state.redeemed_invites, "fresh")
+    end
+
+    test "a budgeted token redeems exactly as many times as it was minted for" do
+      now = DateTime.utc_now() |> DateTime.to_unix()
+      expiry = now + 3600
+
+      state =
+        Enum.reduce(1..3, base_state(), fn _attempt, acc ->
+          assert {next, :ok, []} =
+                   MetadataStateMachine.apply(%{}, {:redeem_invite, "fleet", expiry, 3, now}, acc)
+
+          next
+        end)
+
+      assert state.redeemed_invites == %{"fleet" => {expiry, 3}}
+
+      assert {_state, {:error, :budget_exhausted}, []} =
+               MetadataStateMachine.apply(%{}, {:redeem_invite, "fleet", expiry, 3, now}, state)
+    end
+
+    # An operator whose 20-node budget ran out and someone replaying a spent
+    # single-use token need different answers: one mints a bigger token, the
+    # other is being told no. Collapsing them is the diagnosis this whole
+    # mechanism exists to avoid.
+    test "exhausting a budget is distinguishable from replaying a single-use token" do
+      now = DateTime.utc_now() |> DateTime.to_unix()
+      expiry = now + 3600
+
+      {single, :ok, []} =
+        MetadataStateMachine.apply(%{}, {:redeem_invite, "one", expiry, 1, now}, base_state())
+
+      {budgeted, :ok, []} =
+        MetadataStateMachine.apply(%{}, {:redeem_invite, "many", expiry, 2, now}, single)
+
+      {budgeted, :ok, []} =
+        MetadataStateMachine.apply(%{}, {:redeem_invite, "many", expiry, 2, now}, budgeted)
+
+      assert {_, {:error, :already_redeemed}, []} =
+               MetadataStateMachine.apply(%{}, {:redeem_invite, "one", expiry, 1, now}, budgeted)
+
+      assert {_, {:error, :budget_exhausted}, []} =
+               MetadataStateMachine.apply(%{}, {:redeem_invite, "many", expiry, 2, now}, budgeted)
+    end
+
+    # Two nodes racing for the last redemption is the case the single Ra apply
+    # exists to settle: applies are serialised, so the second sees the first's
+    # count whatever order they arrived in.
+    test "the last remaining use has exactly one winner" do
+      now = DateTime.utc_now() |> DateTime.to_unix()
+      expiry = now + 3600
+
+      {state, :ok, []} =
+        MetadataStateMachine.apply(%{}, {:redeem_invite, "last", expiry, 2, now}, base_state())
+
+      {state, :ok, []} =
+        MetadataStateMachine.apply(%{}, {:redeem_invite, "last", expiry, 2, now}, state)
+
+      assert {_state, {:error, :budget_exhausted}, []} =
+               MetadataStateMachine.apply(%{}, {:redeem_invite, "last", expiry, 2, now}, state)
+    end
+
+    test "a spent budget is reported against the budget the token carries" do
+      now = DateTime.utc_now() |> DateTime.to_unix()
+      expiry = now + 3600
+      spent = %{base_state() | redeemed_invites: %{"tok" => {expiry, 5}}}
+
+      assert {_state, {:error, :budget_exhausted}, []} =
+               MetadataStateMachine.apply(%{}, {:redeem_invite, "tok", expiry, 5, now}, spent)
+
+      assert {_state, :ok, []} =
+               MetadataStateMachine.apply(%{}, {:redeem_invite, "tok", expiry, 6, now}, spent)
+    end
+  end
+
+  describe "machine version 23" do
+    test "existing redemptions survive as one spent use each" do
+      now = DateTime.utc_now() |> DateTime.to_unix()
+      expiry = now + 3600
+      old_state = Map.put(base_state(), :redeemed_invites, %{"tok-1" => expiry})
+
+      assert {migrated, :ok, []} =
+               MetadataStateMachine.apply(%{}, {:machine_version, 22, 23}, old_state)
+
+      assert migrated.redeemed_invites == %{"tok-1" => {expiry, 1}}
+
+      assert {_state, {:error, :already_redeemed}, []} =
+               MetadataStateMachine.apply(
+                 %{},
+                 {:redeem_invite, "tok-1", expiry, 1, now},
+                 migrated
+               )
+    end
+
+    test "a state that never redeemed anything migrates to an empty map" do
+      assert {migrated, :ok, []} =
+               MetadataStateMachine.apply(%{}, {:machine_version, 22, 23}, base_state())
+
+      assert migrated.redeemed_invites == %{}
     end
   end
 

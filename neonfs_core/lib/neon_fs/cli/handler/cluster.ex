@@ -86,19 +86,21 @@ defmodule NeonFS.CLI.Handler.Cluster do
 
   ## Parameters
   - `expires_in` - Duration in seconds the token is valid for
+  - `uses` - How many nodes may redeem it (default `1`)
 
   ## Returns
-  - `{:ok, %{"token" => string}}` - Success map with invite token
+  - `{:ok, %{"token" => string, "uses" => integer}}` - Success map with invite token
   - `{:error, reason}` - Error tuple
   """
-  @spec create_invite(pos_integer()) :: {:ok, map()} | {:error, term()}
-  def create_invite(expires_in) when is_integer(expires_in) and expires_in > 0 do
+  @spec create_invite(pos_integer(), pos_integer()) :: {:ok, map()} | {:error, term()}
+  def create_invite(expires_in, uses \\ 1)
+      when is_integer(expires_in) and expires_in > 0 and is_integer(uses) and uses > 0 do
     set_cli_metadata()
 
     with :ok <- require_cluster() do
-      case Invite.create_invite(expires_in) do
+      case Invite.create_invite(expires_in, uses) do
         {:ok, token} ->
-          {:ok, %{"token" => token}}
+          {:ok, %{"token" => token, "uses" => uses}}
 
         {:error, :cluster_not_initialized} ->
           {:error, Unavailable.exception(message: "Cluster not initialised")}
