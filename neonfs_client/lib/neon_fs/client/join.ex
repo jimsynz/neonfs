@@ -23,7 +23,7 @@ defmodule NeonFS.Client.Join do
   `NeonFS.Cluster.State`, invoked after the join has been persisted.
   """
 
-  alias NeonFS.Client.{InviteCrypto, ServiceType}
+  alias NeonFS.Client.{HostLock, InviteCrypto, ServiceType}
   alias NeonFS.Cluster.State
   alias NeonFS.TLSDistConfig
   alias NeonFS.Transport.{Listener, PoolManager, TLS}
@@ -86,6 +86,80 @@ defmodule NeonFS.Client.Join do
       finalize_join_async(credentials, token, this_node, type, opts)
       {:ok, :joining}
     end
+  end
+
+  @doc """
+  Redeem an invite into local credentials, and stop there.
+
+  For a Kubernetes init container: it puts cluster credentials on the host and
+  exits. `join_cluster/4` cannot do that job — past the redemption it restarts
+  distribution, connects peers and finalises Ra and service registration in a
+  detached process, none of which means anything in a container that terminates
+  as soon as the call returns.
+
+  So this performs the HTTP redemption, writes the TLS material, regenerates
+  the distribution config, records how to reach the via node, and returns.
+
+  ## Idempotence
+
+  Every pod scheduled onto a host runs this, so credentials already present is
+  the common case and answers `{:ok, :already_provisioned}` without spending a
+  redemption. That check is why an invite's budget is sized against hosts
+  rather than pods.
+
+  ## What lands in `cluster.json`
+
+  Only what `NeonFS.Epmd` reads to resolve a peer's distribution port:
+  `this_node` and `known_peers` names and ports. **Not the cluster master
+  key** — that secret mints and verifies invite tokens
+  (`NeonFS.Cluster.Invite`), and a worker node has no business doing either.
+  Writing a full cluster state here would put it on every host in the fleet,
+  readable by any pod that mounts the state directory.
+
+  The consequence, deliberately accepted: this file is not a full
+  `NeonFS.Cluster.State` and `State.load/0` will reject it, because the
+  validator requires `cluster_id`, `cluster_name` and `created_at` which the
+  redemption response does not carry. `Epmd` parses the JSON directly and does
+  not care. A node that needs a full cluster state is a cluster *member*, and
+  a host provisioned this way is not one — nothing runs on it as a NeonFS node.
+  """
+  @spec redeem_credentials(String.t(), String.t(), keyword()) ::
+          {:ok, :provisioned | :already_provisioned} | {:error, term()}
+  def redeem_credentials(token, via_address, opts \\ [])
+      when is_binary(token) and is_binary(via_address) do
+    if credentials_present?() do
+      {:ok, :already_provisioned}
+    else
+      HostLock.with_lock(
+        "join",
+        fn -> redeem_under_lock(token, via_address, opts) end,
+        Keyword.take(opts, [:dir, :on_wait, :stale_after_ms, :wait_ms])
+      )
+    end
+  end
+
+  # Re-checked inside the lock. Between the unlocked check and taking the lock,
+  # another pod on this host may have finished the whole redemption, and
+  # spending a second unit of the invite's budget to discover that is the cost
+  # the lock exists to avoid.
+  defp redeem_under_lock(token, via_address, opts) do
+    if credentials_present?() do
+      {:ok, :already_provisioned}
+    else
+      do_redeem_credentials(token, via_address, opts)
+    end
+  end
+
+  @doc """
+  Whether this host already holds cluster credentials.
+
+  The node certificate rather than the directory: an empty `tls/` is what a
+  hostPath mount creates on a host that has never joined, so its existence
+  proves nothing.
+  """
+  @spec credentials_present?() :: boolean()
+  def credentials_present? do
+    File.exists?(Path.join(TLS.tls_dir(), "node.crt"))
   end
 
   @doc """
@@ -294,6 +368,59 @@ defmodule NeonFS.Client.Join do
   end
 
   # ── Credential install ────────────────────────────────────────────
+
+  defp do_redeem_credentials(token, via_address, opts) do
+    node_name = Keyword.get(opts, :node_name, Atom.to_string(Node.self()))
+    node_key = TLS.generate_node_key()
+    csr = TLS.create_csr(node_key, node_name)
+
+    with {:ok, credentials} <- redeem_over_http(via_address, token, csr, node_name),
+         :ok <- store_credentials(credentials, node_key),
+         :ok <- TLSDistConfig.regenerate(TLS.tls_dir()),
+         :ok <- record_via_node(credentials, node_name) do
+      {:ok, :provisioned}
+    end
+  end
+
+  # Injectable so the redemption can be exercised without an HTTP server; the
+  # rest of this function is filesystem work that a test can inspect directly.
+  defp redeem_over_http(via_address, token, csr, node_name) do
+    case Application.get_env(:neonfs_client, :redeem_http_fn) do
+      nil -> request_join_http(via_address, token, csr, node_name)
+      fun when is_function(fun, 4) -> fun.(via_address, token, csr, node_name)
+    end
+  end
+
+  # Deliberately not a `NeonFS.Cluster.State` — see `redeem_credentials/3`.
+  # `Epmd` reads `this_node` and `known_peers` name/dist_port pairs out of this
+  # file and nothing else, so that is all it holds; in particular it holds no
+  # master key.
+  defp record_via_node(credentials, node_name) do
+    via_node = credentials["via_node"]
+    via_port = credentials["via_dist_port"] || 0
+
+    peers =
+      if is_binary(via_node) and via_port > 0 do
+        [%{"name" => via_node, "dist_port" => via_port}]
+      else
+        []
+      end
+
+    contents =
+      %{
+        "this_node" => %{"name" => node_name, "dist_port" => local_dist_port()},
+        "known_peers" => peers
+      }
+      |> :json.encode()
+      |> IO.iodata_to_binary()
+
+    path = Path.join(State.meta_dir(), "cluster.json")
+
+    with :ok <- File.mkdir_p(Path.dirname(path)),
+         :ok <- File.write(path <> ".tmp", contents) do
+      File.rename(path <> ".tmp", path)
+    end
+  end
 
   defp store_credentials(credentials, node_key) do
     ca_cert = TLS.decode_cert!(credentials["ca_cert_pem"])
