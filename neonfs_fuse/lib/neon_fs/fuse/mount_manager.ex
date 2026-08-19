@@ -47,7 +47,15 @@ defmodule NeonFS.FUSE.MountManager do
   use GenServer
   require Logger
 
-  alias NeonFS.FUSE.{MetadataCache, MountInfo, MountRecovery, MountRegistry, MountSupervisor, Session}
+  alias NeonFS.FUSE.{
+    MetadataCache,
+    MountInfo,
+    MountRecovery,
+    MountRegistry,
+    MountSupervisor,
+    Session
+  }
+
   alias Wick.Fusermount
 
   @type mount_id :: String.t()

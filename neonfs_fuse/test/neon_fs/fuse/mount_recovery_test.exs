@@ -91,6 +91,7 @@ defmodule NeonFS.FUSE.MountRecoveryTest do
 
       stub_mountable_volume()
       stub_kernel_mount()
+
       stub(Wick.Fusermount, :unmount, fn path, opts ->
         send(test, {:reaped, path, opts})
         :ok
@@ -240,7 +241,11 @@ defmodule NeonFS.FUSE.MountRecoveryTest do
     stub(Wick.Fusermount, :unmount, fn _path, _opts -> :ok end)
     stub(NeonFS.FUSE.MountSupervisor, :start_cache, fn _opts -> {:ok, spawn_idle()} end)
     stub(NeonFS.FUSE.MountSupervisor, :stop_cache, fn _pid -> :ok end)
-    stub(NeonFS.FUSE.MetadataCache, :table, fn _pid, _opts -> :ets.new(:cache, [:set, :public]) end)
+
+    stub(NeonFS.FUSE.MetadataCache, :table, fn _pid, _opts ->
+      :ets.new(:cache, [:set, :public])
+    end)
+
     stub(NeonFS.FUSE.Session, :start_link, fn _opts -> {:ok, spawn_idle()} end)
   end
 

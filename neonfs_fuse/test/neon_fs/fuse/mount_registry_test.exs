@@ -70,8 +70,11 @@ defmodule NeonFS.FUSE.MountRegistryTest do
   # `decode` as untrusted input. Turning them into atoms would leak the atom
   # table to anyone who can write the file.
   test "an unrecognised option key is dropped rather than made into an atom", %{path: path} do
-    File.write!(path, ~s({"mounts":[{"id":"m","volume_name":"v","mount_point":"/mnt/v",) <>
-      ~s("opts":{"ro":true,"totally_made_up_key_9f3a":1},"mounted_at":"2026-08-19T03:00:00Z"}]}))
+    File.write!(
+      path,
+      ~s({"mounts":[{"id":"m","volume_name":"v","mount_point":"/mnt/v",) <>
+        ~s("opts":{"ro":true,"totally_made_up_key_9f3a":1},"mounted_at":"2026-08-19T03:00:00Z"}]})
+    )
 
     assert {:ok, [loaded]} = MountRegistry.load()
     assert loaded.opts == [ro: true]

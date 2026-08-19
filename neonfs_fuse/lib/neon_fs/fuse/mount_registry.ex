@@ -31,6 +31,7 @@ defmodule NeonFS.FUSE.MountRegistry do
   indistinguishable from an operator having unmounted something.
   """
 
+  alias NeonFS.Cluster.State
   alias NeonFS.FUSE.MountInfo
 
   @filename "fuse_mounts.json"
@@ -59,7 +60,7 @@ defmodule NeonFS.FUSE.MountRegistry do
   def path do
     case Application.fetch_env(:neonfs_fuse, :mount_registry_path) do
       {:ok, configured} -> configured
-      :error -> Path.join(NeonFS.Cluster.State.meta_dir(), @filename)
+      :error -> Path.join(State.meta_dir(), @filename)
     end
   end
 
