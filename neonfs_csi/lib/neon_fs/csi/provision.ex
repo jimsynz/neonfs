@@ -16,9 +16,17 @@ defmodule NeonFS.CSI.Provision do
   and must: the via address from a ConfigMap, the token from a Secret. A
   ConfigMap must not carry the token.
 
-    * `NEONFS_BOOTSTRAP_TOKEN` — the invite. Required.
-    * `NEONFS_CORE_NODE` — `host:port` of a cluster member's redemption
-      endpoint. Required.
+    * `NEONFS_BOOTSTRAP_TOKEN` — the invite.
+    * `NEONFS_JOIN_VIA` — `host:port` of a cluster member's redemption endpoint.
+
+  Deliberately **not** `NEONFS_CORE_NODE`, which the release's `runtime.exs`
+  reads as an Erlang node name and turns into `:neonfs_client`'s bootstrap
+  nodes. This is an HTTP address, and one variable meaning both would be
+  misread by whichever consumer got it second.
+
+  Both are only required when there is a redemption to make: a host that
+  already holds credentials needs neither, which is what lets a cluster whose
+  identity was provisioned out of band run this container harmlessly.
 
   ## Exit status
 
@@ -60,9 +68,16 @@ defmodule NeonFS.CSI.Provision do
   @spec provision(keyword()) ::
           {:ok, :provisioned | :already_provisioned} | {:error, term()}
   def provision(opts \\ []) do
-    with {:ok, token} <- required_env("NEONFS_BOOTSTRAP_TOKEN"),
-         {:ok, via} <- required_env("NEONFS_CORE_NODE") do
-      Join.redeem_credentials(token, via, Keyword.put_new(opts, :on_wait, &log_waiting/0))
+    # Before the environment is consulted, not after. A host provisioned out of
+    # band has no token and needs none, and demanding one would turn a
+    # successful no-op into a crash loop.
+    if Join.credentials_present?() do
+      {:ok, :already_provisioned}
+    else
+      with {:ok, token} <- required_env("NEONFS_BOOTSTRAP_TOKEN"),
+           {:ok, via} <- required_env("NEONFS_JOIN_VIA") do
+        Join.redeem_credentials(token, via, Keyword.put_new(opts, :on_wait, &log_waiting/0))
+      end
     end
   end
 

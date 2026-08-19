@@ -1,3 +1,4 @@
+{{- include "neonfs-csi.validate" . -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -38,10 +39,20 @@ spec:
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with .Values.controller.affinity }}
+      {{- if .Values.controller.affinity }}
       affinity:
-        {{- toYaml . | nindent 8 }}
+        {{- toYaml .Values.controller.affinity | nindent 8 }}
+      {{- else if .Values.controller.podAntiAffinity }}
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  {{- include "neonfs-csi.controllerSelectorLabels" . | nindent 18 }}
+              topologyKey: kubernetes.io/hostname
       {{- end }}
+      initContainers:
+        {{- include "neonfs-csi.provisionInitContainer" . | nindent 8 }}
       containers:
         - name: csi-provisioner
           image: {{ .Values.sidecars.provisioner.image }}
@@ -117,12 +128,8 @@ spec:
               value: unix://{{ .Values.controller.socketPath }}
             - name: NEONFS_CSI_MODE
               value: controller
-            - name: NEONFS_BOOTSTRAP_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "neonfs-csi.bootstrapSecretName" . }}
-                  key: {{ .Values.bootstrap.secretKey }}
-                  optional: true
+            - name: NEONFS_CORE_NODE
+              value: {{ .Values.coreNode | quote }}
             {{- with .Values.controller.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -145,12 +152,14 @@ spec:
           volumeMounts:
             - name: socket-dir
               mountPath: {{ dir .Values.controller.socketPath }}
+            {{- include "neonfs-csi.stateVolumeMounts" . | nindent 12 }}
             {{- with .Values.controller.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
       volumes:
         - name: socket-dir
           emptyDir: {}
+        {{- include "neonfs-csi.stateVolumes" . | nindent 8 }}
         {{- with .Values.controller.extraVolumes }}
         {{- toYaml . | nindent 8 }}
         {{- end }}

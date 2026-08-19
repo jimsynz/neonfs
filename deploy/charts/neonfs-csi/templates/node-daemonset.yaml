@@ -50,6 +50,8 @@ spec:
       affinity:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      initContainers:
+        {{- include "neonfs-csi.provisionInitContainer" . | nindent 8 }}
       containers:
         - name: node-driver-registrar
           image: {{ .Values.sidecars.nodeDriverRegistrar.image }}
@@ -90,16 +92,12 @@ spec:
               value: unix:///csi/csi.sock
             - name: NEONFS_CSI_MODE
               value: node
+            - name: NEONFS_CORE_NODE
+              value: {{ .Values.coreNode | quote }}
             - name: NODE_ID
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
-            - name: NEONFS_BOOTSTRAP_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "neonfs-csi.bootstrapSecretName" . }}
-                  key: {{ .Values.bootstrap.secretKey }}
-                  optional: true
             {{- with .Values.node.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -133,6 +131,7 @@ spec:
               mountPropagation: Bidirectional
             - name: fuse-device
               mountPath: /dev/fuse
+            {{- include "neonfs-csi.stateVolumeMounts" . | nindent 12 }}
             {{- with .Values.node.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -157,6 +156,7 @@ spec:
           hostPath:
             path: /dev/fuse
             type: CharDevice
+        {{- include "neonfs-csi.stateVolumes" . | nindent 8 }}
         {{- with .Values.node.extraVolumes }}
         {{- toYaml . | nindent 8 }}
         {{- end }}

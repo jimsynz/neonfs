@@ -640,19 +640,29 @@ k3s_install_chart() {
   #     would still reach for ghcr.io on a digest mismatch.
   #   * `hostNetwork: true` on the controller — the core VMs have no route to
   #     a k3s pod CIDR, and core dials interface nodes for RPC.
-  #   * the hostPath TLS mount and `NEONFS_CORE_NODE` — the pods have no
-  #     identity of their own; the chart's own bootstrap path does not work
-  #     (tracked separately) and needs a decision about single-use tokens.
-  #   * `replicaCount: 1` — two controllers on one node would collide on the
-  #     one dist port a host network gives them.
+  #   * `NEONFS_CORE_NODE` per workload — the chart's own value is one node name
+  #     for both, and these two need distinct `RELEASE_NODE`s on one host.
+  #   * `replicaCount: 1` and `podAntiAffinity: false` — one node, and two
+  #     controllers on it would collide on the one dist port a host network
+  #     gives them. The chart requires anti-affinity by default precisely to
+  #     stop that, which on a single-node rig means disabling it and running one.
+  #
+  # The TLS hostPath mount is *not* set here any more: the chart mounts
+  # `stateDir`'s `tls/` and `meta/` itself, and its `provision-identity` init
+  # container no-ops on this VM because it joined as a daemon before any pod
+  # started. Setting it again would emit two volumes named `neonfs-tls` and the
+  # API server would reject the pod.
   node_ssh "$i" "cat > /tmp/neonfs-csi-values.yaml" <<EOF
 image:
   repository: ${CSI_IMAGE_REPO}
   tag: ${CSI_IMAGE_TAG}
   pullPolicy: Never
+coreNode: $(node_erl 1)
+joinVia: $(node_ip 1):${CLUSTER_API_PORT}
 controller:
   replicaCount: 1
   hostNetwork: true
+  podAntiAffinity: false
   # The image runs as \`nobody\`; the joined VM's distribution key is 0600 and
   # owned by the \`neonfs\` user, so a \`nobody\` controller cannot start TLS
   # distribution and never reaches core. Borrowing an identity from the host
@@ -674,15 +684,6 @@ controller:
       value: "$(k3s_peer_ports)"
     - name: NEONFS_DIST_PORT
       value: "${CSI_CONTROLLER_DIST_PORT}"
-  extraVolumes:
-    - name: neonfs-tls
-      hostPath:
-        path: /var/lib/neonfs/tls
-        type: Directory
-  extraVolumeMounts:
-    - name: neonfs-tls
-      mountPath: /var/lib/neonfs/tls
-      readOnly: true
 node:
   extraEnv:
     - name: RELEASE_DISTRIBUTION
@@ -695,15 +696,6 @@ node:
       value: "$(k3s_peer_ports)"
     - name: NEONFS_DIST_PORT
       value: "${CSI_NODE_DIST_PORT}"
-  extraVolumes:
-    - name: neonfs-tls
-      hostPath:
-        path: /var/lib/neonfs/tls
-        type: Directory
-  extraVolumeMounts:
-    - name: neonfs-tls
-      mountPath: /var/lib/neonfs/tls
-      readOnly: true
 storageClass:
   parameters:
     replication_factor: "${REPLICAS}"
