@@ -11,12 +11,12 @@ Application.put_env(:kernel, :epmd_module, NeonFS.Epmd)
 # config.exs runs.
 Application.put_env(:kernel, :prevent_overlapping_partitions, false)
 
-# Note: real FUSE mount tests live in Rust under
-# `native/neonfs_fuse/tests/` because FUSE mounting cannot work from
-# within the BEAM VM — Erlang's SIGCHLD handling breaks fusermount's
-# fork/waitpid. The Elixir-side integration tests in `test/integration/`
-# drive the handler / session against a peer cluster without doing a
-# real kernel mount.
+# Note: no test here does a real kernel mount. FUSE mounting cannot work
+# from within the BEAM VM — Erlang's SIGCHLD handling breaks fusermount's
+# fork/waitpid — so the Elixir-side integration tests in `test/integration/`
+# drive the handler / session against a peer cluster instead, and the unit
+# tests stub `Wick.Fusermount`. The Rust tests this used to point at went
+# with the `fuser` NIF.
 
 Mimic.copy(NeonFS.Client.ChunkReader)
 Mimic.copy(NeonFS.Client)
