@@ -214,6 +214,33 @@ spec:
       priorityClassName: system-node-critical
       tolerations:
         - operator: Exists
+      initContainers:
+        - name: provision-identity
+          image: ghcr.io/jimsynz/neonfs/csi:0.1.0
+          imagePullPolicy: IfNotPresent
+          command:
+            - /app/bin/neonfs_csi
+            - eval
+            - NeonFS.CSI.Provision.main()
+          securityContext:
+            runAsUser: 0
+          env:
+            # The redemption endpoint, not the node name: this container speaks HTTP to
+            # a cluster member and never uses distribution.
+            - name: NEONFS_JOIN_VIA
+              value: "neonfs-core.example:9568"
+            # Optional so a host whose identity was provisioned out of band still
+            # starts. The command checks for existing credentials before it needs a
+            # token, and only complains when it actually has to redeem.
+            - name: NEONFS_BOOTSTRAP_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: release-neonfs-csi-bootstrap
+                  key: token
+                  optional: true
+          volumeMounts:
+            - name: neonfs-state
+              mountPath: /var/lib/neonfs
       containers:
         - name: node-driver-registrar
           image: registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.17.0
@@ -254,16 +281,12 @@ spec:
               value: unix:///csi/csi.sock
             - name: NEONFS_CSI_MODE
               value: node
+            - name: NEONFS_CORE_NODE
+              value: "neonfs_core@neonfs-core.example"
             - name: NODE_ID
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
-            - name: NEONFS_BOOTSTRAP_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: release-neonfs-csi-bootstrap
-                  key: token
-                  optional: true
           ports:
             - containerPort: 29653
               name: healthz
@@ -297,6 +320,12 @@ spec:
               mountPropagation: Bidirectional
             - name: fuse-device
               mountPath: /dev/fuse
+            - name: neonfs-tls
+              mountPath: /var/lib/neonfs/tls
+              readOnly: true
+            - name: neonfs-meta
+              mountPath: /var/lib/neonfs/meta
+              readOnly: true
       volumes:
         - name: registration-dir
           hostPath:
@@ -318,6 +347,18 @@ spec:
           hostPath:
             path: /dev/fuse
             type: CharDevice
+        - name: neonfs-state
+          hostPath:
+            path: "/var/lib/neonfs"
+            type: DirectoryOrCreate
+        - name: neonfs-tls
+          hostPath:
+            path: "/var/lib/neonfs/tls"
+            type: DirectoryOrCreate
+        - name: neonfs-meta
+          hostPath:
+            path: "/var/lib/neonfs/meta"
+            type: DirectoryOrCreate
 ---
 # Source: neonfs-csi/templates/controller-deployment.yaml
 apiVersion: apps/v1
@@ -352,13 +393,49 @@ spec:
         app.kubernetes.io/component: controller
     spec:
       serviceAccountName: release-neonfs-csi-controller
-      hostNetwork: false
+      hostNetwork: true
       tolerations:
         - key: CriticalAddonsOnly
           operator: Exists
         - effect: NoSchedule
           key: node-role.kubernetes.io/control-plane
           operator: Exists
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app.kubernetes.io/name: neonfs-csi
+                  app.kubernetes.io/instance: release
+                  app.kubernetes.io/component: controller
+              topologyKey: kubernetes.io/hostname
+      initContainers:
+        - name: provision-identity
+          image: ghcr.io/jimsynz/neonfs/csi:0.1.0
+          imagePullPolicy: IfNotPresent
+          command:
+            - /app/bin/neonfs_csi
+            - eval
+            - NeonFS.CSI.Provision.main()
+          securityContext:
+            runAsUser: 0
+          env:
+            # The redemption endpoint, not the node name: this container speaks HTTP to
+            # a cluster member and never uses distribution.
+            - name: NEONFS_JOIN_VIA
+              value: "neonfs-core.example:9568"
+            # Optional so a host whose identity was provisioned out of band still
+            # starts. The command checks for existing credentials before it needs a
+            # token, and only complains when it actually has to redeem.
+            - name: NEONFS_BOOTSTRAP_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: release-neonfs-csi-bootstrap
+                  key: token
+                  optional: true
+          volumeMounts:
+            - name: neonfs-state
+              mountPath: /var/lib/neonfs
       containers:
         - name: csi-provisioner
           image: registry.k8s.io/sig-storage/csi-provisioner:v6.3.0
@@ -421,12 +498,8 @@ spec:
               value: unix:///var/lib/csi/sockets/pluginproxy/csi.sock
             - name: NEONFS_CSI_MODE
               value: controller
-            - name: NEONFS_BOOTSTRAP_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: release-neonfs-csi-bootstrap
-                  key: token
-                  optional: true
+            - name: NEONFS_CORE_NODE
+              value: "neonfs_core@neonfs-core.example"
           ports:
             - containerPort: 29652
               name: healthz
@@ -449,9 +522,27 @@ spec:
           volumeMounts:
             - name: socket-dir
               mountPath: /var/lib/csi/sockets/pluginproxy
+            - name: neonfs-tls
+              mountPath: /var/lib/neonfs/tls
+              readOnly: true
+            - name: neonfs-meta
+              mountPath: /var/lib/neonfs/meta
+              readOnly: true
       volumes:
         - name: socket-dir
           emptyDir: {}
+        - name: neonfs-state
+          hostPath:
+            path: "/var/lib/neonfs"
+            type: DirectoryOrCreate
+        - name: neonfs-tls
+          hostPath:
+            path: "/var/lib/neonfs/tls"
+            type: DirectoryOrCreate
+        - name: neonfs-meta
+          hostPath:
+            path: "/var/lib/neonfs/meta"
+            type: DirectoryOrCreate
 ---
 # Source: neonfs-csi/templates/csidriver.yaml
 apiVersion: storage.k8s.io/v1

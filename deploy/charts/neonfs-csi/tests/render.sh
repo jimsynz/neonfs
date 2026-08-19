@@ -10,9 +10,15 @@ fixture="$here/default-values.yaml"
 
 mode="${1:-check}"
 
+# `coreNode` is required, and `bootstrap.uses` is required alongside the token
+# this snapshot sets. The chart refuses to render without them rather than
+# producing pods that come up and never reach the cluster, so the snapshot has
+# to supply both.
 render() {
   helm template release "$chart_dir" \
     --namespace neonfs-csi \
+    --set coreNode=neonfs_core@neonfs-core.example \
+    --set bootstrap.uses=3 \
     --set bootstrap.value=test-bootstrap-token-redacted
 }
 

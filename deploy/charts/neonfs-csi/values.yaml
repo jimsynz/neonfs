@@ -40,13 +40,40 @@ sidecars:
     image: registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.17.0
     pullPolicy: IfNotPresent
 
-# Bootstrap token used by the plugin to join the NeonFS cluster.
-# `existingSecret` takes precedence; otherwise the chart creates a Secret
-# from `value` (operators should override at install time, not commit
-# the value).
+# The core node the plugin talks to, as an Erlang node name — e.g.
+# `neonfs_core@10.0.0.1`. Required. Becomes `NEONFS_CORE_NODE`, which the
+# release maps to `:neonfs_client, :bootstrap_nodes`; without it every pod looks
+# for core on itself.
+coreNode: ""
+
+# Where a cluster member answers invite redemptions, as `host:port` — a
+# different thing from `coreNode`, which is why it is a separate value: this one
+# is an HTTP endpoint the init container POSTs a CSR to, not a node name.
+#
+# Defaults to `coreNode`'s host with port 9568, which is right whenever core's
+# API is on its default port. Set it when core listens elsewhere, or when
+# redemption should go to a different member than the plugin dials.
+joinVia: ""
+
+# Host directory holding this node's NeonFS identity. The init container
+# populates it; the plugin containers mount `tls/` and `meta/` from it
+# read-only. Shared by every NeonFS pod on the host, which is the point —
+# identity is per node, not per pod.
+stateDir: /var/lib/neonfs
+
+# The invite an init container redeems for this host's cluster certificate.
+# `existingSecret` takes precedence; otherwise the chart creates a Secret from
+# `value` (override at install time, do not commit it).
+#
+# `uses` is the invite's redemption budget and is required alongside `value`,
+# because one redemption is spent per *node* rather than per pod and the chart
+# cannot know the node count. Size it against the nodes that will run NeonFS
+# workloads, and mint with `neonfs cluster create-invite --uses N`. There is no
+# automatic top-up: a cluster that outgrows the budget needs a new invite.
 bootstrap:
   existingSecret: ""
   secretKey: token
+  uses: 0
   value: ""
 
 # Controller plugin (Deployment).
@@ -72,7 +99,16 @@ controller:
   socketPath: /var/lib/csi/sockets/pluginproxy/csi.sock
   livenessProbe:
     healthPort: 29652
-  hostNetwork: false
+  # The plugin joins the cluster over Erlang distribution from the host's
+  # network namespace, using the identity the init container established for
+  # that host. Two replicas therefore share one distribution port per host,
+  # which `podAntiAffinity` below keeps them off each other for.
+  hostNetwork: true
+  # Required rather than preferred: two replicas co-located on one host would
+  # contend for the same distribution port and the second would never connect.
+  # The cost is explicit — on a single-node cluster the second replica stays
+  # `Pending` forever. Set `controller.replicaCount: 1` there.
+  podAntiAffinity: true
   # Extra environment, volumes and mounts for the plugin container. The
   # driver reaches a NeonFS cluster over Erlang distribution, so a deployment
   # whose cluster is not itself in Kubernetes needs to say where it is
