@@ -544,14 +544,35 @@ defmodule NeonFS.Core.WriteOperationTest do
       assert Enum.empty?(uncommitted)
     end
 
-    test "cleans up chunks when write is aborted" do
-      # Test direct abort functionality
-      _write_id = WriteOperation.generate_write_id()
+    test "aborting a write with nothing staged does nothing" do
+      assert :ok = WriteOperation.abort_chunks(WriteOperation.generate_write_id())
+    end
 
-      # This tests that abort_chunks doesn't crash even with no chunks
-      # In production, this would be called during error handling
-      # We can't easily test the full cleanup path without mocking
-      assert :ok == :ok
+    test "an abort spares a chunk cluster truth says is committed", %{volume: volume} do
+      data = "a chunk two writers share"
+      {:ok, file_meta} = WriteOperation.write_file_streamed(volume.id, "/shared.txt", [data])
+      [hash] = file_meta.chunks
+
+      # Stand in for the node that only deduplicated against this chunk.
+      # `finalize_commit/2` is ETS-only on the committing node, so a
+      # deduplicating node's copy stays `:uncommitted` and keeps that write's
+      # ref — which is exactly what `abort_chunks/1` sweeps.
+      dedup_write = WriteOperation.generate_write_id()
+      {:ok, chunk_meta} = ChunkIndex.get(volume.id, hash)
+
+      :ets.insert(
+        :chunk_index,
+        {hash,
+         %{
+           chunk_meta
+           | commit_state: :uncommitted,
+             active_write_refs: MapSet.new([dedup_write])
+         }}
+      )
+
+      :ok = WriteOperation.abort_chunks(dedup_write)
+
+      assert {:ok, ^data} = ReadOperation.read_file(volume.id, "/shared.txt")
     end
   end
 

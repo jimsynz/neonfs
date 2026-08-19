@@ -272,7 +272,7 @@ defmodule NeonFS.Core.FileIndexTest do
       assert MapSet.size(chunk_meta.active_write_refs) == 0
     end
 
-    test "leaves the chunk uncommitted while another write still references it", %{flips: flips} do
+    test "commits the chunk even while another write still references it", %{flips: flips} do
       volume_id = "vol1"
       write_a = UUIDv7.generate()
       write_b = UUIDv7.generate()
@@ -288,12 +288,14 @@ defmodule NeonFS.Core.FileIndexTest do
 
       assert :counters.get(flips, 1) == 1
 
-      # The local ETS view keeps the chunk uncommitted while write_b's ref
-      # remains, so node-local GC won't release it. (The batch persisted
-      # `:committed`, but persisted commit_state is write-only — every GC /
-      # recovery decision reads ETS.)
+      # A committed file list points at the chunk, so it is committed — write_b
+      # holding a ref says only that another writer is touching it. Leaving it
+      # `:uncommitted` here was the older rule, and it made the chunk a
+      # candidate for `WriteOperation.abort_chunks/1`, which sweeps exactly
+      # what looks uncommitted: write_b's abort deleted live data. The ETS view
+      # now matches what the batch persisted.
       assert {:ok, chunk_meta} = ChunkIndex.lookup_by_hash(hash)
-      assert chunk_meta.commit_state == :uncommitted
+      assert chunk_meta.commit_state == :committed
       assert MapSet.equal?(chunk_meta.active_write_refs, MapSet.new([write_b]))
     end
 
