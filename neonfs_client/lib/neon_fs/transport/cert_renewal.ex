@@ -9,6 +9,22 @@ defmodule NeonFS.Transport.CertRenewal do
 
   On failure, retries with exponential backoff (1h, 2h, 4h, max 24h).
 
+  Started by `NeonFS.Client.Application`, so every node type that depends on
+  `neonfs_client` gets it exactly once — including omnibus, where they share a
+  BEAM node. A node that holds no certificate is a daily no-op.
+
+  ## When renewal cannot happen
+
+  An expired certificate cannot be renewed. Distribution verifies peers at the
+  TLS handshake, and `Router.call/4` needs the very connection the expired
+  certificate is what establishes. Recovery is a documented delete-and-redeem
+  procedure — the invite redemption runs over plain HTTP and needs no node
+  certificate — described under "Recovering a node whose certificate expired"
+  on the wiki's Cluster CA page.
+
+  `health_check/0` is what warns before that point is reached; it is registered
+  as the `client_cert_expiry` subsystem.
+
   ## Telemetry Events
 
     * `[:neonfs, :cert_renewal, :check]` — expiry check performed
@@ -34,6 +50,10 @@ defmodule NeonFS.Transport.CertRenewal do
   @initial_backoff_ms 3_600_000
   @max_backoff_ms 86_400_000
 
+  # Checks run daily, so this still leaves roughly seven attempts between the
+  # alarm being raised and the certificate actually expiring.
+  @unhealthy_threshold_days 7
+
   ## Client API
 
   @doc """
@@ -49,6 +69,30 @@ defmodule NeonFS.Transport.CertRenewal do
   def start_link(opts \\ []) do
     {name, opts} = Keyword.pop(opts, :name, __MODULE__)
     GenServer.start_link(__MODULE__, opts, name: name)
+  end
+
+  @doc """
+  Reports the local certificate's remaining life as a
+  `NeonFS.Client.HealthCheck` subsystem report.
+
+    * `:unhealthy` — under #{@unhealthy_threshold_days} days to expiry, or the
+      renewal process is not running.
+    * `:degraded` — inside the renewal threshold *and* renewal has already
+      failed at least once. Being inside the window is not itself a fault: every
+      node passes through it annually while renewing normally.
+    * `:healthy` — otherwise, including a node that holds no certificate at all.
+
+  A node under #{@unhealthy_threshold_days} days reports `:unhealthy` while it
+  is still serving correctly, so a readiness probe or load balancer may pull it.
+  That is deliberate: raising the alarm only once the certificate has expired
+  reports the outage instead of warning of it.
+  """
+  @spec health_check() :: NeonFS.Client.HealthCheck.subsystem_report()
+  def health_check(name \\ __MODULE__) do
+    case Process.whereis(name) do
+      nil -> %{status: :unhealthy, reason: :not_running}
+      pid -> expiry_report(GenServer.call(pid, :consecutive_failures))
+    end
   end
 
   ## Server Callbacks
@@ -68,6 +112,11 @@ defmodule NeonFS.Transport.CertRenewal do
 
     schedule_check(check_interval)
     {:ok, state}
+  end
+
+  @impl true
+  def handle_call(:consecutive_failures, _from, state) do
+    {:reply, state.consecutive_failures, state}
   end
 
   @impl true
@@ -113,6 +162,32 @@ defmodule NeonFS.Transport.CertRenewal do
   end
 
   ## Private
+
+  defp expiry_report(consecutive_failures) do
+    case TLS.read_local_cert() do
+      {:error, :not_found} ->
+        %{status: :healthy, reason: :no_cert}
+
+      {:ok, cert} ->
+        days_remaining = TLS.days_until_expiry(cert)
+
+        %{
+          status: expiry_status(days_remaining, consecutive_failures),
+          days_remaining: days_remaining,
+          consecutive_failures: consecutive_failures
+        }
+    end
+  end
+
+  defp expiry_status(days_remaining, _consecutive_failures)
+       when days_remaining <= @unhealthy_threshold_days,
+       do: :unhealthy
+
+  defp expiry_status(days_remaining, consecutive_failures) when consecutive_failures > 0 do
+    if days_remaining <= TLS.renewal_threshold_days(), do: :degraded, else: :healthy
+  end
+
+  defp expiry_status(_days_remaining, _consecutive_failures), do: :healthy
 
   defp check_and_maybe_renew(state) do
     case TLS.read_local_cert() do

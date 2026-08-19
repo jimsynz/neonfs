@@ -4,7 +4,8 @@ defmodule NeonFS.Client.Application do
 
   Supervises shared infrastructure used by every node type that depends
   on `neonfs_client` (core, fuse, nfs, s3, webdav, docker, iam):
-  client connectivity, event notification, transport pools, and partition
+  client connectivity, event notification, transport pools, node certificate
+  renewal, and partition
   recovery. Running these under a single application supervisor ensures
   each process is started exactly once per BEAM node — required for
   omnibus mode where all services share one node.
@@ -38,6 +39,7 @@ defmodule NeonFS.Client.Application do
 
   defp register_health_checks do
     alias NeonFS.Client.{Connection, CostFunction, Discovery, HealthCheck}
+    alias NeonFS.Transport.CertRenewal
 
     HealthCheck.register(:client,
       connection: fn ->
@@ -66,7 +68,8 @@ defmodule NeonFS.Client.Application do
         else
           %{status: :unhealthy, reason: :not_running}
         end
-      end
+      end,
+      cert_expiry: &CertRenewal.health_check/0
     )
   end
 
@@ -89,6 +92,10 @@ defmodule NeonFS.Client.Application do
       # Transport pool management
       NeonFS.Transport.PoolSupervisor,
       NeonFS.Transport.PoolManager,
+
+      # Node certificates are issued for a year; without this every node in
+      # every cluster has an unattended one-year fuse.
+      NeonFS.Transport.CertRenewal,
 
       # Per-node whole-chunk read cache for the data-plane read path
       NeonFS.Client.ChunkCache
