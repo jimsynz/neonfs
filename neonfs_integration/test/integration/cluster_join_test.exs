@@ -225,7 +225,7 @@ defmodule NeonFS.Integration.ClusterJoinTest do
       csr = TLS.encode_csr(csr_obj)
 
       # Parse token components
-      ["nfs", "inv", random, expiry, _sig] = String.split(token, "_")
+      ["nfs", "inv", random, expiry, uses, _sig] = String.split(token, "_")
 
       # Compute HMAC proof
       proof = :crypto.mac(:hmac, :sha256, token, csr) |> Base.encode64()
@@ -234,6 +234,7 @@ defmodule NeonFS.Integration.ClusterJoinTest do
         "csr_pem" => csr,
         "token_random" => random,
         "token_expiry" => expiry,
+        "token_uses" => uses,
         "proof" => proof,
         "node_name" => "test_node@localhost"
       }
