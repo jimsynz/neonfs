@@ -38,8 +38,10 @@ defmodule NeonFS.CSI.NodeServer do
   developer laptop without `/dev/fuse` or `CAP_SYS_ADMIN`:
 
     * `:fuse_mount_fn` — `(volume_name, staging_path) -> {:ok, mount_id} | {:error, term()}`.
-      Default `GenServer.call({MountManager, fuse_node}, {:mount, …})`
-      against the FUSE node configured via `:fuse_node`.
+      Default `GenServer.call({MountManager, fuse_node}, {:mount, …})`.
+      `:fuse_node` defaults to this node, whose mount stack
+      `NeonFS.CSI.Supervisor` starts in `:node` mode; set it to delegate
+      mounting to a FUSE daemon elsewhere.
     * `:fuse_unmount_fn` — `(mount_id) -> :ok | {:error, term()}`.
     * `:bind_mount_fn` — `(staging_path, target_path, ro?) -> :ok | {:error, term()}`.
       Default invokes `mount(8)` with `--bind` (and `-o remount,ro`

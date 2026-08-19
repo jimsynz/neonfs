@@ -125,6 +125,12 @@ spec:
             - name: pods-mount-dir
               mountPath: {{ printf "%s/pods" .Values.node.kubeletDir }}
               mountPropagation: Bidirectional
+            # The plugin mounts in its own pod, and NodeStageVolume's
+            # globalmount path lives here rather than under `pods`, so the
+            # mount has to propagate back to the host from this directory.
+            - name: csi-staging-dir
+              mountPath: {{ printf "%s/plugins/kubernetes.io/csi" .Values.node.kubeletDir }}
+              mountPropagation: Bidirectional
             - name: fuse-device
               mountPath: /dev/fuse
             {{- with .Values.node.extraVolumeMounts }}
@@ -143,6 +149,10 @@ spec:
           hostPath:
             path: {{ printf "%s/pods" .Values.node.kubeletDir }}
             type: Directory
+        - name: csi-staging-dir
+          hostPath:
+            path: {{ printf "%s/plugins/kubernetes.io/csi" .Values.node.kubeletDir }}
+            type: DirectoryOrCreate
         - name: fuse-device
           hostPath:
             path: /dev/fuse

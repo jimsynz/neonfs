@@ -164,6 +164,7 @@ target "csi" {
   ]
   contexts = {
     "client": "./neonfs_client"
+    "fuse": "./neonfs_fuse"
     "src": "./neonfs_csi"
     "base": "target:base"
     "cli": "target:cli"
