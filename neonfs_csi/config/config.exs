@@ -26,6 +26,13 @@ config :neonfs_fuse, start_supervisor: false
 
 if Mix.env() == :test do
   config :neonfs_csi, start_supervisor: false
+
+  # A node-mode supervisor starts the `neonfs_fuse` mount stack, which
+  # reconciles against its on-disk mount registry at boot. Point that at a
+  # temp file so the suite neither reads nor writes `/var/lib/neonfs`.
+  config :neonfs_fuse,
+    mount_recovery_attempts: 1,
+    mount_registry_path: Path.join(System.tmp_dir!(), "neonfs_csi_test_fuse_mounts.json")
 end
 
 if Mix.env() in [:dev, :test] do

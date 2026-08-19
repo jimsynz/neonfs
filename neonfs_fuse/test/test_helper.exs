@@ -20,6 +20,11 @@ Application.put_env(:kernel, :prevent_overlapping_partitions, false)
 
 Mimic.copy(NeonFS.Client.ChunkReader)
 Mimic.copy(NeonFS.Client)
+Mimic.copy(NeonFS.FUSE.MetadataCache)
+Mimic.copy(NeonFS.FUSE.MountRecovery)
+Mimic.copy(NeonFS.FUSE.MountSupervisor)
+Mimic.copy(NeonFS.FUSE.Session)
+Mimic.copy(Wick.Fusermount)
 
 # `:xattr_tools` tests need the `attr` package's `setfattr`/`getfattr`
 # CLIs (used by the real-mount xattr round-trip). Skip when

@@ -27,12 +27,35 @@ defmodule NeonFS.FUSE.MountManager do
   If the Session process crashes, the mount is cleaned up and removed
   from the active mounts list. The Handler is linked to the Session
   internally; both go down together when the Session terminates.
+
+  ## Restart Recovery
+
+  Every successful mount is recorded in `NeonFS.FUSE.MountRegistry`, and
+  every explicit unmount removes its record. Nothing else touches the file, so
+  a manager that dies — a crash, a `SIGKILL`, a DaemonSet rollout — comes back
+  with a record of what it was serving and reconciles against it on boot:
+  stale mountpoints are reaped and remounted, paths someone else is serving are
+  left alone.
+
+  Reconciliation retries, because a mount needs core and a restarting node
+  usually has not discovered one yet. A record that still cannot be remounted
+  when the attempts run out is dropped with an error rather than retried
+  forever — leaving it would strand an entry no operator can clear, since
+  `unmount/1` only knows about live mounts.
   """
 
   use GenServer
   require Logger
 
-  alias NeonFS.FUSE.{MetadataCache, MountInfo, MountSupervisor, Session}
+  alias NeonFS.FUSE.{
+    MetadataCache,
+    MountInfo,
+    MountRecovery,
+    MountRegistry,
+    MountSupervisor,
+    Session
+  }
+
   alias Wick.Fusermount
 
   @type mount_id :: String.t()
@@ -85,6 +108,20 @@ defmodule NeonFS.FUSE.MountManager do
   end
 
   @doc """
+  Tear down every live mount without forgetting it.
+
+  For shutdown. An orderly stop has to drop the kernel mounts — leaving them
+  behind strands a mountpoint whose server is about to vanish — but it does not
+  mean the host has stopped being responsible for them, so the records stay and
+  the next boot puts them back. `unmount/1` is the operator's "stop serving
+  this", and that is the only thing that clears a record.
+  """
+  @spec detach_all() :: :ok
+  def detach_all do
+    GenServer.call(__MODULE__, :detach_all, 30_000)
+  end
+
+  @doc """
   List all active mounts.
 
   Returns a list of MountInfo structs.
@@ -129,27 +166,17 @@ defmodule NeonFS.FUSE.MountManager do
 
   @impl true
   def init(_opts) do
-    {:ok, %State{}}
+    {:ok, %State{}, {:continue, :recover}}
+  end
+
+  @impl true
+  def handle_continue(:recover, state) do
+    {:noreply, recover(state, load_records(), 1)}
   end
 
   @impl true
   def handle_call({:mount, volume_name, mount_point, opts}, _from, state) do
-    with :ok <- validate_mount_point(mount_point),
-         :ok <- check_not_mounted(mount_point, state),
-         {:ok, volume} <- get_volume(volume_name),
-         :ok <- check_mountable(volume),
-         :ok <- check_mount_permission(volume, opts) do
-      mount_filesystem(volume_name, volume.id, mount_point, opts, state)
-    else
-      {:error, reason} = error ->
-        Logger.error("Failed to mount volume",
-          volume_name: volume_name,
-          mount_point: mount_point,
-          reason: inspect(reason)
-        )
-
-        {:reply, error, state}
-    end
+    do_mount(volume_name, mount_point, opts, state)
   end
 
   @impl true
@@ -173,11 +200,19 @@ defmodule NeonFS.FUSE.MountManager do
         end
 
         new_state = remove_mount(state, mount_id)
+        record_mounts(new_state)
+
         {:reply, unmount_result, new_state}
 
       :error ->
         {:reply, {:error, :not_found}, state}
     end
+  end
+
+  @impl true
+  def handle_call(:detach_all, _from, state) do
+    Enum.each(Map.values(state.mounts), &unmount_filesystem/1)
+    {:reply, :ok, %State{}}
   end
 
   @impl true
@@ -222,6 +257,11 @@ defmodule NeonFS.FUSE.MountManager do
   end
 
   @impl true
+  def handle_info({:recover, records, attempt}, state) do
+    {:noreply, recover(state, records, attempt)}
+  end
+
+  @impl true
   def handle_info({:DOWN, _ref, :process, pid, reason}, state) do
     # Session process exited (clean unmount or crash). Clean up the
     # mount entry and ensure `fusermount3 -u` runs so the kernel
@@ -249,6 +289,164 @@ defmodule NeonFS.FUSE.MountManager do
   end
 
   ## Private Helpers
+
+  # Shared by the `:mount` call and by restart recovery: a remount has to clear
+  # exactly the same checks as a fresh one — the volume may have been deleted,
+  # converted to a block volume, or had its permissions changed while this node
+  # was down.
+  defp do_mount(volume_name, mount_point, opts, state) do
+    with :ok <- validate_mount_point(mount_point),
+         :ok <- check_not_mounted(mount_point, state),
+         {:ok, volume} <- get_volume(volume_name),
+         :ok <- check_mountable(volume),
+         :ok <- check_mount_permission(volume, opts) do
+      mount_filesystem(volume_name, volume.id, mount_point, opts, state)
+    else
+      {:error, reason} = error ->
+        Logger.error("Failed to mount volume",
+          volume_name: volume_name,
+          mount_point: mount_point,
+          reason: inspect(reason)
+        )
+
+        {:reply, error, state}
+    end
+  end
+
+  # Recovery runs against the records rather than against live state, so an
+  # entry survives its own failed attempts and is retried with the rest.
+  defp recover(state, [], _attempt), do: state
+
+  defp recover(state, records, attempt) do
+    {recovered, outstanding} =
+      Enum.reduce(records, {state, []}, fn record, {acc_state, retry} ->
+        case recover_one(acc_state, record) do
+          {:ok, next_state} -> {next_state, retry}
+          :retry -> {acc_state, [record | retry]}
+        end
+      end)
+
+    record_mounts(recovered)
+    schedule_retry(Enum.reverse(outstanding), attempt)
+    recovered
+  end
+
+  defp recover_one(state, record) do
+    case MountRecovery.classify(record.mount_point) do
+      :stale ->
+        MountRecovery.reap(record.mount_point)
+        remount(state, record)
+
+      :vacant ->
+        remount(state, record)
+
+      :serving ->
+        Logger.warning("Leaving a recorded mount point that something else is serving",
+          mount_point: record.mount_point,
+          volume_name: record.volume_name
+        )
+
+        {:ok, state}
+
+      :missing ->
+        Logger.error("Recorded mount point is gone; dropping the record",
+          mount_point: record.mount_point,
+          volume_name: record.volume_name
+        )
+
+        {:ok, state}
+    end
+  end
+
+  defp remount(state, record) do
+    case do_mount(record.volume_name, record.mount_point, record.opts, state) do
+      {:reply, {:ok, mount_id}, new_state} ->
+        Logger.info("Remounted volume after restart",
+          mount_id: mount_id,
+          mount_point: record.mount_point,
+          volume_name: record.volume_name
+        )
+
+        :telemetry.execute(
+          [:neonfs, :fuse, :mount_recovery, :remounted],
+          %{},
+          %{mount_point: record.mount_point, volume_name: record.volume_name}
+        )
+
+        {:ok, new_state}
+
+      {:reply, {:error, reason}, _unchanged} ->
+        Logger.warning("Could not remount volume after restart",
+          mount_point: record.mount_point,
+          volume_name: record.volume_name,
+          reason: inspect(reason)
+        )
+
+        :retry
+    end
+  end
+
+  # A restarting node usually has not found a core node yet, so the first
+  # attempts fail on discovery rather than on anything about the mount.
+  defp schedule_retry([], _attempt) do
+    :telemetry.execute([:neonfs, :fuse, :mount_recovery, :settled], %{}, %{})
+  end
+
+  defp schedule_retry(records, attempt) do
+    if attempt < recovery_attempts() do
+      Process.send_after(self(), {:recover, records, attempt + 1}, recovery_backoff())
+    else
+      Enum.each(records, fn record ->
+        Logger.error("Giving up remounting volume after restart; dropping the record",
+          mount_point: record.mount_point,
+          volume_name: record.volume_name,
+          attempt: attempt
+        )
+      end)
+
+      :telemetry.execute(
+        [:neonfs, :fuse, :mount_recovery, :abandoned],
+        %{count: length(records)},
+        %{}
+      )
+    end
+  end
+
+  defp load_records do
+    case MountRegistry.load() do
+      {:ok, records} ->
+        records
+
+      {:error, reason} ->
+        Logger.error("Could not read the mount registry; no mounts will be recovered",
+          reason: inspect(reason)
+        )
+
+        []
+    end
+  end
+
+  # The registry is written from live state, so it always describes mounts this
+  # manager is serving. Records still awaiting a retry are held in the retry
+  # message rather than the file: a record that outlives its attempts should
+  # not survive a second restart to be attempted forever.
+  defp record_mounts(state) do
+    entries = state.mounts |> Map.values() |> Enum.map(&MountRegistry.entry/1)
+
+    case MountRegistry.save(entries) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.error("Could not record mounts; a restart will not recover them",
+          reason: inspect(reason)
+        )
+    end
+  end
+
+  defp recovery_attempts, do: Application.get_env(:neonfs_fuse, :mount_recovery_attempts, 10)
+
+  defp recovery_backoff, do: Application.get_env(:neonfs_fuse, :mount_recovery_backoff_ms, 5_000)
 
   # The path is checked on this FUSE node's own filesystem, so the node name
   # is part of the error: an operator who created the directory on a different
@@ -328,10 +526,14 @@ defmodule NeonFS.FUSE.MountManager do
           normalized_path,
           fd,
           session_pid,
-          cache_pid
+          cache_pid,
+          opts
         )
 
-      {:reply, {:ok, mount_id}, add_mount(state, mount_info)}
+      new_state = add_mount(state, mount_info)
+      record_mounts(new_state)
+
+      {:reply, {:ok, mount_id}, new_state}
     else
       {:error, reason} ->
         {:reply, {:error, reason}, state}
@@ -491,7 +693,8 @@ defmodule NeonFS.FUSE.MountManager do
          mount_point,
          fd,
          session_pid,
-         cache_pid
+         cache_pid,
+         opts
        ) do
     MountInfo.new(
       id: mount_id,
@@ -501,7 +704,8 @@ defmodule NeonFS.FUSE.MountManager do
       mount_session: fd,
       handler_pid: nil,
       session_pid: session_pid,
-      cache_pid: cache_pid
+      cache_pid: cache_pid,
+      opts: opts
     )
   end
 

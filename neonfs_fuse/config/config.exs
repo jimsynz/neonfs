@@ -62,6 +62,15 @@ if Mix.env() == :test do
   config :neonfs_client, start_children?: false
   config :neonfs_fuse, start_supervisor: false
 
+  # Keep the mount registry out of `/var/lib/neonfs`, which the suite must
+  # neither read nor write. Tests that care about its contents override the
+  # path per-test; this is the backstop for the ones that only start a
+  # `MountManager` and never mount anything.
+  config :neonfs_fuse,
+    mount_recovery_attempts: 1,
+    mount_recovery_backoff_ms: 10,
+    mount_registry_path: Path.join(System.tmp_dir!(), "neonfs_fuse_test_mounts.json")
+
   # Suppress log output during tests (ExUnit's capture_log handles test-specific logs)
   config :logger, level: :warning
 end
