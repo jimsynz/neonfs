@@ -111,7 +111,7 @@ classify() {
       ;;
 
     neonfs_block/*) mark neonfs_block neonfs_omnibus ;;
-    neonfs_fuse/*) mark neonfs_fuse neonfs_docker neonfs_omnibus ;;
+    neonfs_fuse/*) mark neonfs_fuse neonfs_csi neonfs_docker neonfs_omnibus integration ;;
     neonfs_docker/*) mark neonfs_docker neonfs_omnibus ;;
     neonfs_nfs/*) mark neonfs_nfs neonfs_omnibus ;;
     neonfs_webdav/*) mark neonfs_webdav neonfs_s3 neonfs_omnibus ;;

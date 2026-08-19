@@ -17,6 +17,20 @@ defmodule NeonFS.CSI.Supervisor do
     * `:listener` — `:socket` (default) or `{:tcp, port}` for tests.
     * `:register_service` — `true` (default) registers as `:csi` in
       the cluster service registry. Tests usually disable.
+
+  ## Mounting in-pod
+
+  A node plugin stages volumes by mounting them itself: the release carries
+  `neonfs_fuse` and this supervisor starts its `InodeTable`,
+  `MountSupervisor` and `MountManager` directly, with `neonfs_fuse`'s own
+  application supervisor left inert (`start_supervisor: false`). That keeps
+  the CSI pod out of the service registry as a `:fuse` service it does not
+  serve, and off a second metrics port.
+
+  The mounts live and die with this pod. Restarting the plugin — a
+  DaemonSet rollout, say — leaves every staged mountpoint at `ENOTCONN`
+  until something unmounts it, because `MountManager` holds its mount table
+  in memory with no recovery path.
   """
 
   use Supervisor
@@ -53,7 +67,8 @@ defmodule NeonFS.CSI.Supervisor do
     children =
       case endpoint_child_spec() do
         {:ok, endpoint} ->
-          ([endpoint] ++ attach_holder_children()) |> maybe_add_registrar(register?)
+          (mount_stack_children() ++ [endpoint] ++ attach_holder_children())
+          |> maybe_add_registrar(register?)
 
         {:skip, message} ->
           Logger.warning("CSI plugin disabled: #{message}")
@@ -119,12 +134,24 @@ defmodule NeonFS.CSI.Supervisor do
   # Only a node-mode plugin holds attachments, so only it needs the pid
   # whose death releases them.
   defp attach_holder_children do
-    if Application.get_env(:neonfs_csi, :mode, :controller) == :node do
+    if node_mode?() do
       [NeonFS.CSI.AttachHolder]
     else
       []
     end
   end
+
+  # Before the endpoint, so a mount call cannot arrive at a `MountManager`
+  # that has not started. A controller never stages, so it never needs one.
+  defp mount_stack_children do
+    if node_mode?() do
+      [NeonFS.FUSE.InodeTable, NeonFS.FUSE.MountSupervisor, NeonFS.FUSE.MountManager]
+    else
+      []
+    end
+  end
+
+  defp node_mode?, do: Application.get_env(:neonfs_csi, :mode, :controller) == :node
 
   defp maybe_add_registrar(children, false), do: children
 

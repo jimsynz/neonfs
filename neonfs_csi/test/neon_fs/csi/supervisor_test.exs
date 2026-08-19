@@ -73,6 +73,50 @@ defmodule NeonFS.CSI.SupervisorTest do
            "the gRPC listener did not create #{socket_path}"
   end
 
+  # The defect this closes: a chart-installed node plugin had no process
+  # behind `{NeonFS.FUSE.MountManager, Node.self()}`, so every
+  # `NodeStageVolume` exited with `no process` and the pod claiming the PVC
+  # never started. Asserting the child is present is the only form of this
+  # test that would have failed.
+  describe "the node plugin's mount stack" do
+    setup do
+      socket_path =
+        Path.join(
+          System.tmp_dir!(),
+          "neonfs_csi_mount_stack_#{System.unique_integer([:positive])}/csi.sock"
+        )
+
+      Application.put_env(:neonfs_csi, :socket_path, socket_path)
+
+      on_exit(fn ->
+        Application.delete_env(:neonfs_csi, :mode)
+        File.rm_rf(Path.dirname(socket_path))
+      end)
+
+      :ok
+    end
+
+    test "a node-mode plugin can mount for itself" do
+      Application.put_env(:neonfs_csi, :mode, :node)
+
+      start_supervised!({NeonFS.CSI.Supervisor, []})
+
+      assert is_pid(Process.whereis(NeonFS.FUSE.MountManager)),
+             "NodeStageVolume calls this by name on the local node"
+
+      assert is_pid(Process.whereis(NeonFS.FUSE.MountSupervisor))
+      assert is_pid(Process.whereis(NeonFS.FUSE.InodeTable))
+    end
+
+    test "a controller-mode plugin starts no mount stack, never staging" do
+      Application.put_env(:neonfs_csi, :mode, :controller)
+
+      start_supervised!({NeonFS.CSI.Supervisor, []})
+
+      refute Process.whereis(NeonFS.FUSE.MountManager)
+    end
+  end
+
   describe "service registration metadata" do
     setup do
       on_exit(fn -> Application.delete_env(:neonfs_csi, :mode) end)

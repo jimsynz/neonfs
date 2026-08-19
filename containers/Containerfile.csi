@@ -2,6 +2,7 @@ FROM base AS deps
 
 # Copy only lockfiles and project config to cache the deps.get layer
 COPY --from=client mix.exs mix.lock /workdir/neonfs_client/
+COPY --from=fuse mix.exs mix.lock /workdir/neonfs_fuse/
 COPY --from=src mix.exs mix.lock /workdir/neonfs_csi/
 
 WORKDIR /workdir/neonfs_csi
@@ -12,6 +13,7 @@ ENV MIX_ENV=prod
 
 # Now copy the full source for compilation
 COPY --from=client . /workdir/neonfs_client
+COPY --from=fuse . /workdir/neonfs_fuse
 COPY --from=src . /workdir/neonfs_csi
 
 RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
@@ -27,8 +29,9 @@ LABEL org.opencontainers.image.source="https://harton.dev/project-neon/neonfs" \
       org.opencontainers.image.description="NeonFS Kubernetes CSI driver (Controller + Node)"
 
 # `libfuse3-4` + `fuse3` ship in the image so the Node plugin can drive
-# the kubelet-side FUSE mount directly. Controller pods that don't use
-# the FUSE mount path simply ignore the libraries.
+# the kubelet-side FUSE mount directly — the release carries `neonfs_fuse`
+# and mounts in its own pod. Controller pods don't stage, so they never
+# reach the libraries.
 RUN apt-get update -y && \
   apt-get install -y libstdc++6 openssl libssl3t64 libncurses6 locales ca-certificates libfuse3-4 fuse3 mount \
   && apt-get clean && rm -f /var/lib/apt/lists/*_*

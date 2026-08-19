@@ -80,6 +80,7 @@ defmodule NeonFS.CSI.MixProject do
       {:grpc, "~> 1.0"},
       {:grpc_server, "~> 1.0"},
       {:neonfs_client, path: "../neonfs_client"},
+      {:neonfs_fuse, path: "../neonfs_fuse"},
       {:protobuf, "~> 0.17"},
 
       # dev/test
