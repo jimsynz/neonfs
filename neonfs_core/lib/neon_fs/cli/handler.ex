@@ -291,8 +291,8 @@ defmodule NeonFS.CLI.Handler do
   - `{:ok, %{"token" => string}}` - Success map with invite token
   - `{:error, reason}` - Error tuple
   """
-  @spec create_invite(pos_integer()) :: {:ok, map()} | {:error, term()}
-  defdelegate create_invite(expires_in), to: ClusterHandler
+  @spec create_invite(pos_integer(), pos_integer()) :: {:ok, map()} | {:error, term()}
+  defdelegate create_invite(expires_in, uses \\ 1), to: ClusterHandler
 
   @doc """
   Joins an existing cluster using an invite token.

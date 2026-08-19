@@ -48,7 +48,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
           | {:delete_file, file_id :: binary()}
           | {:register_service, service_info :: map()}
           | {:redeem_invite, token_id :: binary(), expiry_unix :: non_neg_integer(),
-             now_unix :: non_neg_integer()}
+             uses :: pos_integer(), now_unix :: non_neg_integer()}
           | {:deregister_service, node()}
           | {:deregister_service, node(), atom()}
           | {:update_service_status, node(), atom()}
@@ -683,6 +683,15 @@ defmodule NeonFS.Core.MetadataStateMachine do
     end
   end
 
+  # A single-use token that has been redeemed is a replay, and keeps saying so.
+  # A budgeted one that has run out is an operator whose fleet outgrew the
+  # budget they sized, which is a different problem with a different fix —
+  # collapsing the two would hand them the message for an attack they are not
+  # under.
+  defp exhaustion(spent, uses) when spent < uses, do: nil
+  defp exhaustion(_spent, 1), do: :already_redeemed
+  defp exhaustion(_spent, _uses), do: :budget_exhausted
+
   defp config_as_map(config) when is_map(config), do: config
   defp config_as_map(_), do: %{}
 
@@ -1069,6 +1078,25 @@ defmodule NeonFS.Core.MetadataStateMachine do
     {Map.put_new(state, :block_epochs, %{}), :ok, []}
   end
 
+  def apply(_meta, {:machine_version, 22, 23}, state) do
+    require Logger
+
+    Logger.info("Ra machine version upgrade",
+      from: 22,
+      to: 23,
+      change: "count invite redemptions against a signed budget"
+    )
+
+    # Every recorded entry is a completed redemption of a token that was
+    # single-use, since that was the only kind. One spent use each.
+    counted =
+      Map.new(state[:redeemed_invites] || %{}, fn {token_id, expiry} ->
+        {token_id, {expiry, 1}}
+      end)
+
+    {Map.put(state, :redeemed_invites, counted), :ok, []}
+  end
+
   def apply(_meta, {:machine_version, from_version, to_version}, state) do
     require Logger
     Logger.info("Ra machine version upgrade", from: from_version, to: to_version)
@@ -1395,27 +1423,39 @@ defmodule NeonFS.Core.MetadataStateMachine do
   # Already-expired ids are dropped first — they can't be redeemed again
   # anyway, since redemption rejects expired tokens upstream — keeping the
   # keyspace bounded by the count of live, unexpired invites.
-  def apply(_meta, {:redeem_invite, token_id, expiry_unix, now_unix}, state) do
+  def apply(_meta, {:redeem_invite, token_id, expiry_unix, uses, now_unix}, state) do
     state = Map.put_new(state, :redeemed_invites, %{})
-    live = :maps.filter(fn _id, exp -> exp >= now_unix end, state.redeemed_invites)
+    live = :maps.filter(fn _id, {exp, _count} -> exp >= now_unix end, state.redeemed_invites)
 
-    if Map.has_key?(live, token_id) do
-      new_state = %{state | redeemed_invites: live, version: state.version + 1}
-      {new_state, {:error, :already_redeemed}, []}
-    else
-      new_state = %{
-        state
-        | redeemed_invites: Map.put(live, token_id, expiry_unix),
-          version: state.version + 1
-      }
+    spent =
+      case Map.fetch(live, token_id) do
+        {:ok, {_expiry, count}} -> count
+        :error -> 0
+      end
 
-      :telemetry.execute(
-        [:neonfs, :ra, :command, :redeem_invite],
-        %{version: new_state.version, live_invites: map_size(live) + 1},
-        %{}
-      )
+    case exhaustion(spent, uses) do
+      nil ->
+        new_state = %{
+          state
+          | redeemed_invites: Map.put(live, token_id, {expiry_unix, spent + 1}),
+            version: state.version + 1
+        }
 
-      {new_state, :ok, []}
+        :telemetry.execute(
+          [:neonfs, :ra, :command, :redeem_invite],
+          %{
+            version: new_state.version,
+            live_invites: map_size(live) + 1,
+            remaining: uses - spent - 1
+          },
+          %{}
+        )
+
+        {new_state, :ok, []}
+
+      reason ->
+        new_state = %{state | redeemed_invites: live, version: state.version + 1}
+        {new_state, {:error, reason}, []}
     end
   end
 
@@ -2587,7 +2627,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
   Return the state machine version for upgrade/migration support.
   """
   @impl :ra_machine
-  def version, do: 22
+  def version, do: 23
 
   @doc """
   Return the module to handle a specific state machine version.

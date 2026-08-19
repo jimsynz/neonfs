@@ -232,9 +232,15 @@ defmodule NeonFS.Client.Join do
   # ── HTTP invite redemption ────────────────────────────────────────
 
   defp request_join_http(via_address, token, csr, node_name) do
+    case parse_token_parts(token) do
+      {:ok, parts} -> post_redemption(via_address, token, csr, node_name, parts)
+      :error -> {:error, :invalid_token_format}
+    end
+  end
+
+  defp post_redemption(via_address, token, csr, node_name, {random, expiry, uses}) do
     :inets.start()
     csr_pem = TLS.encode_csr(csr)
-    {random, expiry} = parse_token_parts(token)
     proof = :crypto.mac(:hmac, :sha256, token, csr_pem) |> Base.encode64()
 
     body =
@@ -242,6 +248,7 @@ defmodule NeonFS.Client.Join do
         "csr_pem" => csr_pem,
         "token_random" => random,
         "token_expiry" => expiry,
+        "token_uses" => uses,
         "proof" => proof,
         "node_name" => node_name,
         "dist_port" => local_dist_port()
@@ -270,9 +277,19 @@ defmodule NeonFS.Client.Join do
     end
   end
 
+  # The components are sent as-is rather than re-derived, because the serving
+  # side reconstructs the token from exactly these strings to check the proof
+  # and to key the response it encrypts. Reformatting any of them here —
+  # trimming a leading zero, say — yields a different token and a response
+  # this node cannot decrypt.
+  #
+  # A token that does not parse is answered rather than raised on: an operator
+  # who pasted half a token would otherwise get a `CaseClauseError` from inside
+  # an RPC, which reaches them as `{:badrpc, …}` and names nothing.
   defp parse_token_parts(token) do
     case String.split(token, "_") do
-      ["nfs", "inv", random, expiry, _signature] -> {random, expiry}
+      ["nfs", "inv", random, expiry, uses, _signature] -> {:ok, {random, expiry, uses}}
+      _ -> :error
     end
   end
 
