@@ -595,11 +595,15 @@ defmodule NeonFS.Core.ServiceRegistry do
   end
 
   defp core_node?(node) do
-    service_app_started?(node, :core) and cluster_state_exists?(node)
+    service_app_started?(node, :core) and cluster_member?(node)
   end
 
-  defp cluster_state_exists?(node) do
-    :erpc.call(node, State, :exists?, [], @core_probe_timeout_ms)
+  # Membership rather than the presence of a `cluster.json`: a host provisioned
+  # for distribution only holds one of those without being a member, and
+  # counting it as a core node would route metadata at something that serves
+  # none.
+  defp cluster_member?(node) do
+    :erpc.call(node, State, :member?, [], @core_probe_timeout_ms)
   catch
     _, _ -> false
   end

@@ -83,7 +83,7 @@ defmodule NeonFS.Core.Application do
   end
 
   defp cache_orphan_detection_result do
-    if Application.get_env(:neonfs_core, :auto_bootstrap, false) and not State.exists?() do
+    if Application.get_env(:neonfs_core, :auto_bootstrap, false) and not State.member?() do
       result = Formation.orphaned_data_detected?()
       Application.put_env(:neonfs_core, :orphaned_data_at_startup, result)
     end

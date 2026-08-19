@@ -83,7 +83,7 @@ defmodule NeonFS.Cluster.Init do
   end
 
   defp check_not_initialised do
-    if State.exists?(), do: {:error, :already_initialised}, else: :ok
+    if State.member?(), do: {:error, :already_initialised}, else: :ok
   end
 
   defp check_node_named do

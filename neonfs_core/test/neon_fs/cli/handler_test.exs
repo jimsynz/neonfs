@@ -157,7 +157,7 @@ defmodule NeonFS.CLI.HandlerTest do
       assert is_binary(result.created_at)
 
       # --- Cluster state persisted ---
-      assert State.exists?()
+      assert State.member?()
       assert {:ok, state} = State.load()
       assert state.cluster_name == "test-cluster"
 

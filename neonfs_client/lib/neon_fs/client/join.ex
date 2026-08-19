@@ -117,11 +117,13 @@ defmodule NeonFS.Client.Join do
   readable by any pod that mounts the state directory.
 
   The consequence, deliberately accepted: this file is not a full
-  `NeonFS.Cluster.State` and `State.load/0` will reject it, because the
-  validator requires `cluster_id`, `cluster_name` and `created_at` which the
-  redemption response does not carry. `Epmd` parses the JSON directly and does
-  not care. A node that needs a full cluster state is a cluster *member*, and
-  a host provisioned this way is not one — nothing runs on it as a NeonFS node.
+  `NeonFS.Cluster.State`. `State.load/0` answers `{:error, :distribution_only}`
+  for it — named, rather than the validation failure it would otherwise look
+  like — and `State.member?/0` answers `false`, so a later `cluster join` on the
+  host is not refused as `:already_in_cluster`. `Epmd` parses the JSON directly
+  and reads what it needs. A node that needs a full cluster state is a cluster
+  *member*, and a host provisioned this way is not one — nothing runs on it as a
+  NeonFS node.
   """
   @spec redeem_credentials(String.t(), String.t(), keyword()) ::
           {:ok, :provisioned | :already_provisioned} | {:error, term()}
@@ -490,7 +492,7 @@ defmodule NeonFS.Client.Join do
   # ── Local state construction ──────────────────────────────────────
 
   defp validate_not_in_cluster do
-    if State.exists?() do
+    if State.member?() do
       {:error, :already_in_cluster}
     else
       :ok

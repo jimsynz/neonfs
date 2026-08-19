@@ -370,7 +370,7 @@ defmodule NeonFS.Core.Supervisor do
 
   defp maybe_formation_child do
     if Application.get_env(:neonfs_core, :auto_bootstrap, false) and
-         not State.exists?() do
+         not State.member?() do
       [
         %{
           id: Formation,
