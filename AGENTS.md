@@ -6,7 +6,7 @@ This file provides guidance to coding agents when working with code in this repo
 
 NeonFS is a BEAM-orchestrated distributed filesystem combining Elixir's coordination strengths with Rust's performance for storage operations. The project follows a strict separation of concerns: Elixir handles coordination, policy, and APIs; Rust handles I/O, chunking, and cryptography via Rustler NIFs.
 
-**Current Status:** the storage engine (replication, erasure coding, tiering, compression, encryption), multi-node clustering (Ra consensus, leaderless quorum metadata, cluster CA, TLS distribution, mTLS data plane), and seven access interfaces (FUSE, NFSv3, S3, WebDAV, Docker volumes, containerd content store, Kubernetes CSI) are shipped. CIFS/SMB via Samba VFS is in progress (#116): the `vfs_neonfs.so` C shim and `neonfs_cifs` Elixir bridge are built and CI-tested (#383, #384), with packaging (#385) and the end-to-end `smbd` test (#386) outstanding. See the [issue tracker](https://harton.dev/project-neon/neonfs/issues) for active work.
+**Current Status:** the storage engine (replication, erasure coding, tiering, compression, encryption), multi-node clustering (Ra consensus, leaderless quorum metadata, cluster CA, TLS distribution, mTLS data plane), and eight access interfaces (FUSE, NFSv3, S3, WebDAV, CIFS/SMB, Docker volumes, containerd content store, Kubernetes CSI) are shipped. CIFS/SMB via Samba VFS landed most recently — `vfs_neonfs.so` C shim, `neonfs_cifs` Elixir bridge, Debian package, container image, omnibus integration, and an end-to-end test against a real `smbd` that runs nightly — and its tracking epic is still open. See the [issue tracker](https://harton.dev/project-neon/neonfs/issues) for active work.
 
 ## Experimental Project — No Backwards Compatibility
 
@@ -80,7 +80,7 @@ git -c commit.gpgsign=false commit -m "commit message"
 | `neonfs_containerd/` | containerd content-store gRPC plugin (Unix socket). |
 | `neonfs_csi/` | Kubernetes CSI driver (gRPC over Unix socket; Helm chart in `deploy/charts/neonfs-csi/`). |
 | `neonfs_block/` | Block device target — NBD server (`Protocol` codec, `Listener`, `ConnectionHandler`, `DeviceRegistry`) over `NeonFS.Core.BlockBacking`. |
-| `neonfs_cifs/` | Samba VFS module backend (ETF over Unix socket) — in progress. `vfs_neonfs.so` C shim + Elixir bridge built and CI-tested (#383, #384); packaging (#385) and end-to-end `smbd` test (#386) outstanding. |
+| `neonfs_cifs/` | Samba VFS module backend (ETF over Unix socket). `vfs_neonfs.so` C shim + Elixir bridge, Debian package, container image and omnibus integration all shipped; the end-to-end test against a real `smbd` runs nightly. |
 | `neonfs_iam/` | IAM Ash domain — scaffold, resources land via #288/#290/#291/#292. |
 | `neonfs_omnibus/` | Single release bundling core + all shipped interfaces. |
 | `neonfs-cli/` | Rust CLI; speaks Erlang distribution (TLS) directly via `erl_dist`. |
