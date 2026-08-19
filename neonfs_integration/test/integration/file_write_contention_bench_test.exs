@@ -35,10 +35,18 @@ defmodule NeonFS.Integration.FileWriteContentionBenchTest do
   that they are slow **and a proportion of them fail**, and the second half is
   a defect rather than a cost.
 
-  No assertion on the success count: it would fail today for a reason that is
-  not this benchmark's subject. It belongs here the moment the deletion defect
-  is fixed, at which point this file also measures whether the thrash alone is
-  worth narrowing away.
+  ## What it now guards
+
+  The first two shapes mean a chunk under a committed file list is gone, and
+  the abort path no longer deletes those, so this asserts that neither
+  `:chunk_not_found` nor `:local_read_failed` appears at all.
+
+  Still no assertion on the success count. `{:add_write_ref_failed, :not_found}`
+  is a lost dedup race — deduplicating against a chunk whose writer then
+  legitimately aborted — and it is a throughput problem with its own retry
+  budget. Asserting a count here would couple a data-loss regression test to
+  that budget and to runner speed, which is how this file becomes a flake in
+  the data path.
 
   Not run by default (`:benchmark`). Run with:
 
@@ -76,9 +84,12 @@ defmodule NeonFS.Integration.FileWriteContentionBenchTest do
     IO.puts(format(:"file volume (whole-list compare)", file))
     IO.puts("  ---")
     IO.puts("  Disjointness buys nothing here: the compare is wider than the write.")
-    IO.puts("  Any failures above are the deletion defect, not contention cost.")
+    IO.puts("  Any failures above are lost dedup races, not lost data.")
     IO.puts("=================================================")
     IO.puts("")
+
+    assert Enum.filter(file.failures, &mentions?(&1, :chunk_not_found)) == []
+    assert Enum.filter(file.failures, &mentions?(&1, :local_read_failed)) == []
   end
 
   defp create_volume(cluster, name, opts) do
@@ -123,8 +134,9 @@ defmodule NeonFS.Integration.FileWriteContentionBenchTest do
 
     elapsed_us = System.monotonic_time(:microsecond) - started_at
     succeeded = Enum.count(results, &match?({:ok, {:ok, _}}, &1))
+    failures = Enum.reject(results, &match?({:ok, {:ok, _}}, &1))
 
-    for r <- results, not match?({:ok, {:ok, _}}, r) do
+    for r <- failures do
       IO.puts("    write failed: #{inspect(r, limit: :infinity, printable_limit: 200)}")
     end
 
@@ -132,9 +144,18 @@ defmodule NeonFS.Integration.FileWriteContentionBenchTest do
       elapsed_s: elapsed_us / 1_000_000,
       succeeded: succeeded,
       failed: @writers - succeeded,
+      failures: failures,
       writes_per_sec: succeeded * 1_000_000 / elapsed_us
     }
   end
+
+  # The shapes worth failing on arrive wrapped to varying depths — an
+  # `async_stream` tuple around an RPC result around an error tuple — so match
+  # on the atom appearing anywhere in the term rather than on one nesting.
+  defp mentions?(term, atom) when is_tuple(term), do: mentions?(Tuple.to_list(term), atom)
+  defp mentions?(term, atom) when is_list(term), do: Enum.any?(term, &mentions?(&1, atom))
+  defp mentions?(term, atom) when is_map(term), do: mentions?(Map.to_list(term), atom)
+  defp mentions?(term, atom), do: term == atom
 
   defp format(label, m) do
     [

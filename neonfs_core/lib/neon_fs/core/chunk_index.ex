@@ -401,11 +401,20 @@ defmodule NeonFS.Core.ChunkIndex do
   end
 
   @doc """
-  Finalises a batched chunk commit in the local ETS materialisation
-  : drops `write_id`'s write ref from each chunk and, when no refs
-  remain, flips its `commit_state` to `:committed`. ETS-only — the
-  persisted `:committed` payload was already written by the batch that
-  carried `commit_mutations/2`'s puts, so this does no quorum write.
+  Finalises a batched chunk commit in the local ETS materialisation:
+  drops `write_id`'s write ref from each chunk and flips its
+  `commit_state` to `:committed`. ETS-only — the persisted `:committed`
+  payload was already written by the batch that carried
+  `commit_mutations/2`'s puts, so this does no quorum write.
+
+  Committed **regardless of other writers' refs**, because this runs from
+  the post-commit hook for exactly the hashes a committed file list now
+  references. Waiting for the last in-flight ref to drain was the older
+  rule and it was unsound: a concurrent writer that deduped against one of
+  these hashes holds a ref, which left the chunk looking uncommitted while
+  a committed file pointed at it — and `WriteOperation.abort_chunks/1`
+  sweeps exactly the chunks that look uncommitted, so that writer's abort
+  deleted live data.
   """
   @spec finalize_commit(ChunkMeta.write_id(), [binary()]) :: :ok
   def finalize_commit(write_id, hashes) when is_list(hashes) do
@@ -660,13 +669,7 @@ defmodule NeonFS.Core.ChunkIndex do
   # Private — Commit
 
   defp finalise_meta(%ChunkMeta{} = meta, write_id) do
-    meta = ChunkMeta.remove_write_ref(meta, write_id)
-
-    if meta.commit_state == :uncommitted and MapSet.size(meta.active_write_refs) == 0 do
-      %{meta | commit_state: :committed}
-    else
-      meta
-    end
+    %{ChunkMeta.remove_write_ref(meta, write_id) | commit_state: :committed}
   end
 
   defp do_commit_chunk(hash) do

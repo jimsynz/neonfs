@@ -338,6 +338,12 @@ defmodule NeonFS.Core.Telemetry do
         event_name: [:neonfs, :write_operation, :exception],
         tags: [:volume_id],
         description: "Total write operation errors"
+      ),
+      counter("neonfs.write_operation.abort_delete_skipped.count",
+        event_name: [:neonfs, :write_operation, :abort_delete_skipped],
+        tags: [:volume_id],
+        description:
+          "Chunks an aborting write left behind because their metadata was unreadable; each is leaked storage"
       )
     ]
   end

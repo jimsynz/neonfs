@@ -2122,8 +2122,9 @@ defmodule NeonFS.Core.WriteOperation do
 
   @doc """
   Abort every chunk that still references `write_id`. Removes the
-  write ref and, when no other refs remain, deletes the chunk from
-  both storage and the `ChunkIndex`. Safe to call multiple times.
+  write ref and, when the chunk is still uncommitted in cluster truth and
+  no other refs remain, deletes it from both storage and the
+  `ChunkIndex`. Safe to call multiple times.
 
   Made public so `NeonFS.Core.PendingWriteRecovery` can drive orphan
   cleanup on startup.
@@ -2150,17 +2151,51 @@ defmodule NeonFS.Core.WriteOperation do
 
       volume_id ->
         case ChunkIndex.get(volume_id, hash) do
-          {:ok, updated_meta} -> delete_chunk_if_no_refs(updated_meta)
-          {:error, :not_found} -> :ok
+          {:ok, updated_meta} -> delete_chunk_if_unreferenced(updated_meta)
+          {:error, :not_found} -> skip_delete_unreadable(volume_id, hash, write_id)
         end
     end
   end
 
-  defp delete_chunk_if_no_refs(meta) do
-    if MapSet.size(meta.active_write_refs) == 0 do
+  # Two conditions, and the commit state is the load-bearing one. Write refs
+  # say which writers are touching the chunk, which is a property of writers
+  # and not of references: a writer that deduplicated against someone else's
+  # chunk holds a ref to data it did not create, and dropping the last ref
+  # therefore does not mean nothing points at the chunk.
+  #
+  # The commit state does mean that. `FileIndex.with_chunk_commit/3` folds
+  # `ChunkIndex.commit_mutations/2`'s `commit_state` merge into the same
+  # shard-CAS as the file mutation, so a chunk is persisted `:committed`
+  # atomically with the file list that references it. `ChunkIndex.get/2`
+  # resolves through `MetadataReader`, so what is read here is cluster truth
+  # rather than this node's ETS — which matters, because the ETS copy on a
+  # node that merely deduplicated against the chunk is never updated when
+  # another node commits it.
+  defp delete_chunk_if_unreferenced(meta) do
+    if meta.commit_state == :uncommitted and MapSet.size(meta.active_write_refs) == 0 do
       delete_chunk_from_storage(meta)
       ChunkIndex.delete(meta.hash)
     end
+  end
+
+  # The metadata read that decides the deletion above failed. It cannot be
+  # told apart from a genuinely absent chunk here: `ChunkIndex.get/2`
+  # collapses a quorum read error into `{:error, :not_found}` for every
+  # caller. Skipping the delete is the right direction — leaking a chunk
+  # beats deleting live data — but it is otherwise invisible, so the leak
+  # gets a signal instead.
+  defp skip_delete_unreadable(volume_id, hash, write_id) do
+    Logger.warning("skipped abort delete: chunk metadata unreadable",
+      volume_id: volume_id,
+      chunk_hash: Base.encode16(hash, case: :lower),
+      write_id: write_id
+    )
+
+    :telemetry.execute(
+      [:neonfs, :write_operation, :abort_delete_skipped],
+      %{count: 1},
+      %{volume_id: volume_id, chunk_hash: hash, write_id: write_id}
+    )
   end
 
   defp delete_chunk_from_storage(meta) do
