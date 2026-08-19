@@ -49,17 +49,20 @@ helm install neonfs-csi ./deploy/charts/neonfs-csi \
 
 ## Upgrading the driver interrupts mounted volumes
 
-The node plugin mounts each staged volume **inside its own pod**, and the
-mount table lives in that pod's memory with no recovery path. So rolling the
-`DaemonSet` — `helm upgrade`, an image bump, a node plugin restart for any
-reason — takes every NeonFS volume staged on that node down with it. The
-mountpoints are left at `ENOTCONN` until something unmounts them, and the pods
-using them see I/O errors rather than a pause.
+The node plugin mounts each staged volume **inside its own pod**, so rolling
+the `DaemonSet` — `helm upgrade`, an image bump, a plugin restart for any
+reason — takes those mounts down with the pod.
 
-Treat a driver upgrade as a data-path event, not a control-plane one: drain
-the workloads using NeonFS volumes from a node before the new plugin pod lands
-on it, or accept the interruption. This is a known gap rather than a design
-goal — mount recovery across a plugin restart is tracked separately.
+The plugin records what it was serving and re-establishes its **staging**
+mounts when it comes back, so a restart no longer leaves the node permanently
+without them. It does **not** repair the bind mounts the kubelet already made
+into running workload pods: those were bound from the previous mount, and they
+keep returning `ENOTCONN` until the kubelet publishes the volume again, which
+happens when the workload pod restarts.
+
+So a driver upgrade is still a data-path event rather than a control-plane one.
+Drain the workloads using NeonFS volumes from a node before the new plugin pod
+lands on it, or expect to restart them afterwards.
 
 ## Tests
 

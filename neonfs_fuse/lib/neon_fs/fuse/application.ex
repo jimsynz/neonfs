@@ -34,45 +34,31 @@ defmodule NeonFS.FUSE.Application do
     result
   end
 
+  # Drop the kernel mounts, but through `detach_all/0` rather than
+  # `unmount/1` — shutting down is not the operator saying "stop serving
+  # this", so the mount records survive and the next boot puts them back.
+  # Unmounting each one individually here would clear them and turn every
+  # restart into a silent loss of every mount the node held.
   @impl true
   def stop(_state) do
-    # Graceful shutdown: unmount all filesystems before stopping
     case Process.whereis(MountManager) do
-      nil -> :ok
-      _pid -> unmount_all()
-    end
+      nil ->
+        :ok
 
-    :ok
+      _pid ->
+        detach_all()
+        :ok
+    end
   end
 
-  defp unmount_all do
-    mounts = MountManager.list_mounts()
-
-    case mounts do
+  defp detach_all do
+    case MountManager.list_mounts() do
       [] ->
         :ok
 
-      _ ->
+      mounts ->
         Logger.info("Unmounting filesystems before shutdown", count: length(mounts))
-        Enum.each(mounts, &unmount_one/1)
-    end
-  end
-
-  defp unmount_one(mount) do
-    Logger.debug("Unmounting filesystem",
-      volume_name: mount.volume_name,
-      mount_point: mount.mount_point
-    )
-
-    case MountManager.unmount(mount.id) do
-      :ok ->
-        :ok
-
-      {:error, reason} ->
-        Logger.warning("Failed to unmount",
-          mount_point: mount.mount_point,
-          reason: inspect(reason)
-        )
+        MountManager.detach_all()
     end
   end
 end
