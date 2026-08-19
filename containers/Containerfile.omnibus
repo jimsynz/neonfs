@@ -35,8 +35,6 @@ COPY --from=src . /workdir/neonfs_omnibus
 RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
     --mount=type=cache,target=/root/.cargo/git,sharing=locked \
     --mount=type=cache,target=/workdir/neonfs_core/target \
-    --mount=type=cache,target=/workdir/neonfs_fuse/target \
-    --mount=type=cache,target=/workdir/neonfs_nfs/target \
     mix compile && mix release --overwrite
 
 # The Samba VFS module (`neonfs.so`) can't be built out-of-tree and must ABI +

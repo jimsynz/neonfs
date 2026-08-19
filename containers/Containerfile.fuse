@@ -16,7 +16,6 @@ COPY --from=src . /workdir/neonfs_fuse
 
 RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
     --mount=type=cache,target=/root/.cargo/git,sharing=locked \
-    --mount=type=cache,target=/workdir/neonfs_fuse/target \
     mix compile && mix release --overwrite
 
 FROM debian:13
