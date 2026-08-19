@@ -121,7 +121,7 @@ defmodule NeonFS.Cluster.Formation do
       end
 
     cond do
-      State.exists?() ->
+      State.member?() ->
         Logger.info("Cluster state already exists, skipping formation")
         {:stop, :normal, state}
 
@@ -151,7 +151,7 @@ defmodule NeonFS.Cluster.Formation do
   def handle_info(:connect_peers, %{phase: :connecting_peers} = state) do
     cond do
       past_deadline?(state) -> timeout_stop("peers to connect", state)
-      State.exists?() -> cluster_appeared_stop("peer connection", state)
+      State.member?() -> cluster_appeared_stop("peer connection", state)
       true -> do_connect_peers(state)
     end
   end
@@ -161,7 +161,7 @@ defmodule NeonFS.Cluster.Formation do
   def handle_info(:check_readiness, %{phase: :waiting_for_quorum} = state) do
     cond do
       past_deadline?(state) -> timeout_stop("node readiness", state)
-      State.exists?() -> cluster_appeared_stop("readiness", state)
+      State.member?() -> cluster_appeared_stop("readiness", state)
       true -> do_check_readiness(state)
     end
   end
@@ -205,7 +205,7 @@ defmodule NeonFS.Cluster.Formation do
 
   def handle_info(:form_cluster, %{phase: :forming_cluster} = state) do
     # Re-check: another node might have formed the cluster during the race
-    if State.exists?() do
+    if State.member?() do
       Logger.info("Cluster state appeared before formation — another node won the race")
       finish_formation(state)
     else

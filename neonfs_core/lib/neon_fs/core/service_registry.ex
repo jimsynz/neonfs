@@ -595,11 +595,23 @@ defmodule NeonFS.Core.ServiceRegistry do
   end
 
   defp core_node?(node) do
-    service_app_started?(node, :core) and cluster_state_exists?(node)
+    service_app_started?(node, :core) and cluster_state_present?(node)
   end
 
-  defp cluster_state_exists?(node) do
-    :erpc.call(node, State, :exists?, [], @core_probe_timeout_ms)
+  # `file_present?/0` rather than `member?/0`, deliberately, and this is the one
+  # place that distinction runs the other way. The question here is only whether
+  # the node has been through init or join, and it is already gated on the node
+  # running `:neonfs_core` — a host holding a distribution-only `cluster.json`
+  # runs no such application, so it can never reach this check and there is
+  # nothing for the stronger test to catch.
+  #
+  # What the stronger test would cost is the point: this is a per-probe `:erpc`
+  # bounded by a one-second timeout, on the path `select_core_node/0`
+  # takes. `member?/0` reads and JSON-parses the file where this stats it, and
+  # paying that per peer per probe is how a loaded node starts failing to
+  # register.
+  defp cluster_state_present?(node) do
+    :erpc.call(node, State, :file_present?, [], @core_probe_timeout_ms)
   catch
     _, _ -> false
   end

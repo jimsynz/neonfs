@@ -26,7 +26,7 @@ defmodule NeonFS.CLI.Handler.Cluster do
   def cluster_status do
     set_cli_metadata()
 
-    if State.exists?() do
+    if State.member?() do
       {:ok,
        %{
          name: get_cluster_name(),

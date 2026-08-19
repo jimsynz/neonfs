@@ -21,7 +21,7 @@ defmodule NeonFS.CLI.Handler.Common do
   """
   @spec require_cluster() :: :ok | {:error, NotFound.t()}
   def require_cluster do
-    if State.exists?() do
+    if State.member?() do
       :ok
     else
       {:error,

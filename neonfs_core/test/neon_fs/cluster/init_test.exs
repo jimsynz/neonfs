@@ -114,7 +114,7 @@ defmodule NeonFS.Cluster.InitTest do
 
       # Critical: cluster state must NOT exist after a refused init
       # (preflight runs before any mutation).
-      refute State.exists?()
+      refute State.member?()
     end
 
     test "refuses init when the supplied drive path is not writable", %{tmp_dir: tmp_dir} do
@@ -141,7 +141,7 @@ defmodule NeonFS.Cluster.InitTest do
 
         assert is_binary(reason)
         assert reason =~ "not writable"
-        refute State.exists?()
+        refute State.member?()
       end
     end
   end

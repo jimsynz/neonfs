@@ -51,7 +51,7 @@ defmodule NeonFS.Integration.ClusterJoinTest do
       assert :ok =
                wait_until(
                  fn ->
-                   PeerCluster.rpc(cluster, :node2, NeonFS.Cluster.State, :exists?, []) == true
+                   PeerCluster.rpc(cluster, :node2, NeonFS.Cluster.State, :member?, []) == true
                  end,
                  timeout: 30_000
                )
@@ -99,7 +99,7 @@ defmodule NeonFS.Integration.ClusterJoinTest do
       assert :ok =
                wait_until(
                  fn ->
-                   PeerCluster.rpc(cluster, :node2, NeonFS.Cluster.State, :exists?, []) == true
+                   PeerCluster.rpc(cluster, :node2, NeonFS.Cluster.State, :member?, []) == true
                  end,
                  timeout: 30_000
                )
@@ -202,7 +202,7 @@ defmodule NeonFS.Integration.ClusterJoinTest do
         ])
 
       assert state.cluster_name == "rpc-join-test"
-      assert PeerCluster.rpc(cluster, :node2, NeonFS.Cluster.State, :exists?, []) == true
+      assert PeerCluster.rpc(cluster, :node2, NeonFS.Cluster.State, :member?, []) == true
     end
   end
 

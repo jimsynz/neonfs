@@ -100,17 +100,65 @@ defmodule NeonFS.Cluster.StateTest do
     end
   end
 
-  describe "exists?/0" do
+  describe "member?/0" do
     test "returns false when file doesn't exist" do
-      refute State.exists?()
+      refute State.member?()
     end
 
-    test "returns true when file exists" do
-      # Create the file
+    test "returns true for a member's state" do
       state = create_test_state()
       :ok = State.save(state)
 
-      assert State.exists?()
+      assert State.member?()
+    end
+
+    # The distinction this function exists for. A Kubernetes host provisioned
+    # for distribution only holds a `cluster.json` and is not a member — reading
+    # the file's presence as membership refused a later `cluster join` there with
+    # `:already_in_cluster`.
+    test "a distribution-only state is not membership" do
+      File.mkdir_p!(Path.dirname(State.state_file_path()))
+
+      File.write!(
+        State.state_file_path(),
+        ~s({"this_node":{"name":"a@h","dist_port":9100},) <>
+          ~s("known_peers":[{"name":"core@h","dist_port":9100}]})
+      )
+
+      refute State.member?()
+      assert State.file_present?()
+    end
+
+    test "an unparseable file is not membership either" do
+      File.mkdir_p!(Path.dirname(State.state_file_path()))
+      File.write!(State.state_file_path(), "{truncated")
+
+      refute State.member?()
+      assert State.file_present?()
+    end
+  end
+
+  describe "load/0 on a distribution-only state" do
+    # Validation would answer `{:validation_failed, [cluster_id: …]}`, which
+    # reads as a truncated write and sends the reader after a bug that is not
+    # there. The file is well-formed and deliberate; the error should say so.
+    test "is reported as such rather than as corruption" do
+      File.mkdir_p!(Path.dirname(State.state_file_path()))
+
+      File.write!(
+        State.state_file_path(),
+        ~s({"this_node":{"name":"a@h","dist_port":9100},"known_peers":[]})
+      )
+
+      assert {:error, :distribution_only} = State.load()
+    end
+
+    test "a genuinely malformed file is still reported as malformed" do
+      File.mkdir_p!(Path.dirname(State.state_file_path()))
+      File.write!(State.state_file_path(), "{truncated")
+
+      assert {:error, reason} = State.load()
+      refute reason == :distribution_only
     end
   end
 

@@ -130,10 +130,35 @@ defmodule NeonFS.Cluster.State do
   end
 
   @doc """
-  Checks if cluster state file exists.
+  Whether this node is a member of a cluster.
+
+  Not the same question as whether `cluster.json` exists, which is why this is
+  not named for the file. A Kubernetes host provisioned by
+  `NeonFS.Client.Join.redeem_credentials/3` holds a `cluster.json` carrying only
+  the peer distribution ports `NeonFS.Epmd` needs — no cluster identity, because
+  nothing runs on that host as a NeonFS node. Reading file existence as
+  membership would refuse a later `cluster join` on such a host with
+  `:already_in_cluster`, which is both wrong and hard to see from the message.
+
+  Membership is decided by the cluster id: a state that names the cluster it
+  belongs to is a member's, and one that does not is not.
   """
-  @spec exists?() :: boolean()
-  def exists? do
+  @spec member?() :: boolean()
+  def member? do
+    case read_file() do
+      {:ok, %{"cluster_id" => cluster_id}} when is_binary(cluster_id) and cluster_id != "" -> true
+      _otherwise -> false
+    end
+  end
+
+  @doc """
+  Whether a `cluster.json` is present at all, whatever it holds.
+
+  Almost always the wrong question — see `member?/0`. It is here for the code
+  that has to reason about the file itself rather than about membership.
+  """
+  @spec file_present?() :: boolean()
+  def file_present? do
     File.exists?(state_file_path())
   end
 
@@ -217,9 +242,33 @@ defmodule NeonFS.Cluster.State do
 
     with :ok <- check_file_exists(path),
          {:ok, content} <- File.read(path),
+         :ok <- reject_distribution_only(content),
          {:ok, state} <- parse_json(content) do
       validate_loaded_state(state)
     end
+  end
+
+  # A distribution-only state is well-formed and deliberate, so it must not be
+  # reported the way a truncated file is. Validation would otherwise answer
+  # `{:validation_failed, [cluster_id: …]}`, which reads as corruption and sends
+  # the reader looking for a write that went wrong instead of at the init
+  # container that wrote exactly what it meant to.
+  defp reject_distribution_only(content) do
+    case :json.decode(content) do
+      %{"cluster_id" => id} when is_binary(id) and id != "" -> :ok
+      %{"known_peers" => peers} when is_list(peers) -> {:error, :distribution_only}
+      _otherwise -> :ok
+    end
+  rescue
+    _ -> :ok
+  end
+
+  defp read_file do
+    with {:ok, content} <- File.read(state_file_path()) do
+      {:ok, :json.decode(content)}
+    end
+  rescue
+    _ -> :error
   end
 
   @doc """

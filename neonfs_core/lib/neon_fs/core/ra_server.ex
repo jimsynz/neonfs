@@ -531,7 +531,7 @@ defmodule NeonFS.Core.RaServer do
   # this node was previously part of a cluster (avoids picking up stale Ra
   # data in test environments or fresh installs).
   defp try_auto_restart do
-    if ClusterState.exists?() do
+    if ClusterState.member?() do
       do_try_auto_restart()
     else
       :no_persisted_state

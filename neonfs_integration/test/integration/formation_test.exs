@@ -27,7 +27,7 @@ defmodule NeonFS.Integration.FormationTest do
       # (Ra cluster creation can take 60-90s on slow CI runners)
       assert_eventually timeout: 120_000 do
         Enum.all?(cluster.nodes, fn node_info ->
-          PeerCluster.rpc(cluster, node_info.name, NeonFS.Cluster.State, :exists?, []) == true
+          PeerCluster.rpc(cluster, node_info.name, NeonFS.Cluster.State, :member?, []) == true
         end)
       end
 
@@ -52,7 +52,7 @@ defmodule NeonFS.Integration.FormationTest do
       PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :cluster_init, ["existing"])
 
       # Verify cluster.json exists
-      assert PeerCluster.rpc(cluster, :node1, NeonFS.Cluster.State, :exists?, []) == true
+      assert PeerCluster.rpc(cluster, :node1, NeonFS.Cluster.State, :member?, []) == true
 
       node1_atom = PeerCluster.get_node!(cluster, :node1).node
 
@@ -125,7 +125,7 @@ defmodule NeonFS.Integration.FormationTest do
       end
 
       # Verify Formation did NOT create cluster.json
-      refute PeerCluster.rpc(cluster, :node1, NeonFS.Cluster.State, :exists?, [])
+      refute PeerCluster.rpc(cluster, :node1, NeonFS.Cluster.State, :member?, [])
     end
   end
 
@@ -151,7 +151,7 @@ defmodule NeonFS.Integration.FormationTest do
       wait_for_full_mesh(cluster)
 
       assert_eventually timeout: 30_000 do
-        PeerCluster.rpc(cluster, :node1, NeonFS.Cluster.State, :exists?, []) == true
+        PeerCluster.rpc(cluster, :node1, NeonFS.Cluster.State, :member?, []) == true
       end
 
       {:ok, state} = PeerCluster.rpc(cluster, :node1, NeonFS.Cluster.State, :load, [])
