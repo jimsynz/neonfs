@@ -87,44 +87,67 @@ defmodule NeonFS.Block.SupervisorTest do
     socket = connect(listener_port(supervisor))
     assert {:ok, _export_info} = handshake(socket, @export)
 
+    # Subscribe before the kill: the release is what is being waited for, so
+    # attaching afterwards is a race against the thing under test.
+    telemetry =
+      :telemetry_test.attach_event_handlers(self(), [[:neonfs, :block, :detached]])
+
     listener = listener_pid(supervisor)
     ref = Process.monitor(listener)
     Process.exit(listener, :kill)
     assert_receive {:DOWN, ^ref, :process, ^listener, :killed}, 1_000
 
-    wait_for_restart(supervisor)
+    # Waiting for the listener to come back was only ever a proxy for the
+    # release, and a poor one: the registry releases when its own monitor
+    # fires, which is ordered against the listener's death but not against the
+    # restart. So wait for the release itself. `holders: 0` is the registry
+    # reporting the device released rather than merely one holder dropped.
+    assert_receive {[:neonfs, :block, :detached], ^telemetry, %{holders: 0}, %{export: @export}},
+                   5_000
 
-    # The registry releases on its own monitor firing, which is ordered
-    # against the listener's death but not against the listener coming back —
-    # so waiting for the restart does not imply the release has been
-    # processed. Asserting straight after it passed only because nothing else
-    # was competing for the scheduler.
-    wait_for_release()
+    assert DeviceRegistry.attached() == %{}
   end
 
-  defp wait_for_release(attempts \\ 100)
+  # The one wait that has to poll: a `Supervisor` restarting a child emits no
+  # event to subscribe to, and `:sys.get_state/1` on the supervisor does not
+  # help — the EXIT it will act on and this test's `:DOWN` are separate signals
+  # from the same death, so a state call can be served before the EXIT arrives.
+  #
+  # What was wrong before was the budget, not the polling: 100 attempts of a
+  # `GenServer.call` is a timeout of under a millisecond, while the teardown of
+  # a listener with 100 acceptors takes milliseconds. This bounds by a deadline
+  # and sleeps between attempts so the budget means what it says. The sleep is a
+  # poll interval, not a synchronisation delay — nothing here assumes the
+  # restart finishes within one.
+  @restart_timeout_ms 5_000
+  @restart_poll_ms 10
 
-  defp wait_for_release(0),
-    do: flunk("registry still holds #{inspect(DeviceRegistry.attached())}")
+  defp wait_for_restart(supervisor) do
+    wait_for_restart(supervisor, System.monotonic_time(:millisecond) + @restart_timeout_ms)
+  end
 
-  defp wait_for_release(attempts) do
-    case DeviceRegistry.attached() do
-      empty when empty == %{} -> :ok
-      _still_held -> wait_for_release(attempts - 1)
+  defp wait_for_restart(supervisor, deadline) do
+    case listener_port_if_up(supervisor) do
+      {:ok, _port} ->
+        :ok
+
+      :not_yet ->
+        if System.monotonic_time(:millisecond) >= deadline do
+          flunk("listener did not come back within #{@restart_timeout_ms}ms")
+        end
+
+        Process.sleep(@restart_poll_ms)
+        wait_for_restart(supervisor, deadline)
     end
   end
 
-  defp wait_for_restart(supervisor, attempts \\ 100)
-
-  defp wait_for_restart(_supervisor, 0), do: flunk("listener did not come back")
-
-  defp wait_for_restart(supervisor, attempts) do
+  defp listener_port_if_up(supervisor) do
     case ThousandIsland.listener_info(listener_pid(supervisor)) do
-      {:ok, {_ip, port}} when port > 0 -> :ok
-      _not_yet -> wait_for_restart(supervisor, attempts - 1)
+      {:ok, {_ip, port}} when port > 0 -> {:ok, port}
+      _not_yet -> :not_yet
     end
   catch
-    :exit, _reason -> wait_for_restart(supervisor, attempts - 1)
+    :exit, _reason -> :not_yet
   end
 
   defp listener_pid(supervisor) do
