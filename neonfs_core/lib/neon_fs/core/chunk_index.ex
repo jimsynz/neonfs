@@ -83,12 +83,29 @@ defmodule NeonFS.Core.ChunkIndex do
   that surfaced as a `GenServer.call` timeout killing the chunk task and
   failing a large upload with a 500.
 
-  `:put` is the one mutation here that reads nothing: it writes the metadata
-  tree and the ETS materialisation unconditionally. Two concurrent puts of
-  the same hash carry identical content, because the index is
-  content-addressed, so racing them is benign. Every other mutation
-  (`add_write_ref/2`, `commit/1`, `update_locations/2`, …) is a
-  read-modify-write against ETS and stays serialised through the GenServer.
+  The metadata tree write reads nothing: two concurrent puts of the same hash
+  carry identical content, because the index is content-addressed, so racing
+  them there is benign. Every other mutation (`add_write_ref/2`, `commit/1`,
+  `update_locations/2`, …) is a read-modify-write against ETS and stays
+  serialised through the GenServer.
+
+  The ETS materialisation does **not** run here, and is not unconditional,
+  because `active_write_refs` is not content. Two writers storing the same new
+  chunk each arrive holding only their own ref, so a blind insert drops the
+  other's — and the next abort then sees an empty ref set and deletes a chunk a
+  live write is still staging. The refs are unioned with any already present,
+  through the same local-only-field merge the read path uses, and that union is
+  a read-modify-write like every other one — so it goes through the GenServer,
+  where doing it in the caller's process would just narrow the race rather than
+  close it. Only the quorum write, the part this function exists to keep out of
+  the GenServer, stays in the caller's process.
+
+  That does put the cheap step behind whatever the GenServer is currently doing,
+  which can be a quorum write (`delete/1`). It is not a return of the blocking
+  described above: that was N concurrent puts each serialising *its own* network
+  round-trip, so the cost grew with the number of chunks. This waits at most for
+  one in-flight operation, and it is the same wait `add_write_ref/2` — called
+  immediately after `get/2` on the dedup path — already pays.
 
   Returns `:ok` on success, or `{:error, reason}` if the operation fails —
   `MetadataWriter` reports failure rather than exiting, so callers get an
@@ -97,8 +114,7 @@ defmodule NeonFS.Core.ChunkIndex do
   @spec put(ChunkMeta.t()) :: :ok | {:error, term()}
   def put(%ChunkMeta{} = chunk_meta) do
     with :ok <- write_chunk(chunk_meta) do
-      :ets.insert(:chunk_index, {chunk_meta.hash, chunk_meta})
-      :ok
+      GenServer.call(__MODULE__, {:materialise, chunk_meta}, mutation_call_timeout())
     end
   end
 
@@ -443,6 +459,13 @@ defmodule NeonFS.Core.ChunkIndex do
   end
 
   @impl true
+  def handle_call({:materialise, %ChunkMeta{} = chunk_meta}, _from, state) do
+    merged = merge_local_only_fields(chunk_meta, chunk_meta.hash)
+    :ets.insert(:chunk_index, {chunk_meta.hash, merged})
+    {:reply, :ok, state}
+  end
+
+  @impl true
   def handle_call({:delete, hash}, _from, state) do
     case :ets.lookup(:chunk_index, hash) do
       [{^hash, %ChunkMeta{} = meta}] ->
@@ -653,13 +676,20 @@ defmodule NeonFS.Core.ChunkIndex do
     {:ok, chunk_meta}
   end
 
-  # active_write_refs are local-only (ephemeral, per-node) and never
-  # replicated, so they are absent from the quorum payload. Preserve
-  # them from the local ETS entry when present.
+  # `active_write_refs` are local-only (ephemeral, per-node) and never
+  # replicated, so they are absent from the quorum payload — a value read back
+  # from the cluster arrives with none, and the ETS entry is where this node's
+  # are.
+  #
+  # Unioned rather than taken from either side, because both sides carry them
+  # on the put path: the incoming value has the storing write's ref and ETS may
+  # hold another writer's for the same hash. A ref belongs to the write that
+  # added it, and nothing here is entitled to drop someone else's. On the read
+  # path the incoming set is always empty, so the union is the ETS set.
   defp merge_local_only_fields(%ChunkMeta{} = chunk_meta, hash) do
     case :ets.lookup(:chunk_index, hash) do
       [{^hash, %ChunkMeta{active_write_refs: refs}}] when refs != nil ->
-        %{chunk_meta | active_write_refs: refs}
+        %{chunk_meta | active_write_refs: MapSet.union(chunk_meta.active_write_refs, refs)}
 
       _ ->
         chunk_meta

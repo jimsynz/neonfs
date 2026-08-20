@@ -1239,12 +1239,13 @@ defmodule NeonFS.Core.WriteOperationTest do
     # `{:add_write_ref_failed, :not_found}`. That is a lost race, not a missing
     # chunk, and it has to resolve on a re-read rather than reach the caller.
     #
-    # Asserted against that one shape rather than against "no failures at all".
-    # This workload also surfaces `{:index_tree_write_failed, :merge_target_missing}`
-    # and a chunk-list entry whose metadata has gone, both of which are separate
-    # defects with their own issues — asserting zero failures here would make
-    # this test fail for reasons it is not guarding.
-    test "concurrent writers to one file never see a reclaimed dedup target",
+    # Asserts zero failures. It could not when it was written: the same workload
+    # also produced `{:index_tree_write_failed, :merge_target_missing}` and logged
+    # a chunk-list entry whose metadata had gone. Both had the same cause — a
+    # `ChunkIndex.put/1` for a hash another writer was already staging replaced
+    # its `active_write_refs`, so an abort saw an empty ref set and deleted a
+    # chunk still in use — and both went away when that was fixed.
+    test "concurrent writers to one file all succeed",
          %{volume: volume} do
       writers = 16
       chunk_bytes = 4096
@@ -1275,10 +1276,8 @@ defmodule NeonFS.Core.WriteOperationTest do
         )
         |> Enum.map(fn {:ok, result} -> result end)
 
-      lost_dedup =
-        Enum.filter(results, &match?({:error, {:add_write_ref_failed, :not_found}}, &1))
-
-      assert lost_dedup == []
+      failures = Enum.reject(results, &match?({:ok, _}, &1))
+      assert failures == []
     end
 
     test "a write starting past the end zero-fills the hole and no more",
