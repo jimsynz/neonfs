@@ -149,6 +149,24 @@ node:
   # alive during evictions; override to "" if your cluster doesn't
   # honour it.
   priorityClassName: system-node-critical
+  # Host device access for `volumeMode: Block` PVCs.
+  #
+  # Block staging attaches the volume with `nbd-client`, which needs a free
+  # `/dev/nbdX` — and the plugin finds one by scanning `/dev/nbd0..15`, so it
+  # needs the directory rather than a named device. `/dev/fuse` is mounted
+  # unconditionally as a single `CharDevice` because the mount path needs
+  # exactly that one; block cannot name its device in advance.
+  #
+  # Off by default: a mount-only deployment does not need `/dev`, and this is
+  # the widest thing the chart grants. The container is already privileged, so
+  # this is not the privilege boundary — it is the visibility one.
+  #
+  # The host must also have a loadable `nbd` kernel module. The module and
+  # `/lib/modules` belong to the host and the chart cannot supply them; a node
+  # without it will fail block staging at `nbd-client`, not at scheduling.
+  hostDevices:
+    enabled: false
+    path: /dev
   # As `controller.extraEnv` / `extraVolumes` / `extraVolumeMounts`. The node
   # plugin is already `hostNetwork: true`, so its `NEONFS_DIST_PORT` must
   # differ from anything else on the host.

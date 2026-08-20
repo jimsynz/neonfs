@@ -32,8 +32,14 @@ LABEL org.opencontainers.image.source="https://harton.dev/project-neon/neonfs" \
 # the kubelet-side FUSE mount directly — the release carries `neonfs_fuse`
 # and mounts in its own pod. Controller pods don't stage, so they never
 # reach the libraries.
+#
+# `nbd-client` is the block equivalent: `NodeServer`'s block staging shells
+# out to it to attach the device, so a `volumeMode: Block` PVC fails at the
+# first `System.cmd` without it. The kernel module it drives is the host's —
+# see the chart's `node.hostDevices` for the access it needs, and note that
+# `nbd` has to be loadable there.
 RUN apt-get update -y && \
-  apt-get install -y libstdc++6 openssl libssl3t64 libncurses6 locales ca-certificates libfuse3-4 fuse3 mount \
+  apt-get install -y libstdc++6 openssl libssl3t64 libncurses6 locales ca-certificates libfuse3-4 fuse3 mount nbd-client \
   && apt-get clean && rm -f /var/lib/apt/lists/*_*
 
 # Set the locale

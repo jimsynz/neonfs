@@ -11,6 +11,9 @@ lifecycle.
   including `VOLUME_CONDITION` and `GET_VOLUME`).
 - A reachable NeonFS cluster, and an invite token minted with a redemption
   budget covering the nodes that will run NeonFS workloads.
+- For `volumeMode: Block` PVCs only: a loadable `nbd` kernel module on each
+  node, and `node.hostDevices.enabled=true`. See "Raw block volumes need host
+  device access" below.
 
 ## How a pod obtains cluster identity
 
@@ -118,6 +121,35 @@ joins a cluster.
 | `Secret`                 | Bootstrap token (only created when `bootstrap.value` is set).           |
 | init container           | `provision-identity`, in both workloads — redeems an invite into the host's `stateDir` and exits. |
 | `StorageClass`           | Sample default class — set `storageClass.create=false` to manage out of band. |
+
+## Raw block volumes need host device access
+
+`volumeMode: Block` PVCs are off by default, because supporting them means
+granting the node plugin the host's `/dev`:
+
+```bash
+helm install neonfs-csi ./deploy/charts/neonfs-csi \
+  --set coreNode=neonfs_core@10.0.0.1 \
+  --set node.hostDevices.enabled=true
+```
+
+Block staging attaches the volume with `nbd-client` and picks a free
+`/dev/nbdX` by scanning, so it needs the directory rather than a named device —
+which is why `/dev/fuse` can be a single `CharDevice` mount and this cannot.
+The plugin container is privileged either way, so this widens what it can *see*
+rather than what it is allowed to do.
+
+Two host prerequisites the chart cannot supply:
+
+- **A loadable `nbd` kernel module.** It and `/lib/modules` belong to the node.
+  A node without it schedules the plugin fine and fails at `nbd-client` when a
+  block volume is staged.
+- **Enough `/dev/nbdX` devices.** The plugin scans `nbd0`–`nbd15`, so a node
+  can serve at most sixteen attached block volumes, and `nbd_max_part` /
+  `max_part` module parameters govern how many the kernel creates.
+
+Mount-mode volumes need none of this; leave `node.hostDevices.enabled` at
+`false` if you serve only filesystems.
 
 ## Upgrading the driver interrupts mounted volumes
 
