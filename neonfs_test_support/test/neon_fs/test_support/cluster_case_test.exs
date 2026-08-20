@@ -127,4 +127,84 @@ defmodule NeonFS.TestSupport.ClusterCaseTest do
       end
     end
   end
+
+  describe "wait_until/2" do
+    test "returns immediately when the condition is already true" do
+      assert :ok = ClusterCase.wait_until(fn -> true end, timeout: 0)
+    end
+
+    test "gives up on a condition that never becomes true" do
+      assert {:error, :timeout} =
+               ClusterCase.wait_until(fn -> false end, timeout: 100, max_interval: 20)
+    end
+
+    test "succeeds once the condition flips" do
+      counter = :counters.new(1, [])
+
+      assert :ok =
+               ClusterCase.wait_until(
+                 fn ->
+                   :counters.add(counter, 1, 1)
+                   :counters.get(counter, 1) >= 5
+                 end,
+                 timeout: 5_000,
+                 interval: 1,
+                 max_interval: 1
+               )
+    end
+
+    # The regression this guards. A wall-clock deadline is spent by a slow
+    # condition rather than by waiting, so the same budget buys far fewer
+    # attempts on a loaded runner than on an idle one — which is the whole
+    # failure mode, since a cluster condition is an RPC and contention is
+    # exactly what makes it slow. Charging only for sleep decouples the two.
+    #
+    # Asserted as a ratio rather than an absolute count, because an absolute
+    # count is itself load-sensitive and would reintroduce the flake in the
+    # test for the fix.
+    test "a slow condition does not consume the waiting budget" do
+      attempts_when = fn body ->
+        counter = :counters.new(1, [])
+
+        {:error, :timeout} =
+          ClusterCase.wait_until(
+            fn ->
+              :counters.add(counter, 1, 1)
+              body.()
+              false
+            end,
+            timeout: 200,
+            interval: 10,
+            max_interval: 10
+          )
+
+        :counters.get(counter, 1)
+      end
+
+      fast = attempts_when.(fn -> :ok end)
+      slow = attempts_when.(fn -> Process.sleep(20) end)
+
+      assert slow >= div(fast, 2),
+             "slow condition got #{slow} attempts against #{fast} for a fast one"
+    end
+
+    test "the wall-clock ceiling still bounds a pathologically slow condition" do
+      started = System.monotonic_time(:millisecond)
+
+      assert {:error, :timeout} =
+               ClusterCase.wait_until(
+                 fn ->
+                   Process.sleep(200)
+                   false
+                 end,
+                 timeout: 100,
+                 interval: 5,
+                 max_interval: 5
+               )
+
+      # 100ms of sleep at 5ms a poll is 20 attempts, each costing 200ms in the
+      # condition — over 4s with no ceiling. The 5x ceiling stops it far short.
+      assert System.monotonic_time(:millisecond) - started < 2_000
+    end
+  end
 end

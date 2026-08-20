@@ -49,6 +49,14 @@ defmodule NeonFS.TestSupport.ClusterCase do
   alias NeonFS.Core.RaSupervisor
   alias NeonFS.TestSupport.PeerCluster
 
+  # Ceiling on total wall clock for `wait_until/2`, as a multiple of the
+  # waiting budget. Only binds when evaluating the condition is itself slow —
+  # which is the case the sleep-only budget exists to survive, so the ceiling
+  # has to be loose enough not to reintroduce the wall-clock failure it
+  # replaces, and tight enough that a condition which will never be true still
+  # fails inside the test's own timeout.
+  @wall_clock_multiplier 5
+
   using do
     quote do
       alias NeonFS.TestSupport.PeerCluster
@@ -209,9 +217,28 @@ defmodule NeonFS.TestSupport.ClusterCase do
   Uses exponential backoff to reduce polling overhead.
 
   ## Options
-  - `:timeout` - Maximum time to wait in milliseconds (default: 5_000)
+  - `:timeout` - Waiting budget in milliseconds (default: 5_000). See below —
+    this bounds time spent *waiting*, not total wall clock.
   - `:interval` - Initial polling interval in milliseconds (default: 50)
   - `:max_interval` - Maximum polling interval (default: 500)
+
+  ## What `:timeout` bounds, and why it is not wall clock
+
+  `condition` for a cluster test is almost always an RPC to a peer, and on a
+  loaded runner that RPC is exactly the thing that got slower. A wall-clock
+  deadline therefore spends the budget on *asking* rather than on *waiting*:
+  the same 30s that bought sixty polls locally buys three on a contended
+  shard, and the helper reports a timeout having barely looked. That is not
+  the same budget, and it is the mechanism behind three separate flakes in
+  this suite, each previously fixed by widening the one test that lost.
+
+  So the budget is charged for sleeping only. Time spent inside `condition`
+  is not deducted, which makes the number mean "how long to give this
+  convergence" independently of how fast the machine is answering.
+
+  A total wall clock of #{@wall_clock_multiplier}× `:timeout` still applies, so
+  a condition that will never become true cannot run indefinitely when every
+  evaluation is slow.
 
   ## Example
 
@@ -228,22 +255,35 @@ defmodule NeonFS.TestSupport.ClusterCase do
     initial_interval = Keyword.get(opts, :interval, 50)
     max_interval = Keyword.get(opts, :max_interval, 500)
 
-    deadline = System.monotonic_time(:millisecond) + timeout
-    do_wait_until(deadline, initial_interval, max_interval, condition)
+    do_wait_until(
+      timeout,
+      System.monotonic_time(:millisecond) + timeout * @wall_clock_multiplier,
+      initial_interval,
+      max_interval,
+      condition
+    )
   end
 
-  defp do_wait_until(deadline, interval, max_interval, condition) do
-    if System.monotonic_time(:millisecond) > deadline do
-      {:error, :timeout}
-    else
-      if condition.() do
+  # The condition is evaluated before either limit is consulted, so a
+  # condition that is already true never reports a timeout.
+  defp do_wait_until(sleep_budget_ms, wall_deadline, interval, max_interval, condition) do
+    cond do
+      condition.() ->
         :ok
-      else
-        # Exponential backoff, capped at max_interval
+
+      sleep_budget_ms <= 0 or System.monotonic_time(:millisecond) > wall_deadline ->
+        {:error, :timeout}
+
+      true ->
         Process.sleep(interval)
-        next_interval = min(interval * 2, max_interval)
-        do_wait_until(deadline, next_interval, max_interval, condition)
-      end
+
+        do_wait_until(
+          sleep_budget_ms - interval,
+          wall_deadline,
+          min(interval * 2, max_interval),
+          max_interval,
+          condition
+        )
     end
   end
 
