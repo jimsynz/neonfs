@@ -14,23 +14,24 @@ defmodule NeonFS.Core.CommitChunks do
 
   The caller (e.g. `ChunkWriter`) knows the replica placement it used, so
   the set of `{hash => [location]}` pairs is supplied in `opts`.
-  Validation for each chunk is a `Router.data_call(:has_chunk, …)` against
-  the reported locations — if every location reports `:not_found` the
-  chunk is considered missing.
+  Verifying those claims and materialising the chunk metadata is
+  `NeonFS.Core.ChunkReconciler`'s job, shared with the block device's
+  batched extent commit; this module contributes the file half — volume
+  resolution, lock and share-mode checks, and the `FileIndex` entry.
 
-  This is the *interface-side chunking* path described in the
-  design decision — compression and encryption still happen on core in
-  the `put_chunk` handler, so this commit path stores chunks with the
-  codec shape the `put_chunk` handler chose. Volumes that rely on
-  compression or encryption therefore require the `put_chunk` handler to
-  propagate those options; that is tracked outside this module.
+  This is the *interface-side chunking* path described in the design
+  decision: compression and encryption happen on core in the `put_chunk`
+  handler, so this commit path stores chunks with the codec shape that
+  handler chose. That is a complete story rather than a gap —
+  `Transport.Handler.store_chunk/6` resolves the volume's
+  `compression_opts ++ encryption_opts` through
+  `BlobStore.resolve_put_chunk_opts/1`, and refuses rather than storing
+  plaintext on an encrypted volume whose key is unavailable. Compressed and
+  encrypted volumes are therefore served correctly by this path.
   """
 
-  alias NeonFS.Client.Router
   alias NeonFS.Core.Authorise
-  alias NeonFS.Core.BlobStore
-  alias NeonFS.Core.ChunkIndex
-  alias NeonFS.Core.ChunkMeta
+  alias NeonFS.Core.ChunkReconciler
   alias NeonFS.Core.FileIndex
   alias NeonFS.Core.FileMeta
   alias NeonFS.Core.LockManager
@@ -103,9 +104,14 @@ defmodule NeonFS.Core.CommitChunks do
       with {:ok, volume} <- get_volume(volume_id),
            :ok <- Authorise.check(uid, gids, :write, {:volume, volume_id}),
            :ok <- check_lock(volume_id, path, client_ref, opts),
-           chunk_metas <-
-             reconcile_chunks(volume_id, chunk_hashes, locations_map, chunk_codecs, write_id),
-           {:ok, _reconciled} <- collect_reconciled(chunk_metas) do
+           {:ok, _reconciled} <-
+             ChunkReconciler.reconcile(
+               volume_id,
+               chunk_hashes,
+               locations_map,
+               chunk_codecs,
+               write_id
+             ) do
         create_file_metadata(volume.id, path, chunk_hashes, total_size, write_id, opts)
       end
 
@@ -143,130 +149,6 @@ defmodule NeonFS.Core.CommitChunks do
       LockManager.check_write_blocking(lock_file_id, client_ref, range, timeout: timeout)
     else
       LockManager.check_write(lock_file_id, client_ref, range)
-    end
-  end
-
-  defp reconcile_chunks(volume_id, chunk_hashes, locations_map, chunk_codecs, write_id) do
-    Enum.map(chunk_hashes, fn hash ->
-      reconcile_chunk(
-        volume_id,
-        hash,
-        Map.get(locations_map, hash),
-        Map.get(chunk_codecs, hash, %{compression: :none, crypto: nil}),
-        write_id
-      )
-    end)
-  end
-
-  defp reconcile_chunk(_volume_id, hash, nil, _codec, _write_id) do
-    {:error, {:unknown_chunk_location, hash}}
-  end
-
-  defp reconcile_chunk(volume_id, hash, locations, codec, write_id) do
-    case ChunkIndex.get(volume_id, hash) do
-      {:ok, existing} ->
-        add_write_ref(existing, write_id, locations)
-
-      {:error, :not_found} ->
-        create_chunk_meta(volume_id, hash, locations, codec, write_id)
-    end
-  end
-
-  defp add_write_ref(%ChunkMeta{} = existing, write_id, supplied_locations) do
-    merged_locations = merge_locations(existing.locations, supplied_locations)
-
-    case ChunkIndex.add_write_ref(existing.hash, write_id) do
-      :ok ->
-        updated =
-          existing
-          |> Map.put(:locations, merged_locations)
-          |> Map.update!(:active_write_refs, &MapSet.put(&1, write_id))
-
-        maybe_update_locations(updated, supplied_locations)
-
-        {:ok, updated}
-
-      {:error, _reason} = err ->
-        err
-    end
-  end
-
-  defp merge_locations(existing_locations, supplied_locations) do
-    (existing_locations ++ supplied_locations) |> Enum.uniq()
-  end
-
-  defp maybe_update_locations(%ChunkMeta{hash: hash, locations: locations}, supplied) do
-    # Only push locations back to the index when the caller gave us new
-    # ones — avoids unnecessary Ra commands on the common "chunk already
-    # fully registered" path.
-    if Enum.any?(supplied, &(&1 not in locations)) do
-      _ = ChunkIndex.update_locations(hash, locations)
-    end
-
-    :ok
-  end
-
-  defp create_chunk_meta(volume_id, hash, locations, codec, write_id) do
-    case first_has_chunk(hash, locations) do
-      {:ok, stored_size} ->
-        meta = %ChunkMeta{
-          volume_ids: MapSet.new([volume_id]),
-          hash: hash,
-          original_size: Map.get(codec, :original_size, stored_size),
-          stored_size: stored_size,
-          compression: Map.get(codec, :compression, :none),
-          crypto: Map.get(codec, :crypto),
-          locations: Enum.uniq(locations),
-          target_replicas: max(length(locations), 1),
-          commit_state: :uncommitted,
-          active_write_refs: MapSet.new([write_id]),
-          stripe_id: nil,
-          stripe_index: nil,
-          created_at: DateTime.utc_now(),
-          last_verified: nil
-        }
-
-        case ChunkIndex.put(meta) do
-          :ok -> {:ok, meta}
-          {:error, _reason} = err -> err
-        end
-
-      :missing ->
-        {:error, {:missing_chunk, hash}}
-    end
-  end
-
-  defp first_has_chunk(_hash, []), do: :missing
-
-  defp first_has_chunk(hash, [location | rest]) do
-    case probe_location(hash, location) do
-      {:ok, size} -> {:ok, size}
-      _ -> first_has_chunk(hash, rest)
-    end
-  end
-
-  defp probe_location(hash, %{node: node}) when node == node() do
-    case BlobStore.chunk_info(hash) do
-      {:ok, _tier, size} -> {:ok, size}
-      {:error, _} -> :missing
-    end
-  end
-
-  defp probe_location(hash, %{node: node}) do
-    case Router.data_call(node, :has_chunk, hash: hash) do
-      {:ok, %{size: size}} -> {:ok, size}
-      _ -> :missing
-    end
-  end
-
-  defp collect_reconciled(results) do
-    Enum.reduce_while(results, {:ok, []}, fn
-      {:ok, meta}, {:ok, acc} -> {:cont, {:ok, [meta | acc]}}
-      {:error, _} = err, _ -> {:halt, err}
-    end)
-    |> case do
-      {:ok, metas} -> {:ok, Enum.reverse(metas)}
-      err -> err
     end
   end
 
