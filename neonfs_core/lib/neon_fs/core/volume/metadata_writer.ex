@@ -99,6 +99,51 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
   end
 
   @doc """
+  Write `fields` as `key`'s whole value, except for the fields named in
+  `:preserve`, which keep whatever the current persisted value has when the key
+  already exists.
+
+  A blind `put/5` is correct for a record whose writer is authoritative for
+  every field. It is wrong when one field is owned by a *different* write — a
+  chunk's `commit_state` is set by the batch that commits the file referencing
+  it, so a later full-value put of the chunk (re-storing it, re-verifying it
+  after a scrub) would return it to whatever the putting caller happened to
+  think, undoing a commit that has already happened.
+
+  The current-value read runs inside the per-shard CAS loop, like `merge/5`'s,
+  so the decision cannot race a concurrent writer: a stale-pointer conflict
+  re-reads and re-decides. That is why this exists rather than the caller
+  reading first and choosing between `put/5` and `merge/5` — outside the CAS
+  those are two operations with a window between them, which for a field that
+  guards a delete is a data-loss window.
+
+  `:preserve` names atoms and is plain data, so it survives the remote-node
+  fallback. An empty list is a `put/5` with a wasted read; callers that *are*
+  authoritative should use `put/5`.
+  """
+  @spec upsert(binary(), index_kind(), binary(), map(), keyword()) ::
+          {:ok, binary()} | write_error()
+  def upsert(volume_id, index_kind, key, fields, opts \\ [])
+      when is_binary(volume_id) and is_atom(index_kind) and is_binary(key) and is_map(fields) do
+    with_remote_fallback(
+      volume_id,
+      opts,
+      fn ->
+        apply_index_op(
+          volume_id,
+          Shard.for_key(index_kind, key),
+          index_kind,
+          opts,
+          upsert_tree_op(key, fields, Keyword.get(opts, :preserve, []), opts)
+        )
+      end,
+      fn node, remote_opts ->
+        remote_call(node, opts, :upsert, [volume_id, index_kind, key, fields, remote_opts])
+      end
+    )
+  end
+
+  @doc """
   Tombstone `key`. Even on a never-written tree this writes a
   tombstone so anti-entropy replicates the delete.
   """
@@ -613,6 +658,35 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
   # the CAS retry loop, so a stale-pointer conflict re-reads the latest
   # value and re-merges `fields` over it — disjoint-field writers compose
   # instead of clobbering.
+  # Read-decode-restore-encode-put against the current tree root, inside the CAS
+  # retry loop for the reason `merge_tree_op/3` documents. An absent key needs no
+  # restore: there is nothing to preserve, so the incoming value stands whole.
+  defp upsert_tree_op(key, fields, preserve, opts) do
+    nif_get = Keyword.get(opts, :index_tree_get, &Native.index_tree_get/4)
+    nif_put = Keyword.get(opts, :index_tree_put, &Native.index_tree_put/5)
+
+    fn store, root ->
+      do_upsert(nif_get, nif_put, store, root, key, fields, preserve)
+    end
+  end
+
+  defp do_upsert(nif_get, nif_put, store, root, key, fields, preserve) do
+    with {:ok, current} <- current_value(nif_get, store, root, key) do
+      value = MetadataValue.encode(Map.merge(fields, Map.take(current, preserve)))
+      nif_put.(store, root, "hot", key, value)
+    end
+  end
+
+  # An absent key has nothing to preserve, so it stands in as an empty map and
+  # the incoming value goes in whole.
+  defp current_value(nif_get, store, root, key) do
+    case nif_get.(store, root, "hot", key) do
+      {:ok, nil} -> {:ok, %{}}
+      {:ok, encoded} when is_binary(encoded) -> MetadataValue.decode(encoded)
+      {:error, _} = err -> err
+    end
+  end
+
   defp merge_tree_op(key, fields, opts) do
     nif_get = Keyword.get(opts, :index_tree_get, &Native.index_tree_get/4)
     nif_put = Keyword.get(opts, :index_tree_put, &Native.index_tree_put/5)

@@ -1239,16 +1239,14 @@ defmodule NeonFS.Core.WriteOperationTest do
     # `{:add_write_ref_failed, :not_found}`. That is a lost race, not a missing
     # chunk, and it has to resolve on a re-read rather than reach the caller.
     #
-    # `{:index_tree_write_failed, :merge_target_missing}` used to appear here too;
-    # it shared a cause with the ref clobbering and went away with it.
-    #
-    # `{:chunk_meta_unreadable, _}` is exempted, and only that shape: it means a
-    # committed file list names a chunk that is genuinely gone from the index, a
-    # separate defect where a put demotes an already-committed chunk back to
-    # `:uncommitted` and the abort guard then permits deleting it. Roughly one
-    # run in twelve. It reads as a *new* failure only because failing is new —
-    # the write used to skip the entry and report success, corrupting the file.
-    # The exemption comes off with that fix.
+    # Three defects have surfaced through this workload and all three are now
+    # closed, so it asserts zero failures with no exemptions:
+    # a `put` replacing another writer's `active_write_refs`, which showed up as
+    # `{:index_tree_write_failed, :merge_target_missing}`; a put demoting an
+    # already-committed chunk to `:uncommitted`, which let the abort guard delete
+    # a chunk a committed file referenced; and an offset write splicing against a
+    # chunk list it could not resolve, which reported success while corrupting
+    # the file.
     test "concurrent writers to one file all succeed",
          %{volume: volume} do
       writers = 16
@@ -1280,12 +1278,8 @@ defmodule NeonFS.Core.WriteOperationTest do
         )
         |> Enum.map(fn {:ok, result} -> result end)
 
-      unexpected =
-        Enum.reject(results, fn result ->
-          match?({:ok, _}, result) or match?({:error, {:chunk_meta_unreadable, _}}, result)
-        end)
-
-      assert unexpected == []
+      failures = Enum.reject(results, &match?({:ok, _}, &1))
+      assert failures == []
     end
 
     # A chunk's position in the file is derived from the lengths of the chunks
