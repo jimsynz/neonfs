@@ -131,6 +131,10 @@ spec:
               mountPropagation: Bidirectional
             - name: fuse-device
               mountPath: /dev/fuse
+            {{- if .Values.node.hostDevices.enabled }}
+            - name: host-devices
+              mountPath: {{ .Values.node.hostDevices.path }}
+            {{- end }}
             {{- include "neonfs-csi.stateVolumeMounts" . | nindent 12 }}
             {{- with .Values.node.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
@@ -156,6 +160,14 @@ spec:
           hostPath:
             path: /dev/fuse
             type: CharDevice
+        {{- if .Values.node.hostDevices.enabled }}
+        # A directory, not a device: block staging picks a free `/dev/nbdX` by
+        # scanning, so it cannot name the device it will use in advance.
+        - name: host-devices
+          hostPath:
+            path: {{ .Values.node.hostDevices.path }}
+            type: Directory
+        {{- end }}
         {{- include "neonfs-csi.stateVolumes" . | nindent 8 }}
         {{- with .Values.node.extraVolumes }}
         {{- toYaml . | nindent 8 }}
