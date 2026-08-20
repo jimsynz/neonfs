@@ -339,6 +339,21 @@ defmodule NeonFS.Core.Telemetry do
         tags: [:volume_id],
         description: "Total write operation errors"
       ),
+      sum("neonfs.write_operation.orphan_chunks_reclaimed",
+        event_name: [:neonfs, :write_operation, :orphan_recovered],
+        measurement: :chunks,
+        tags: [:volume_id],
+        description: "Chunks reclaimed from writes interrupted by node death"
+      ),
+      # Paired with the sum above so the gap between them is visible: a
+      # reclaimed count short of the named count is a chunk this node could not
+      # account for, and nothing else will come back for it.
+      sum("neonfs.write_operation.orphan_chunks_named",
+        event_name: [:neonfs, :write_operation, :orphan_recovered],
+        measurement: :chunks_named,
+        tags: [:volume_id],
+        description: "Chunks named by recovered pending-write records"
+      ),
       counter("neonfs.write_operation.abort_delete_skipped.count",
         event_name: [:neonfs, :write_operation, :abort_delete_skipped],
         tags: [:volume_id],

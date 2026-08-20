@@ -2126,34 +2126,74 @@ defmodule NeonFS.Core.WriteOperation do
   no other refs remain, deletes it from both storage and the
   `ChunkIndex`. Safe to call multiple times.
 
-  Made public so `NeonFS.Core.PendingWriteRecovery` can drive orphan
-  cleanup on startup.
+  Selects its work by write-ref membership, so it only reaches chunks whose
+  refs are still live in this node's ETS — that is, chunks staged by a write
+  in this same BEAM instance. A write interrupted by node death leaves nothing
+  it can match; `reclaim_orphaned_chunks/3` is what reclaims those.
   """
   @spec abort_chunks(write_id()) :: :ok
   def abort_chunks(write_id) do
-    uncommitted = ChunkIndex.list_uncommitted()
+    ChunkIndex.list_uncommitted()
+    |> Enum.filter(&MapSet.member?(&1.active_write_refs, write_id))
+    |> Enum.each(&abort_single_chunk(&1, write_id))
 
-    to_abort =
-      Enum.filter(uncommitted, fn meta ->
-        MapSet.member?(meta.active_write_refs, write_id)
-      end)
-
-    Enum.each(to_abort, &abort_single_chunk(&1, write_id))
     :ok
   end
 
-  defp abort_single_chunk(%ChunkMeta{hash: hash} = meta, write_id) do
-    ChunkIndex.remove_write_ref(hash, write_id)
+  @doc """
+  Reclaim the chunks a write left behind, named by hash rather than found by
+  write ref. Returns the number actually deleted.
 
+  `active_write_refs` are local-ETS-only and never persisted — deliberately,
+  since they are per-node ephemeral state — so after a restart every chunk
+  re-warmed from the quorum store carries an empty ref set and `abort_chunks/1`
+  matches nothing. `NeonFS.Core.PendingWriteRecovery` therefore drives its boot
+  sweep from the hashes its log recorded.
+
+  A hash that cluster truth says is committed, or that another live write still
+  holds a ref to, is left alone. That is the same rule `abort_chunks/1` applies,
+  because it is the same question: whether anything still references the chunk.
+
+  The return value is a count of deletions, not of hashes considered. The two
+  differ whenever a hash was already reclaimed, was committed by a concurrent
+  write, or could not be read — so a caller reporting progress should report
+  this rather than the length of the list it passed in.
+  """
+  @spec reclaim_orphaned_chunks(binary(), [binary()], write_id()) :: non_neg_integer()
+  def reclaim_orphaned_chunks(volume_id, hashes, write_id)
+      when is_binary(volume_id) and is_list(hashes) do
+    Enum.count(hashes, &(release_chunk(volume_id, &1, write_id) == :deleted))
+  end
+
+  defp abort_single_chunk(%ChunkMeta{hash: hash} = meta, write_id) do
     case ChunkMeta.any_volume_id(meta) do
       nil ->
-        :ok
+        ChunkIndex.remove_write_ref(hash, write_id)
 
       volume_id ->
-        case ChunkIndex.get(volume_id, hash) do
-          {:ok, updated_meta} -> delete_chunk_if_unreferenced(updated_meta)
-          {:error, :not_found} -> skip_delete_unreadable(volume_id, hash, write_id)
+        case release_chunk(volume_id, hash, write_id) do
+          :unreadable -> skip_delete_unreadable(volume_id, hash, write_id)
+          _deleted_or_kept -> :ok
         end
+    end
+  end
+
+  # Drop `write_id`'s ref, then delete the chunk if cluster truth says nothing
+  # references it any more.
+  #
+  # `:unreadable` is the ambiguous outcome: `ChunkIndex.get/2` answers
+  # `{:error, :not_found}` both for a chunk that is genuinely gone and for a
+  # metadata read that failed. Which one it is decides whether the caller is
+  # looking at a no-op or a leak, and only the caller knows enough to tell —
+  # a chunk this node just listed from ETS should not have vanished, whereas a
+  # hash from a log record written before a crash may well have been reclaimed
+  # already.
+  defp release_chunk(volume_id, hash, write_id) do
+    ChunkIndex.remove_write_ref(hash, write_id)
+
+    case ChunkIndex.get(volume_id, hash) do
+      {:ok, meta} -> if delete_chunk_if_unreferenced(meta), do: :deleted, else: :kept
+      {:error, :not_found} -> :unreadable
     end
   end
 
@@ -2175,6 +2215,9 @@ defmodule NeonFS.Core.WriteOperation do
     if meta.commit_state == :uncommitted and MapSet.size(meta.active_write_refs) == 0 do
       delete_chunk_from_storage(meta)
       ChunkIndex.delete(meta.hash)
+      true
+    else
+      false
     end
   end
 

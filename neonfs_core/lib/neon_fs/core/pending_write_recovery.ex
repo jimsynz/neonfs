@@ -11,9 +11,18 @@ defmodule NeonFS.Core.PendingWriteRecovery do
        grace window to find writes that started more than
        `grace_seconds` ago and never committed or aborted.
     3. For each orphan, calls
-       `NeonFS.Core.WriteOperation.abort_chunks/1` to remove the
-       chunks and their `ChunkIndex` entries, then `clear/1`s the
-       record.
+       `NeonFS.Core.WriteOperation.reclaim_orphaned_chunks/3` with the
+       hashes the record accumulated, then `clear/1`s the record.
+
+  The reclamation goes by hash because it has to. `abort_chunks/1` — the
+  in-process rollback — selects chunks by write-ref membership, and
+  `active_write_refs` live only in local ETS and are never persisted, so after
+  a restart every chunk re-warmed from the quorum store carries an empty ref
+  set and matches no write id. A sweep driven that way deletes nothing, which
+  is what this process used to do.
+
+  A chunk a committed file references is not reclaimed: cluster-truth
+  `commit_state` is the authority, the same rule the in-process abort applies.
 
   The grace window avoids racing a write that just started on a
   freshly-booted node. Default is 300 seconds (5 minutes); override
@@ -81,25 +90,41 @@ defmodule NeonFS.Core.PendingWriteRecovery do
   end
 
   defp recover_orphans(grace_seconds) do
-    orphans = PendingWriteLog.list_orphans(grace_seconds)
-
-    Enum.each(orphans, fn record ->
-      WriteOperation.abort_chunks(record.write_id)
-      PendingWriteLog.clear(record.write_id)
-
-      :telemetry.execute(
-        [:neonfs, :write_operation, :orphan_recovered],
-        %{chunks: length(record.chunk_hashes)},
-        %{write_id: record.write_id, volume_id: record.volume_id, path: record.path}
-      )
-
-      Logger.info("Reclaimed orphaned streaming write",
-        write_id: record.write_id,
-        volume_id: record.volume_id,
-        file_path: record.path
-      )
-    end)
+    grace_seconds
+    |> PendingWriteLog.list_orphans()
+    |> Enum.each(&recover_orphan/1)
 
     :ok
+  end
+
+  # `chunks` counts deletions, not hashes in the record. The two differ when a
+  # hash was already reclaimed, was committed by a concurrent write, or could
+  # not be read — and reporting the record's length instead is how this process
+  # claimed to reclaim chunks it had not touched.
+  defp recover_orphan(record) do
+    named = length(record.chunk_hashes)
+
+    reclaimed =
+      WriteOperation.reclaim_orphaned_chunks(
+        record.volume_id,
+        record.chunk_hashes,
+        record.write_id
+      )
+
+    PendingWriteLog.clear(record.write_id)
+
+    :telemetry.execute(
+      [:neonfs, :write_operation, :orphan_recovered],
+      %{chunks: reclaimed, chunks_named: named},
+      %{write_id: record.write_id, volume_id: record.volume_id, path: record.path}
+    )
+
+    Logger.info("Reclaimed orphaned streaming write",
+      write_id: record.write_id,
+      volume_id: record.volume_id,
+      file_path: record.path,
+      chunks_reclaimed: reclaimed,
+      chunks_named: named
+    )
   end
 end
