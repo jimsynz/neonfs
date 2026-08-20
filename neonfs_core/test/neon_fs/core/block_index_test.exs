@@ -2,6 +2,7 @@ defmodule NeonFS.Core.BlockIndexTest do
   use NeonFS.TestCase, async: false
 
   alias NeonFS.Core.BlockIndex
+  alias NeonFS.Core.Volume.BlockDevice
   alias NeonFS.Core.Volume.BlockExtent
 
   @volume_name "block-index-test-vol"
@@ -260,6 +261,80 @@ defmodule NeonFS.Core.BlockIndexTest do
 
       assert {:error, {:malformed_extent, {:unknown_kind, 9}}} =
                BlockIndex.range(@volume_name, 0, 5, opts())
+    end
+  end
+
+  describe "device header" do
+    test "round-trips through put_device/3 and get_device/2" do
+      register_volume()
+
+      device =
+        BlockDevice.new(id: "dev-1", size_bytes: 8 * 1024 * 1024, chunk_bytes: 131_072)
+
+      assert {:ok, %{0 => "root"}} = BlockIndex.put_device(@volume_name, device, opts())
+      assert_receive {:committed, @volume_id, [{:put, :block_index, key, encoded}], _opts}
+      assert key == BlockDevice.key()
+
+      Process.put({:entry, :block_index, BlockDevice.key()}, encoded)
+
+      assert {:ok, read_back} = BlockIndex.get_device(@volume_name, opts())
+      assert read_back.id == "dev-1"
+      assert read_back.size_bytes == 8 * 1024 * 1024
+      assert read_back.chunk_bytes == 131_072
+    end
+
+    test "reports a volume with no header rather than inventing geometry" do
+      register_volume()
+
+      assert {:error, :not_found} = BlockIndex.get_device(@volume_name, opts())
+    end
+
+    # The header's key is chosen so no extent index can produce it. Were it a
+    # sentinel integer, this is where an off-by-one in a bound would clobber it.
+    test "the header key is not an extent key" do
+      refute BlockExtent.extent_key?(BlockDevice.key())
+      assert BlockExtent.extent_key?(BlockExtent.key(0))
+      assert BlockExtent.extent_key?(BlockExtent.key(0xFFFFFFFFFFFFFFFF))
+    end
+  end
+
+  describe "iteration excludes the device header" do
+    # `range/3` decodes every entry it is handed as a fixed-width extent, so a
+    # header reaching the decoder is a malformed-entry error rather than a
+    # skipped row — which is what makes this a filter and not an optimisation.
+    test "range/4 skips it" do
+      register_volume()
+
+      device =
+        BlockDevice.new(id: "dev-1", size_bytes: 1024, chunk_bytes: 131_072)
+
+      Process.put(:range, [
+        {BlockDevice.key(), BlockDevice.encode(device)},
+        {BlockExtent.key(4), BlockExtent.encode({:chunk, @hash})}
+      ])
+
+      assert {:ok, [{4, {:chunk, @hash}}]} = BlockIndex.range(@volume_name, 0, 10, opts())
+    end
+
+    # Without this filter GC resolves the header as a chunk target — either
+    # failing the mark phase outright, or treating the device's own geometry as
+    # a chunk hash it should keep.
+    test "referenced_targets/2 skips it" do
+      register_volume()
+
+      device =
+        BlockDevice.new(id: "dev-1", size_bytes: 1024, chunk_bytes: 131_072)
+
+      Process.put(:range, [
+        {BlockDevice.key(), BlockDevice.encode(device)},
+        {BlockExtent.key(0), BlockExtent.encode({:chunk, @hash})}
+      ])
+
+      assert {:ok, %{chunks: chunks, stripes: stripes}} =
+               BlockIndex.referenced_targets(@volume_name, opts())
+
+      assert MapSet.to_list(chunks) == [@hash]
+      assert MapSet.size(stripes) == 0
     end
   end
 
