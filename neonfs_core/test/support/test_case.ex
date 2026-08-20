@@ -479,7 +479,7 @@ defmodule NeonFS.TestCase do
       root_chunk_reader: fn _root_entry, _opts -> {:ok, encoded_segment} end,
       store_handle: :stub_store,
       index_tree_get: fn _store, _root, _tier, key ->
-        case :ets.lookup(store, key) do
+        case mock_store_lookup(store, key) do
           [{^key, value}] -> {:ok, MetadataValue.encode(value)}
           [] -> {:ok, nil}
         end
@@ -565,7 +565,7 @@ defmodule NeonFS.TestCase do
       chunk_replicator: __MODULE__.NoopReplicator,
       bootstrap_registrar: fn _command -> {:ok, :updated} end,
       index_tree_get: fn _store, _root, _tier, key ->
-        case :ets.lookup(store, key) do
+        case mock_store_lookup(store, key) do
           [{^key, value}] -> {:ok, MetadataValue.encode(value)}
           [] -> {:ok, nil}
         end
@@ -595,7 +595,15 @@ defmodule NeonFS.TestCase do
   # The mock store's ETS table is owned by the test process. During ExUnit
   # teardown that process dies — deleting the table — before the supervised
   # index GenServer that writes through these closures is stopped, so a late
-  # {:put, …} / {:delete, …} can land here after the table is gone.
+  # {:put, …} / {:delete, …} can land here after the table is gone. Reads need
+  # the same tolerance, because a write is not necessarily read-free: an upsert
+  # consults the current value before writing.
+  defp mock_store_lookup(store, key) do
+    :ets.lookup(store, key)
+  rescue
+    ArgumentError -> []
+  end
+
   defp mock_store_insert(store, record) do
     :ets.insert(store, record)
   rescue

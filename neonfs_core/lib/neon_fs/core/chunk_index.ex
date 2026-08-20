@@ -623,21 +623,28 @@ defmodule NeonFS.Core.ChunkIndex do
     end
   end
 
-  defp write_chunk(%ChunkMeta{} = chunk_meta) do
+  # `commit_state` is preserved by default because the caller almost never owns
+  # it. It is set by the batch that commits the file referencing the chunk
+  # (`commit_mutations/2`, folded into that file's shard-CAS), so a full-value
+  # write from anywhere else — re-storing a chunk whose `get/2` missed, a scrub
+  # stamping `last_verified` — would return an already-committed chunk to
+  # `:uncommitted`. That is not a cosmetic staleness: `WriteOperation`'s abort
+  # guard reads this field to decide whether a chunk may be deleted, so a
+  # demotion lets the next abort delete a chunk a committed file references.
+  #
+  # `commit/1` is the one caller that *is* authoritative, and passes `[]`.
+  defp write_chunk(%ChunkMeta{} = chunk_meta, preserve \\ [:commit_state]) do
     case ChunkMeta.any_volume_id(chunk_meta) do
       nil ->
         {:error, :missing_volume_id}
 
       volume_id ->
-        key = chunk_key(chunk_meta.hash)
-        encoded = MetadataValue.encode(chunk_to_storable_map(chunk_meta))
-
-        case MetadataWriter.put(
+        case MetadataWriter.upsert(
                volume_id,
                :chunk_index,
-               key,
-               encoded,
-               metadata_writer_opts()
+               chunk_key(chunk_meta.hash),
+               chunk_to_storable_map(chunk_meta),
+               Keyword.put(metadata_writer_opts(), :preserve, preserve)
              ) do
           {:ok, _root} -> :ok
           {:error, _reason} = err -> err
@@ -705,7 +712,7 @@ defmodule NeonFS.Core.ChunkIndex do
   defp do_commit_chunk(hash) do
     with [{^hash, chunk_meta}] <- :ets.lookup(:chunk_index, hash),
          {:ok, committed_meta} <- ChunkMeta.commit(chunk_meta),
-         :ok <- write_chunk(committed_meta) do
+         :ok <- write_chunk(committed_meta, []) do
       :ets.insert(:chunk_index, {committed_meta.hash, committed_meta})
       :ok
     else

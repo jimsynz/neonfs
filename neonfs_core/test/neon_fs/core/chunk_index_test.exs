@@ -456,6 +456,62 @@ defmodule NeonFS.Core.ChunkIndexTest do
     end
   end
 
+  describe "put/1 and persisted commit state" do
+    # `commit_state` is set by the batch that commits the file referencing the
+    # chunk, not by whoever stores the chunk. A full-value put from anywhere else
+    # used to overwrite it with `:uncommitted` — and `WriteOperation`'s abort
+    # guard reads this field to decide whether a chunk may be deleted, so the
+    # demotion let the next abort delete a chunk a committed file referenced.
+    test "a put does not return an already-committed chunk to uncommitted" do
+      hash = :crypto.strong_rand_bytes(32)
+
+      :ok = ChunkIndex.put(ChunkMeta.new("vol-test", hash, 1024, 512))
+      :ok = ChunkIndex.commit(hash)
+
+      assert {:ok, %ChunkMeta{commit_state: :committed}} = ChunkIndex.get("vol-test", hash)
+
+      # Re-storing the same chunk is what the write path does whenever
+      # `ChunkIndex.get/2` missed — including on a transient read error, since it
+      # collapses those to `:not_found`.
+      :ok = ChunkIndex.put(ChunkMeta.new("vol-test", hash, 1024, 512))
+
+      assert {:ok, %ChunkMeta{commit_state: :committed}} = ChunkIndex.get("vol-test", hash)
+    end
+
+    test "a put still carries uncommitted for a hash the cluster has not seen" do
+      hash = :crypto.strong_rand_bytes(32)
+
+      :ok = ChunkIndex.put(ChunkMeta.new("vol-test", hash, 1024, 512))
+
+      assert {:ok, %ChunkMeta{commit_state: :uncommitted}} = ChunkIndex.get("vol-test", hash)
+    end
+
+    # The one caller that owns the field opts out of the preservation, or a
+    # commit could never happen.
+    test "commit/1 promotes despite the preservation" do
+      hash = :crypto.strong_rand_bytes(32)
+
+      :ok = ChunkIndex.put(ChunkMeta.new("vol-test", hash, 1024, 512))
+      :ok = ChunkIndex.commit(hash)
+
+      assert {:ok, %ChunkMeta{commit_state: :committed}} = ChunkIndex.get("vol-test", hash)
+    end
+
+    test "a put still overwrites the fields its caller does own" do
+      hash = :crypto.strong_rand_bytes(32)
+
+      :ok = ChunkIndex.put(ChunkMeta.new("vol-test", hash, 1024, 512))
+      :ok = ChunkIndex.commit(hash)
+      :ok = ChunkIndex.put(ChunkMeta.new("vol-test", hash, 4096, 2048, :zstd))
+
+      assert {:ok, meta} = ChunkIndex.get("vol-test", hash)
+      assert meta.original_size == 4096
+      assert meta.stored_size == 2048
+      assert meta.compression == :zstd
+      assert meta.commit_state == :committed
+    end
+  end
+
   describe "add_write_ref/2 and remove_write_ref/2" do
     test "adds and removes write references (local-only)" do
       hash = :crypto.strong_rand_bytes(32)
