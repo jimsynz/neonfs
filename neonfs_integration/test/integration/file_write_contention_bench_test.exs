@@ -47,13 +47,12 @@ defmodule NeonFS.Integration.FileWriteContentionBenchTest do
   retry as a stale compare, so reaching the caller means the budget was
   exhausted losing the same race repeatedly.
 
-  Still no assertion on the raw success count, because the failures that remain
-  are neither of those two classes. This workload also produces
-  `{:index_tree_write_failed, :merge_target_missing}`, which is a defect in the
-  metadata index tree rather than in the write path's lifetime rules and is
-  tracked separately. Asserting `succeeded == @writers` would make this file
-  fail for a reason it is not guarding, in the data path, which is the flake
-  this benchmark has already produced once.
+  Still no assertion on the raw success count. The in-process equivalent in
+  `neonfs_core`'s `write_operation_test.exs` does assert zero failures and is the
+  guard that matters, because CI runs it and does not run this file. Adding a
+  count assertion here would put a correctness claim behind a `:benchmark` tag
+  where nothing checks it, while coupling it to a multi-node cluster's timing —
+  which is the flake this benchmark has already produced once.
 
   Not run by default (`:benchmark`). Run with:
 

@@ -411,6 +411,51 @@ defmodule NeonFS.Core.ChunkIndexTest do
     end
   end
 
+  describe "put/1 and concurrent write refs" do
+    # Two writers can store the *same* new chunk at once — identical bytes
+    # hash identically — and each arrives at `put/1` with only its own ref.
+    # A blind ETS insert therefore drops the other's, and the next abort sees
+    # an empty ref set and deletes a chunk another writer is still staging.
+    # `active_write_refs` is local-only state owned by whoever added an entry
+    # to it, so a put must not be able to remove someone else's.
+    test "a second put for the same hash keeps the first writer's ref" do
+      hash = :crypto.strong_rand_bytes(32)
+
+      :ok = ChunkIndex.put(with_ref(ChunkMeta.new("vol-test", hash, 1024, 512), "write-a"))
+      :ok = ChunkIndex.put(with_ref(ChunkMeta.new("vol-test", hash, 1024, 512), "write-b"))
+
+      assert {:ok, meta} = ChunkIndex.lookup_by_hash(hash)
+      assert MapSet.equal?(meta.active_write_refs, MapSet.new(["write-a", "write-b"]))
+    end
+
+    test "a put carries its own ref when the hash is new" do
+      hash = :crypto.strong_rand_bytes(32)
+
+      :ok = ChunkIndex.put(with_ref(ChunkMeta.new("vol-test", hash, 1024, 512), "write-a"))
+
+      assert {:ok, meta} = ChunkIndex.lookup_by_hash(hash)
+      assert MapSet.equal?(meta.active_write_refs, MapSet.new(["write-a"]))
+    end
+
+    # Everything else about the record is the incoming put's, refs aside —
+    # a put is a full-value overwrite and only the local-only field is shared.
+    test "a second put still overwrites the replicated fields" do
+      hash = :crypto.strong_rand_bytes(32)
+
+      :ok = ChunkIndex.put(with_ref(ChunkMeta.new("vol-test", hash, 1024, 512), "write-a"))
+      :ok = ChunkIndex.put(with_ref(ChunkMeta.new("vol-other", hash, 2048, 999), "write-b"))
+
+      assert {:ok, meta} = ChunkIndex.lookup_by_hash(hash)
+      assert meta.original_size == 2048
+      assert meta.stored_size == 999
+      assert MapSet.member?(meta.volume_ids, "vol-other")
+    end
+
+    defp with_ref(%ChunkMeta{} = meta, write_id) do
+      %{meta | active_write_refs: MapSet.new([write_id])}
+    end
+  end
+
   describe "add_write_ref/2 and remove_write_ref/2" do
     test "adds and removes write references (local-only)" do
       hash = :crypto.strong_rand_bytes(32)
