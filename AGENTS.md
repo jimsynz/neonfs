@@ -70,7 +70,7 @@ git -c commit.gpgsign=false commit -m "commit message"
 
 | Package | Purpose |
 |---------|---------|
-| `neonfs_client/` | Shared library every other package builds on: shared types (`Volume`, `FileMeta`), service discovery (`Connection`, `Discovery`, `CostFunction`), RPC routing (`Router`), chunk streaming over the TLS data plane (`ChunkReader`, `ChunkWriter`), KV access, service registration (`Registrar`). Pure library — no OTP application. |
+| `neonfs_client/` | Shared library every other package builds on: shared types (`Volume`, `FileMeta`), service discovery (`Connection`, `Discovery`, `CostFunction`), RPC routing (`Router`), chunk streaming over the TLS data plane (`ChunkReader`, `ChunkWriter`), KV access, service registration (`Registrar`). Its `NeonFS.Client.Application` supervises the infrastructure every node type shares, so it starts exactly once even in omnibus mode. |
 | `neonfs_core/` | Control plane and storage engine: blob storage NIFs (`native/neonfs_blob`), file/chunk/stripe indexes on leaderless quorum replication, Ra-backed service + volume registries, cluster CA, join flow, GC, scrub, repair, tiering. |
 | `neonfs_fuse/` | FUSE interface (FUSE transport + protocol codec via the `wick` hex library). `Session` owns the `/dev/fuse` fd; `Handler` translates ops into core RPCs; `MountManager` owns mount lifecycle. |
 | `neonfs_nfs/` | NFSv3 interface: `NFSServer.*.Backend` impls against `neonfs_client`, export lifecycle, inode table, metadata cache, NLM v4 locking. |

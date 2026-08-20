@@ -43,6 +43,14 @@ defmodule NeonFS.Transport.CertRenewalTest do
     {node_cert, node_key}
   end
 
+  # An interval long enough that the first check never fires, so the health
+  # report reflects the certificate on disk rather than a renewal racing it.
+  defp start_idle_renewal do
+    name = :"renewal_idle_#{:rand.uniform(100_000)}"
+    start_supervised!({CertRenewal, name: name, check_interval_ms: :timer.hours(1)})
+    name
+  end
+
   defp make_renew_fun(ca_cert, ca_key, serial) do
     fn csr, hostname ->
       node_cert = TLS.sign_csr(csr, hostname, ca_cert, ca_key, serial)
@@ -277,6 +285,75 @@ defmodule NeonFS.Transport.CertRenewalTest do
                      @receive_timeout_ms
 
       refute_received {[:neonfs, :cert_renewal, :success], ^ref, _, _}
+    end
+  end
+
+  describe "health_check/1" do
+    test "is unhealthy when the renewal process is not running" do
+      assert %{status: :unhealthy, reason: :not_running} =
+               CertRenewal.health_check(:"renewal_absent_#{:rand.uniform(100_000)}")
+    end
+
+    test "is healthy on a node that holds no certificate" do
+      name = start_idle_renewal()
+
+      assert %{status: :healthy, reason: :no_cert} = CertRenewal.health_check(name)
+    end
+
+    test "is healthy well outside the renewal window", %{tmp_dir: tmp_dir} do
+      {ca_cert, ca_key} = generate_ca()
+      write_cert_with_validity(tmp_dir, ca_cert, ca_key, 200)
+      name = start_idle_renewal()
+
+      assert %{status: :healthy, consecutive_failures: 0, days_remaining: days} =
+               CertRenewal.health_check(name)
+
+      assert days > TLS.renewal_threshold_days()
+    end
+
+    # Passing through the window annually is what renewal looks like working,
+    # so the window alone must not raise an alarm.
+    test "is healthy inside the renewal window while renewal is succeeding", %{tmp_dir: tmp_dir} do
+      {ca_cert, ca_key} = generate_ca()
+      write_cert_with_validity(tmp_dir, ca_cert, ca_key, 20)
+      name = start_idle_renewal()
+
+      assert %{status: :healthy, consecutive_failures: 0} = CertRenewal.health_check(name)
+    end
+
+    test "is degraded inside the renewal window once renewal has failed", %{tmp_dir: tmp_dir} do
+      {ca_cert, ca_key} = generate_ca()
+      write_cert_with_validity(tmp_dir, ca_cert, ca_key, 20)
+
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:neonfs, :cert_renewal, :failure]
+        ])
+
+      name = :"renewal_health_fail_#{:rand.uniform(100_000)}"
+
+      start_supervised!(
+        {CertRenewal,
+         name: name,
+         check_interval_ms: @test_check_interval,
+         renew_fun: fn _csr, _hostname -> {:error, :all_nodes_unreachable} end}
+      )
+
+      assert_receive {[:neonfs, :cert_renewal, :failure], ^ref, _, _}, @receive_timeout_ms
+
+      assert %{status: :degraded, consecutive_failures: failures} =
+               CertRenewal.health_check(name)
+
+      assert failures > 0
+    end
+
+    test "is unhealthy under seven days to expiry", %{tmp_dir: tmp_dir} do
+      {ca_cert, ca_key} = generate_ca()
+      write_cert_with_validity(tmp_dir, ca_cert, ca_key, 3)
+      name = start_idle_renewal()
+
+      assert %{status: :unhealthy, days_remaining: days} = CertRenewal.health_check(name)
+      assert days <= 7
     end
   end
 end
