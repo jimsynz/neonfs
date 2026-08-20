@@ -648,10 +648,10 @@ defmodule NeonFS.Core.WriteOperation do
 
   defp do_write_at(volume, file_meta, offset, data, write_id, opts, attempt \\ 1) do
     write_end = offset + byte_size(data)
-    chunk_positions = build_chunk_info_list(file_meta.chunks, volume.id, 0, [])
-    {prefix, affected, suffix} = partition_chunks(chunk_positions, offset, write_end)
 
-    with :ok <- check_capacity(volume, max(0, write_end - file_meta.size)),
+    with {:ok, chunk_positions} <- build_chunk_info_list(file_meta.chunks, volume.id),
+         {prefix, affected, suffix} = partition_chunks(chunk_positions, offset, write_end),
+         :ok <- check_capacity(volume, max(0, write_end - file_meta.size)),
          {:ok, enc_ctx} <- resolve_encryption(volume),
          write_ctx = %{write_id: write_id, enc_ctx: enc_ctx},
          {:ok, new_data} <-
@@ -709,6 +709,16 @@ defmodule NeonFS.Core.WriteOperation do
       # read, whereas a missing chunk recurs against every read until the budget
       # is spent and the error is returned unchanged.
       {:error, {:add_write_ref_failed, :not_found} = reason} ->
+        retry_write_at(volume, file_meta, offset, data, write_id, opts, attempt, reason)
+
+      # The file's own chunk list names a chunk whose metadata will not resolve.
+      # Retried for the same reason as the lost dedup race above, and it is the
+      # only way to tell the two possibilities apart: `ChunkIndex.get/2`
+      # collapses a quorum read error into `{:error, :not_found}`, so a
+      # transient read failure and a chunk that is genuinely gone arrive here
+      # identical. The first resolves on a fresh read; the second recurs against
+      # every read until the budget is spent and the error is returned unchanged.
+      {:error, {:chunk_meta_unreadable, _hash} = reason} ->
         retry_write_at(volume, file_meta, offset, data, write_id, opts, attempt, reason)
 
       {:error, _reason} = error ->
@@ -809,10 +819,10 @@ defmodule NeonFS.Core.WriteOperation do
 
   defp do_write_zeroes_at(volume, file_meta, offset, length, write_id, opts) do
     write_end = offset + length
-    chunk_positions = build_chunk_info_list(file_meta.chunks, volume.id, 0, [])
-    {prefix, affected, suffix} = partition_chunks(chunk_positions, offset, write_end)
 
-    with :ok <- validate_zero_range(file_meta, write_end),
+    with {:ok, chunk_positions} <- build_chunk_info_list(file_meta.chunks, volume.id),
+         {prefix, affected, suffix} = partition_chunks(chunk_positions, offset, write_end),
+         :ok <- validate_zero_range(file_meta, write_end),
          {:ok, enc_ctx} <- resolve_encryption(volume),
          write_ctx = %{write_id: write_id, enc_ctx: enc_ctx},
          {:ok, replacements} <-
@@ -927,7 +937,20 @@ defmodule NeonFS.Core.WriteOperation do
     end
   end
 
-  defp build_chunk_info_list([], _volume_id, _offset, acc), do: Enum.reverse(acc)
+  # Turns a file's chunk list into `{hash, start, end}` triples so a partial
+  # write can find the span it has to splice.
+  #
+  # A chunk's position is derived from the lengths of the chunks before it, not
+  # stored, so an entry that will not resolve makes every later triple wrong.
+  # Skipping it — which this did, without even advancing the offset — left the
+  # splice writing the caller's bytes at the wrong place in the file and
+  # returning `{:ok, meta}`. Silent corruption is the worst of the available
+  # outcomes; failing is honest, and the caller can retry.
+  defp build_chunk_info_list(hashes, volume_id) do
+    build_chunk_info_list(hashes, volume_id, 0, [])
+  end
+
+  defp build_chunk_info_list([], _volume_id, _offset, acc), do: {:ok, Enum.reverse(acc)}
 
   defp build_chunk_info_list([hash | rest], volume_id, current_offset, acc) do
     case ChunkIndex.get(volume_id, hash) do
@@ -939,11 +962,7 @@ defmodule NeonFS.Core.WriteOperation do
         ])
 
       {:error, :not_found} ->
-        Logger.error("Chunk metadata not found during offset write",
-          chunk_hash: Base.encode16(hash)
-        )
-
-        build_chunk_info_list(rest, volume_id, current_offset, acc)
+        {:error, {:chunk_meta_unreadable, hash}}
     end
   end
 
