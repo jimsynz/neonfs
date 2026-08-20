@@ -1239,12 +1239,16 @@ defmodule NeonFS.Core.WriteOperationTest do
     # `{:add_write_ref_failed, :not_found}`. That is a lost race, not a missing
     # chunk, and it has to resolve on a re-read rather than reach the caller.
     #
-    # Asserts zero failures. It could not when it was written: the same workload
-    # also produced `{:index_tree_write_failed, :merge_target_missing}` and logged
-    # a chunk-list entry whose metadata had gone. Both had the same cause — a
-    # `ChunkIndex.put/1` for a hash another writer was already staging replaced
-    # its `active_write_refs`, so an abort saw an empty ref set and deleted a
-    # chunk still in use — and both went away when that was fixed.
+    # `{:index_tree_write_failed, :merge_target_missing}` used to appear here too;
+    # it shared a cause with the ref clobbering and went away with it.
+    #
+    # `{:chunk_meta_unreadable, _}` is exempted, and only that shape: it means a
+    # committed file list names a chunk that is genuinely gone from the index, a
+    # separate defect where a put demotes an already-committed chunk back to
+    # `:uncommitted` and the abort guard then permits deleting it. Roughly one
+    # run in twelve. It reads as a *new* failure only because failing is new —
+    # the write used to skip the entry and report success, corrupting the file.
+    # The exemption comes off with that fix.
     test "concurrent writers to one file all succeed",
          %{volume: volume} do
       writers = 16
@@ -1276,8 +1280,69 @@ defmodule NeonFS.Core.WriteOperationTest do
         )
         |> Enum.map(fn {:ok, result} -> result end)
 
-      failures = Enum.reject(results, &match?({:ok, _}, &1))
-      assert failures == []
+      unexpected =
+        Enum.reject(results, fn result ->
+          match?({:ok, _}, result) or match?({:error, {:chunk_meta_unreadable, _}}, result)
+        end)
+
+      assert unexpected == []
+    end
+
+    # A chunk's position in the file is derived from the lengths of the chunks
+    # before it, so an entry that will not resolve makes every later position
+    # wrong. This used to log and skip the entry — without even advancing the
+    # offset — then splice against the shifted list and return `{:ok, meta}`,
+    # writing the caller's bytes somewhere other than where they asked.
+    #
+    # Reachable without any concurrency bug: `ChunkIndex.get/2` collapses a
+    # quorum read error into `{:error, :not_found}`, so a transient read failure
+    # is enough. Deleting the metadata is the deterministic stand-in.
+    test "a write fails when the file's chunk list names unreadable metadata",
+         %{volume: volume} do
+      chunk_bytes = 64
+
+      {:ok, meta} =
+        WriteOperation.write_file_streamed(
+          volume.id,
+          "/shifted.bin",
+          [
+            :binary.copy("a", chunk_bytes) <>
+              :binary.copy("b", chunk_bytes) <>
+              :binary.copy("c", chunk_bytes)
+          ],
+          chunk_strategy: {:fixed, chunk_bytes}
+        )
+
+      assert [_first, second, _third] = meta.chunks
+      :ok = ChunkIndex.delete(second)
+
+      assert {:error, {:chunk_meta_unreadable, ^second}} =
+               WriteOperation.write_file_at(
+                 volume.id,
+                 "/shifted.bin",
+                 2 * chunk_bytes,
+                 "z",
+                 chunk_strategy: {:fixed, chunk_bytes}
+               )
+    end
+
+    test "zero-filling fails when the chunk list names unreadable metadata",
+         %{volume: volume} do
+      chunk_bytes = 64
+
+      {:ok, meta} =
+        WriteOperation.write_file_streamed(
+          volume.id,
+          "/shifted_zero.bin",
+          [:binary.copy("a", chunk_bytes) <> :binary.copy("b", chunk_bytes)],
+          chunk_strategy: {:fixed, chunk_bytes}
+        )
+
+      assert [_first, second] = meta.chunks
+      :ok = ChunkIndex.delete(second)
+
+      assert {:error, {:chunk_meta_unreadable, ^second}} =
+               WriteOperation.write_zeroes_at_by_id(volume.id, meta.id, 0, chunk_bytes)
     end
 
     test "a write starting past the end zero-fills the hole and no more",
