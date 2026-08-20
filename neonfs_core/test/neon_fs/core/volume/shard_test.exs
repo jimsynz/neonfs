@@ -1,7 +1,7 @@
 defmodule NeonFS.Core.Volume.ShardTest do
   use ExUnit.Case, async: false
 
-  alias NeonFS.Core.Volume.{BlockExtent, Shard}
+  alias NeonFS.Core.Volume.{BlockDevice, BlockExtent, Shard}
 
   # The unit suite pins `metadata_shard_count` to 1, which collapses every
   # mapping onto shard 0 and hides the distinctions these tests are about.
@@ -122,6 +122,37 @@ defmodule NeonFS.Core.Volume.ShardTest do
 
         assert Shard.for_key(:block_index, BlockExtent.key(4 * group_size)) ==
                  Shard.for_key(:block_index, BlockExtent.key(0))
+      end)
+    end
+  end
+
+  describe "for_key/2 on the block_index device header" do
+    # The header has no extent index, so `BlockExtent.extent_index/1` raises on
+    # its key. Without an explicit clause the shard mapping crashes rather than
+    # answering — which is why the group is declared rather than derived.
+    test "maps the header key to BlockDevice.shard/0" do
+      with_shard_count(64, fn ->
+        assert Shard.for_key(:block_index, BlockDevice.key()) ==
+                 rem(BlockDevice.shard(), 64)
+      end)
+    end
+
+    test "is stable across shard counts, modulo the count" do
+      for count <- [1, 4, 64] do
+        with_shard_count(count, fn ->
+          shard = Shard.for_key(:block_index, BlockDevice.key())
+          assert shard == rem(BlockDevice.shard(), count)
+          assert shard < count
+        end)
+      end
+    end
+
+    test "still maps extent keys by their group" do
+      with_shard_count(64, fn ->
+        group_size = BlockExtent.group_size()
+
+        assert Shard.for_key(:block_index, BlockExtent.key(0)) == 0
+        assert Shard.for_key(:block_index, BlockExtent.key(group_size)) == 1
       end)
     end
   end

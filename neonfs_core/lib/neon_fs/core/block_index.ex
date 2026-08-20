@@ -48,6 +48,15 @@ defmodule NeonFS.Core.BlockIndex do
   node reaching this module over `NeonFS.Client.Router` holds the name it
   attached with, not the volume's id.
 
+  ## The device header shares this index
+
+  `block_index` holds one key that is not an extent:
+  `NeonFS.Core.Volume.BlockDevice`'s header, carrying the device's geometry.
+  Identity and contents then commit and shard together. Its key is not eight
+  bytes wide and every extent key is, so `range/3` and `referenced_targets/2`
+  exclude it by shape — the second is not optional, since without it GC would
+  try to resolve a device header as a chunk target.
+
   ## Holes
 
   An extent with no entry is a hole, and a hole reads as zeroes. Discard
@@ -71,7 +80,7 @@ defmodule NeonFS.Core.BlockIndex do
     VolumeRegistry
   }
 
-  alias NeonFS.Core.Volume.{BlockExtent, MetadataReader}
+  alias NeonFS.Core.Volume.{BlockDevice, BlockExtent, MetadataReader}
   alias NeonFS.Error.VolumeNotFound
 
   @type extent_index :: BlockExtent.extent_index()
@@ -137,7 +146,10 @@ defmodule NeonFS.Core.BlockIndex do
          {:ok, entries} <-
            reader.range(volume.id, :block_index, <<>>, <<>>, reader_opts(opts)) do
       empty = %{chunks: MapSet.new(), stripes: MapSet.new()}
-      Enum.reduce_while(entries, {:ok, empty}, &fold_target/2)
+
+      entries
+      |> Enum.filter(fn {key, _entry} -> BlockExtent.extent_key?(key) end)
+      |> Enum.reduce_while({:ok, empty}, &fold_target/2)
     end
   end
 
@@ -238,6 +250,47 @@ defmodule NeonFS.Core.BlockIndex do
     end
   end
 
+  @doc """
+  The volume's device header, or `:not_found` where it has none.
+
+  A volume with extents but no header is a file-backed device from before the
+  extent map, or a provisioning that did not finish. Either way its geometry is
+  unknown, so this reports the absence rather than inventing a size.
+  """
+  @spec get_device(String.t(), keyword()) ::
+          {:ok, BlockDevice.t()} | {:error, term()}
+  def get_device(volume_name, opts \\ []) when is_binary(volume_name) do
+    reader = Keyword.get(opts, :metadata_reader, MetadataReader)
+
+    with {:ok, volume} <- resolve_volume(volume_name),
+         {:ok, encoded} <-
+           reader.get(volume.id, :block_index, BlockDevice.key(), reader_opts(opts)) do
+      BlockDevice.decode(encoded)
+    end
+  end
+
+  @doc """
+  Publishes `device` as the volume's device header.
+
+  A commit like any other, so it can be batched with the extents of the same
+  group — which is the reason the header lives in this index at all. Unfenced:
+  writing geometry is provisioning, not a guest write, and a provisioner holds
+  no attachment epoch.
+  """
+  @spec put_device(String.t(), BlockDevice.t(), keyword()) ::
+          {:ok, %{optional(non_neg_integer()) => binary()}} | {:error, term()}
+  def put_device(volume_name, %BlockDevice{} = device, opts \\ [])
+      when is_binary(volume_name) do
+    committer = Keyword.get(opts, :volume_committer, VolumeCommitter)
+
+    with {:ok, volume} <- resolve_volume(volume_name) do
+      mutation =
+        {:put, :block_index, BlockDevice.key(), BlockDevice.encode(device)}
+
+      committer.commit(volume.id, [mutation], writer_opts(opts))
+    end
+  end
+
   defp do_get(volume_id, extent_index, opts) do
     reader = Keyword.get(opts, :metadata_reader, MetadataReader)
 
@@ -270,7 +323,9 @@ defmodule NeonFS.Core.BlockIndex do
   end
 
   defp decode_all(entries) do
-    Enum.reduce_while(entries, {:ok, []}, fn {key, entry}, {:ok, acc} ->
+    entries
+    |> Enum.filter(fn {key, _entry} -> BlockExtent.extent_key?(key) end)
+    |> Enum.reduce_while({:ok, []}, fn {key, entry}, {:ok, acc} ->
       case BlockExtent.decode(entry) do
         {:ok, target} -> {:cont, {:ok, [{BlockExtent.extent_index(key), target} | acc]}}
         {:error, _} = err -> {:halt, err}

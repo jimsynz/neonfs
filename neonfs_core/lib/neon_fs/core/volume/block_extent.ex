@@ -75,6 +75,11 @@ defmodule NeonFS.Core.Volume.BlockExtent do
   @hash_size 32
   @uuid_bytes 16
 
+  # Every extent key is exactly this wide, which is what lets a key that is
+  # *not* an extent be told apart by shape rather than by value. See
+  # `NeonFS.Core.Volume.BlockDevice`, which shares this index.
+  @key_size 8
+
   @hole_kind 0
   @chunk_kind 1
   @stripe_kind 2
@@ -108,7 +113,24 @@ defmodule NeonFS.Core.Volume.BlockExtent do
     do: <<extent_index::unsigned-big-64>>
 
   @doc """
+  Whether `key` is an extent key at all.
+
+  `block_index` holds one key that is not an extent — the device header,
+  `NeonFS.Core.Volume.BlockDevice.key/0` — and everything that iterates the
+  index has to skip it. The test is the key's *shape*, not its value: an
+  arithmetic guard against a reserved index would still read as an extent
+  anywhere it was not specifically excluded, and an off-by-one in a range
+  bound would reach it.
+  """
+  @spec extent_key?(binary()) :: boolean()
+  def extent_key?(key) when is_binary(key), do: byte_size(key) == @key_size
+
+  @doc """
   The extent index a `block_index` `key` denotes.
+
+  Raises on a key that is not an extent key — callers iterating the index
+  filter with `extent_key?/1` first, and a header reaching here is a missing
+  filter rather than a value to interpret.
   """
   @spec extent_index(binary()) :: extent_index()
   def extent_index(<<extent_index::unsigned-big-64>>), do: extent_index

@@ -38,6 +38,7 @@ defmodule NeonFS.Core.Volume.Shard do
   suite and production run at the default.
   """
 
+  alias NeonFS.Core.Volume.BlockDevice
   alias NeonFS.Core.Volume.BlockExtent
 
   @default_count 64
@@ -55,16 +56,24 @@ defmodule NeonFS.Core.Volume.Shard do
   @doc """
   The shard `key` belongs to in its `index_kind` index.
 
-  For `:block_index` that is the key's extent group, modulo `count/0`;
-  for every other kind it is the top 32 bits of the key's SHA-256 digest,
-  modulo `count/0`.
+  For `:block_index` that is the key's extent group, modulo `count/0` — or
+  `BlockDevice.shard/0` for the one key in that index which is a device header
+  rather than an extent; for every other kind it is the top 32 bits of the
+  key's SHA-256 digest, modulo `count/0`.
   """
   @spec for_key(index_kind(), binary()) :: non_neg_integer()
   def for_key(:block_index, key) when is_binary(key) do
-    key
-    |> BlockExtent.extent_index()
-    |> BlockExtent.group()
-    |> rem(count())
+    if BlockExtent.extent_key?(key) do
+      key
+      |> BlockExtent.extent_index()
+      |> BlockExtent.group()
+      |> rem(count())
+    else
+      # `block_index` also holds a device header, which has no extent index and
+      # so no group to derive. `BlockDevice.shard/0` states the group it lives
+      # in; without this clause `extent_index/1` would raise on its key.
+      rem(BlockDevice.shard(), count())
+    end
   end
 
   def for_key(index_kind, key) when is_atom(index_kind) and is_binary(key) do
