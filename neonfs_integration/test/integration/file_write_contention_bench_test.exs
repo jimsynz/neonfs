@@ -41,12 +41,19 @@ defmodule NeonFS.Integration.FileWriteContentionBenchTest do
   the abort path no longer deletes those, so this asserts that neither
   `:chunk_not_found` nor `:local_read_failed` appears at all.
 
-  Still no assertion on the success count. `{:add_write_ref_failed, :not_found}`
-  is a lost dedup race — deduplicating against a chunk whose writer then
-  legitimately aborted — and it is a throughput problem with its own retry
-  budget. Asserting a count here would couple a data-loss regression test to
-  that budget and to runner speed, which is how this file becomes a flake in
-  the data path.
+  It also asserts that no write fails with `{:add_write_ref_failed, :not_found}`.
+  That shape is a lost dedup race — deduplicating against a chunk whose writer
+  then legitimately aborted — and it is now routed through the same bounded
+  retry as a stale compare, so reaching the caller means the budget was
+  exhausted losing the same race repeatedly.
+
+  Still no assertion on the raw success count, because the failures that remain
+  are neither of those two classes. This workload also produces
+  `{:index_tree_write_failed, :merge_target_missing}`, which is a defect in the
+  metadata index tree rather than in the write path's lifetime rules and is
+  tracked separately. Asserting `succeeded == @writers` would make this file
+  fail for a reason it is not guarding, in the data path, which is the flake
+  this benchmark has already produced once.
 
   Not run by default (`:benchmark`). Run with:
 
@@ -90,6 +97,7 @@ defmodule NeonFS.Integration.FileWriteContentionBenchTest do
 
     assert Enum.filter(file.failures, &mentions?(&1, :chunk_not_found)) == []
     assert Enum.filter(file.failures, &mentions?(&1, :local_read_failed)) == []
+    assert Enum.filter(file.failures, &mentions?(&1, :add_write_ref_failed)) == []
   end
 
   defp create_volume(cluster, name, opts) do

@@ -680,7 +680,7 @@ defmodule NeonFS.Core.WriteOperation do
              commit_compare(volume, file_meta, prefix, affected, new_hashes, opts)
            ) do
         {:error, :stale_chunks} ->
-          retry_write_at(volume, file_meta, offset, data, write_id, opts, attempt)
+          retry_write_at(volume, file_meta, offset, data, write_id, opts, attempt, :stale_chunks)
 
         {:ok, _updated_meta} = ok ->
           # Account the offset write against volume stats: only the
@@ -697,6 +697,20 @@ defmodule NeonFS.Core.WriteOperation do
           error
       end
     else
+      # Deduplicating against a chunk another write still had in flight, which
+      # then aborted and correctly took it away: the reference this write was
+      # about to adopt is gone by the time it adopts it. Nothing is missing from
+      # the cluster — the data is simply not there to share any more — so this
+      # is a lost race like a stale compare, and re-reading rebuilds the write
+      # against what is there.
+      #
+      # Routing it through the same bounded retry is also what tells it apart
+      # from a chunk that is genuinely absent: a lost race resolves on a fresh
+      # read, whereas a missing chunk recurs against every read until the budget
+      # is spent and the error is returned unchanged.
+      {:error, {:add_write_ref_failed, :not_found} = reason} ->
+        retry_write_at(volume, file_meta, offset, data, write_id, opts, attempt, reason)
+
       {:error, _reason} = error ->
         abort_chunks(write_id)
         error
@@ -742,23 +756,29 @@ defmodule NeonFS.Core.WriteOperation do
     FileIndex.expect_chunks_opt(file_meta.chunks)
   end
 
-  # Another writer committed between this one's read and its commit, so the
-  # splice was computed against a list that no longer exists. Re-read and
-  # redo it; the chunks staged for the abandoned attempt are released, as
-  # they are on any other failure.
-  defp retry_write_at(_volume, file_meta, _offset, _data, write_id, _opts, attempt)
+  # This write lost a race against a concurrent one — either its snapshot of
+  # the chunk list went stale before the commit, or a chunk it deduplicated
+  # against was reclaimed before it adopted the reference. Re-read and redo the
+  # splice; the chunks staged for the abandoned attempt are released, as they
+  # are on any other failure.
+  #
+  # `reason` is carried through so an exhausted budget reports which race it
+  # kept losing. Returning `:stale_chunks` for all of them made a vanished
+  # chunk indistinguishable from a crowded file.
+  defp retry_write_at(_volume, file_meta, _offset, _data, write_id, _opts, attempt, reason)
        when attempt >= @max_write_at_attempts do
     abort_chunks(write_id)
 
     Logger.warning("Gave up on a partial write after repeated concurrent updates",
       file_id: file_meta.id,
-      attempt: attempt
+      attempt: attempt,
+      reason: inspect(reason)
     )
 
-    {:error, :stale_chunks}
+    {:error, reason}
   end
 
-  defp retry_write_at(volume, file_meta, offset, data, write_id, opts, attempt) do
+  defp retry_write_at(volume, file_meta, offset, data, write_id, opts, attempt, _reason) do
     abort_chunks(write_id)
 
     # Without a pause, every loser retries into the same window and the

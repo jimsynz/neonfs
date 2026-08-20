@@ -1233,6 +1233,54 @@ defmodule NeonFS.Core.WriteOperationTest do
       assert read_data == initial_data <> append_data
     end
 
+    # Concurrent writers to distinct chunks of one file all deduplicate against
+    # each other's staged chunks — the payload is identical, so the hashes are —
+    # and a writer whose dedup target is reclaimed by the loser's abort sees
+    # `{:add_write_ref_failed, :not_found}`. That is a lost race, not a missing
+    # chunk, and it has to resolve on a re-read rather than reach the caller.
+    #
+    # Asserted against that one shape rather than against "no failures at all".
+    # This workload also surfaces `{:index_tree_write_failed, :merge_target_missing}`
+    # and a chunk-list entry whose metadata has gone, both of which are separate
+    # defects with their own issues — asserting zero failures here would make
+    # this test fail for reasons it is not guarding.
+    test "concurrent writers to one file never see a reclaimed dedup target",
+         %{volume: volume} do
+      writers = 16
+      chunk_bytes = 4096
+      payload = :binary.copy(<<0xAB>>, chunk_bytes)
+
+      {:ok, _} =
+        WriteOperation.write_file_streamed(
+          volume.id,
+          "/contended.bin",
+          [:binary.copy(<<0>>, writers * chunk_bytes)],
+          chunk_strategy: {:fixed, chunk_bytes}
+        )
+
+      results =
+        0..(writers - 1)
+        |> Task.async_stream(
+          fn i ->
+            WriteOperation.write_file_at(
+              volume.id,
+              "/contended.bin",
+              i * chunk_bytes,
+              payload,
+              chunk_strategy: {:fixed, chunk_bytes}
+            )
+          end,
+          max_concurrency: writers,
+          timeout: 120_000
+        )
+        |> Enum.map(fn {:ok, result} -> result end)
+
+      lost_dedup =
+        Enum.filter(results, &match?({:error, {:add_write_ref_failed, :not_found}}, &1))
+
+      assert lost_dedup == []
+    end
+
     test "a write starting past the end zero-fills the hole and no more",
          %{volume: volume} do
       {:ok, _file_meta} =
