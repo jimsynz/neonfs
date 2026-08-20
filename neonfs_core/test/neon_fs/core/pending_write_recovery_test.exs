@@ -2,7 +2,16 @@ defmodule NeonFS.Core.PendingWriteRecoveryTest do
   use ExUnit.Case, async: false
   use NeonFS.TestCase
 
-  alias NeonFS.Core.{PendingWriteLog, PendingWriteRecovery, VolumeRegistry, WriteOperation}
+  alias NeonFS.Core.{
+    BlobStore,
+    ChunkIndex,
+    ChunkMeta,
+    PendingWriteLog,
+    PendingWriteRecovery,
+    ReadOperation,
+    VolumeRegistry,
+    WriteOperation
+  }
 
   @moduletag :tmp_dir
 
@@ -42,47 +51,79 @@ defmodule NeonFS.Core.PendingWriteRecoveryTest do
     end
   end
 
-  describe "recovery of simulated orphan" do
-    test "deletes orphaned chunks and clears the record", %{volume: volume} do
-      # Simulate a crash: write a chunk under write_id, register it
-      # in the pending log, but DON'T commit. This mirrors the state
-      # a crashed streaming write would leave behind.
+  describe "recovery of an orphaned write" do
+    # The defect this guards: `abort_chunks/1` selects by write-ref membership,
+    # and `active_write_refs` are local-ETS-only and never persisted. Restarting
+    # `ChunkIndex` empties them exactly as node death does, so a sweep that goes
+    # by ref matches nothing and reclaims nothing — which is what this used to
+    # do while still clearing the record and reporting a chunk count.
+    test "reclaims the record's chunks across a ChunkIndex restart", %{volume: volume} do
       write_id = WriteOperation.generate_write_id()
-      :ok = PendingWriteLog.open_write(write_id, volume.id, "/crashed.bin")
+      hash = stage_orphan(volume, write_id, "/crashed.bin")
 
-      # Write one chunk directly via the streaming path so the
-      # ChunkIndex has an uncommitted chunk with this write_id's ref.
-      stream = Stream.map([:crypto.strong_rand_bytes(2048)], & &1)
+      restart_chunk_index_empty()
 
-      task =
-        Task.async(fn ->
-          WriteOperation.write_file_streamed(volume.id, "/will-commit.bin", stream)
-        end)
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:neonfs, :write_operation, :orphan_recovered]
+        ])
 
-      {:ok, _} = Task.await(task)
-
-      # Now register a fake orphan — chunk that references write_id but
-      # will never commit. Back-date started_at past the grace window.
-      orphan_hash = "orphan-hash-" <> Integer.to_string(:rand.uniform(9_999_999_999))
-      stale_at = DateTime.add(DateTime.utc_now(), -3600, :second)
-
-      :dets.insert(
-        :pending_writes,
-        {write_id,
-         %{
-           write_id: write_id,
-           volume_id: volume.id,
-           path: "/crashed.bin",
-           chunk_hashes: [orphan_hash],
-           started_at: stale_at
-         }}
-      )
-
-      :dets.sync(:pending_writes)
-
-      # Sweep with a small grace — the back-dated record must be seen
-      # as orphaned and cleared.
       assert :ok = PendingWriteRecovery.sweep(1)
+
+      assert_receive {[:neonfs, :write_operation, :orphan_recovered], ^ref,
+                      %{chunks: 1, chunks_named: 1}, %{write_id: ^write_id}}
+
+      assert {:error, :not_found} = PendingWriteLog.get(write_id)
+      assert {:error, :not_found} = ChunkIndex.get(volume.id, hash)
+      refute BlobStore.chunk_exists?(hash, "default")
+    end
+
+    test "spares a chunk a committed file references", %{volume: volume} do
+      data = :crypto.strong_rand_bytes(2048)
+
+      {:ok, meta} =
+        WriteOperation.write_file_streamed(volume.id, "/committed.bin", Stream.map([data], & &1))
+
+      [hash] = meta.chunks
+
+      # A crashed write that had deduplicated against this chunk names it in
+      # its record. Reclaiming by hash must not take it.
+      write_id = WriteOperation.generate_write_id()
+      :ok = PendingWriteLog.open_write(write_id, volume.id, "/dedup-crashed.bin")
+      :ok = PendingWriteLog.record_chunk(write_id, hash)
+      backdate(write_id)
+
+      restart_chunk_index_empty()
+
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:neonfs, :write_operation, :orphan_recovered]
+        ])
+
+      assert :ok = PendingWriteRecovery.sweep(1)
+
+      assert_receive {[:neonfs, :write_operation, :orphan_recovered], ^ref,
+                      %{chunks: 0, chunks_named: 1}, %{write_id: ^write_id}}
+
+      assert {:error, :not_found} = PendingWriteLog.get(write_id)
+      assert {:ok, ^data} = ReadOperation.read_file(volume.id, "/committed.bin")
+    end
+
+    test "a record naming a chunk that is already gone reclaims nothing", %{volume: volume} do
+      write_id = WriteOperation.generate_write_id()
+      :ok = PendingWriteLog.open_write(write_id, volume.id, "/vanished.bin")
+      :ok = PendingWriteLog.record_chunk(write_id, :crypto.hash(:sha256, "never-stored"))
+      backdate(write_id)
+
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:neonfs, :write_operation, :orphan_recovered]
+        ])
+
+      assert :ok = PendingWriteRecovery.sweep(1)
+
+      assert_receive {[:neonfs, :write_operation, :orphan_recovered], ^ref,
+                      %{chunks: 0, chunks_named: 1}, %{write_id: ^write_id}}
 
       assert {:error, :not_found} = PendingWriteLog.get(write_id)
     end
@@ -133,5 +174,54 @@ defmodule NeonFS.Core.PendingWriteRecoveryTest do
       assert record.write_id == write_id
       assert record.chunk_hashes == ["hash-1"]
     end
+  end
+
+  # Stage exactly what a streaming write leaves on disk before it commits: the
+  # blob written, an uncommitted `ChunkMeta` carrying the write's ref, and the
+  # hash recorded in the pending-write log. Back-dated past any grace window.
+  defp stage_orphan(volume, write_id, path) do
+    :ok = PendingWriteLog.open_write(write_id, volume.id, path)
+
+    data = :crypto.strong_rand_bytes(2048)
+    {:ok, hash, _info} = BlobStore.write_chunk(data, "default", "hot")
+
+    :ok =
+      ChunkIndex.put(%ChunkMeta{
+        volume_ids: MapSet.new([volume.id]),
+        hash: hash,
+        original_size: byte_size(data),
+        stored_size: byte_size(data),
+        compression: :none,
+        crypto: nil,
+        locations: [%{node: node(), drive_id: "default", tier: :hot}],
+        target_replicas: 1,
+        commit_state: :uncommitted,
+        active_write_refs: MapSet.new([write_id]),
+        created_at: DateTime.utc_now()
+      })
+
+    :ok = PendingWriteLog.record_chunk(write_id, hash)
+    backdate(write_id)
+
+    hash
+  end
+
+  defp backdate(write_id) do
+    {:ok, record} = PendingWriteLog.get(write_id)
+
+    :dets.insert(
+      :pending_writes,
+      {write_id, %{record | started_at: DateTime.add(DateTime.utc_now(), -3600, :second)}}
+    )
+
+    :dets.sync(:pending_writes)
+  end
+
+  # `active_write_refs` die with the node. A restart is the cheapest faithful
+  # stand-in, and the only way the sweep is exercised against the ref set it
+  # will actually see at boot.
+  defp restart_chunk_index_empty do
+    start_chunk_index()
+    assert [] = ChunkIndex.list_uncommitted()
   end
 end
