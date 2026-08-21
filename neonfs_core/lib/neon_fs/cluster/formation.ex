@@ -25,11 +25,11 @@ defmodule NeonFS.Cluster.Formation do
 
   alias NeonFS.Cluster.{Init, Invite, Join, State}
   alias NeonFS.Core.DriveRegistry
+  alias NeonFS.Core.RaSupervisor
   alias NeonFS.Core.Supervisor, as: CoreSupervisor
 
   @pg_scope :neonfs_events
 
-  @ra_cluster_name :neonfs_meta
   @connect_interval_ms 500
   @readiness_check_interval_ms 250
 
@@ -463,8 +463,8 @@ defmodule NeonFS.Cluster.Formation do
   end
 
   defp wait_for_ra_member_sync(peer, attempts) do
-    server_id = {@ra_cluster_name, Node.self()}
-    target = {@ra_cluster_name, peer}
+    server_id = {RaSupervisor.cluster_name(), Node.self()}
+    target = {RaSupervisor.cluster_name(), peer}
 
     case :ra.members(server_id, 5_000) do
       {:ok, members, _leader} ->
