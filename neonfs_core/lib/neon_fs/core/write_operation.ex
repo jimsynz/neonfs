@@ -1954,29 +1954,17 @@ defmodule NeonFS.Core.WriteOperation do
   end
 
   defp store_new_chunk(data, hash, offset, size, index, compression_config, volume, write_ctx) do
-    {_should_compress, compression} = should_compress_chunk?(size, compression_config)
-    write_opts = build_write_opts(compression)
-    write_opts = add_encryption_write_opts(write_opts, write_ctx.enc_ctx)
-
-    tier = volume.tiering.initial_tier
-    tier_str = Atom.to_string(tier)
-
-    with {:ok, drive} <- select_drive_for_tier(tier),
-         {:ok, _returned_hash, chunk_info} <-
-           schedule_local_write(data, drive.id, tier_str, write_opts, volume.id) do
-      crypto = build_chunk_crypto(write_ctx.enc_ctx, write_opts)
-      emit_encrypt_telemetry(write_ctx.enc_ctx, hash, volume.id)
-
-      chunk_meta =
-        build_chunk_meta(hash, size, chunk_info, drive.id, volume, write_ctx.write_id, crypto)
-
-      with :ok <- put_chunk_meta(chunk_meta),
-           :ok <- maybe_replicate_chunk(hash, data, volume, tier, drive.id, write_opts) do
-        build_chunk_result(hash, offset, size, chunk_info, index)
-      end
-    else
-      {:error, %{class: :unavailable}} = error -> error
-      {:error, reason} -> {:error, {:chunk_write_failed, reason}}
+    with {:ok, placement} <-
+           do_place_chunk(
+             data,
+             hash,
+             size,
+             volume,
+             write_ctx.write_id,
+             write_ctx.enc_ctx,
+             compression_config
+           ) do
+      build_chunk_result(placement, offset, index)
     end
   end
 
@@ -2076,14 +2064,14 @@ defmodule NeonFS.Core.WriteOperation do
      )}
   end
 
-  defp build_chunk_result(hash, offset, size, chunk_info, index) do
+  defp build_chunk_result(placement, offset, index) do
     {:ok,
      %{
-       hash: hash,
+       hash: placement.hash,
        offset: offset,
-       size: size,
-       stored_size: chunk_info.stored_size,
-       compression: parse_compression(chunk_info.compression),
+       size: placement.original_size,
+       stored_size: placement.stored_size,
+       compression: placement.compression,
        index: index,
        new: true
      }}
@@ -2156,6 +2144,109 @@ defmodule NeonFS.Core.WriteOperation do
       {:error, _reason} = error ->
         abort_chunks(write_id)
         error
+    end
+  end
+
+  @doc """
+  Make one chunk durable and return what a caller needs to reference it.
+
+  The block device's extent map needs this: `BlockIndex.commit/3` publishes
+  hashes of chunks that are **already durable** and cannot make one so, and
+  until now nothing outside this module could. What it needs is not a file —
+  no chunk list, no `FileMeta`, no path — just a chunk placed with the
+  volume's codecs and replication, and its hash back.
+
+  A public wrapper over the same pipeline `store_new_chunk/8` uses rather than
+  a second implementation of it: drive selection for the volume's initial
+  tier, the scheduled local write, `ChunkIndex.put/1`, and
+  `Replication.replicate_chunk/4` under the volume's `write_ack`. A second
+  copy of replica placement is the kind of duplication where a mistake loses
+  data rather than throughput.
+
+  The chunk is left `:uncommitted` holding `write_id`'s ref, exactly as a
+  file's chunks are between placement and commit. Publishing it — and
+  releasing the ref — is the caller's job; `abort_chunks/1` reclaims it if
+  the caller gives up.
+
+  `opts` accepts `:enc_ctx` to reuse an encryption context across several
+  placements in one operation. Without it the volume's current key is
+  resolved per call, which is correct but pays a `KeyManager` lookup each
+  time.
+  """
+  @spec place_chunk(binary(), Volume.t(), write_id(), keyword()) ::
+          {:ok,
+           %{
+             hash: binary(),
+             original_size: non_neg_integer(),
+             stored_size: non_neg_integer(),
+             compression: atom(),
+             crypto: term(),
+             drive_id: String.t(),
+             tier: atom()
+           }}
+          | {:error, term()}
+  def place_chunk(data, %Volume{} = volume, write_id, opts \\ [])
+      when is_binary(data) and is_binary(write_id) do
+    compression_config = Keyword.get(opts, :compression, volume.compression)
+
+    with {:ok, enc_ctx} <- placement_enc_ctx(volume, opts) do
+      do_place_chunk(
+        data,
+        Native.compute_hash(data),
+        byte_size(data),
+        volume,
+        write_id,
+        enc_ctx,
+        compression_config
+      )
+    end
+  end
+
+  defp placement_enc_ctx(volume, opts) do
+    case Keyword.fetch(opts, :enc_ctx) do
+      {:ok, enc_ctx} -> {:ok, enc_ctx}
+      :error -> resolve_encryption(volume)
+    end
+  end
+
+  # The one implementation of "put these bytes on a drive, record them, and
+  # replicate them". `place_chunk/4` is its public face and `store_new_chunk/8`
+  # its file-shaped one; the hash and size are parameters because the file path
+  # already has both from the chunker and should not recompute the hash.
+  defp do_place_chunk(data, hash, size, volume, write_id, enc_ctx, compression_config) do
+    {_should_compress, compression} = should_compress_chunk?(size, compression_config)
+
+    write_opts =
+      compression
+      |> build_write_opts()
+      |> add_encryption_write_opts(enc_ctx)
+
+    tier = volume.tiering.initial_tier
+
+    with {:ok, drive} <- select_drive_for_tier(tier),
+         {:ok, _returned_hash, chunk_info} <-
+           schedule_local_write(data, drive.id, Atom.to_string(tier), write_opts, volume.id) do
+      crypto = build_chunk_crypto(enc_ctx, write_opts)
+      emit_encrypt_telemetry(enc_ctx, hash, volume.id)
+
+      chunk_meta = build_chunk_meta(hash, size, chunk_info, drive.id, volume, write_id, crypto)
+
+      with :ok <- put_chunk_meta(chunk_meta),
+           :ok <- maybe_replicate_chunk(hash, data, volume, tier, drive.id, write_opts) do
+        {:ok,
+         %{
+           hash: hash,
+           original_size: size,
+           stored_size: chunk_info.stored_size,
+           compression: chunk_meta.compression,
+           crypto: crypto,
+           drive_id: drive.id,
+           tier: tier
+         }}
+      end
+    else
+      {:error, %{class: :unavailable}} = error -> error
+      {:error, reason} -> {:error, {:chunk_write_failed, reason}}
     end
   end
 
