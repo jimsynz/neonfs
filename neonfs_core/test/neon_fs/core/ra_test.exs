@@ -73,14 +73,118 @@ defmodule NeonFS.Core.RaTest do
       assert Process.whereis(RaSupervisor) != nil
     end
 
-    test "cluster_name/0 returns the cluster name" do
-      assert RaSupervisor.cluster_name() == :neonfs_meta
+    # The identity is a runtime value now, so a literal here would only assert
+    # what this test's own `start_ra/0` chose. What matters is that every part
+    # of it agrees — the server id's registered name is the cluster name, and
+    # the UID and data directory belong to the same cluster.
+    test "cluster_name/0 returns the cluster name the supervisor started with" do
+      identity = RaSupervisor.identity()
+
+      assert RaSupervisor.cluster_name() == identity.cluster_name
+      assert RaSupervisor.system() == identity.system
+      assert RaSupervisor.data_dir() == identity.data_dir
+      assert RaSupervisor.uid() == "#{identity.uid_prefix}_#{RaSupervisor.sanitised_node()}"
     end
 
     test "server_id/0 returns server ID for current node" do
       {cluster_name, node_name} = RaSupervisor.server_id()
-      assert cluster_name == :neonfs_meta
+      assert cluster_name == RaSupervisor.cluster_name()
       assert node_name == Node.self()
+    end
+
+    # Bullet 4 of this work's acceptance: production behaviour is unchanged.
+    # `identity/0` falls back to the production values when no supervisor has
+    # written any, which is what a real node — where nothing passes these
+    # options — resolves to.
+    test "falls back to the production identity when nothing has been written" do
+      key = {RaSupervisor, :identity}
+      saved = :persistent_term.get(key, :absent)
+      :persistent_term.erase(key)
+
+      try do
+        assert %{system: :default, cluster_name: :neonfs_meta, uid_prefix: "neonfs_meta"} =
+                 RaSupervisor.identity()
+
+        assert RaSupervisor.server_id() == {:neonfs_meta, Node.self()}
+      after
+        unless saved == :absent, do: :persistent_term.put(key, saved)
+      end
+    end
+
+    # A test's cluster is deliberately *not* the production one, in every
+    # dimension Ra keys on. If any of these ever matched the default, this
+    # test's Ra would be sharing a system, a registered name or a UID with
+    # whatever else ran in this VM.
+    test "a test's identity shares nothing with the production default" do
+      %{system: system, cluster_name: cluster_name, uid_prefix: uid_prefix} =
+        RaSupervisor.identity()
+
+      refute system == :default
+      refute cluster_name == :neonfs_meta
+      refute uid_prefix == "neonfs_meta"
+    end
+  end
+
+  # Bullet 1 of this work's acceptance: a cluster a test starts does not
+  # disturb another test's. Demonstrated rather than asserted about the
+  # helper, and done by hand rather than through `start_ra/0` because two
+  # clusters in one test need two explicit lifetimes.
+  describe "isolation between clusters" do
+    test "a fresh cluster cannot see the previous one's data" do
+      first = unique_identity()
+      run_cluster(first, fn -> RaSupervisor.command({:put, :leaked, :from_first}) end)
+
+      second = unique_identity()
+
+      state =
+        run_cluster(second, fn ->
+          {:ok, state} = RaSupervisor.get_state()
+          state
+        end)
+
+      refute second[:system] == first[:system]
+      refute second[:cluster_name] == first[:cluster_name]
+      refute Map.has_key?(state.data, :leaked)
+    end
+
+    # The previous behaviour deleted a shared directory to get a clean slate.
+    # Each cluster owning its own is what replaces that, and it is the reason
+    # nothing has to be destroyed on the way in.
+    test "each cluster owns its own data directory" do
+      first = unique_identity()
+      second = unique_identity()
+
+      refute first[:data_dir] == second[:data_dir]
+    end
+
+    defp unique_identity do
+      suffix = System.unique_integer([:positive, :monotonic])
+
+      [
+        system: :"ra_isolation_#{suffix}",
+        cluster_name: :"ra_isolation_meta_#{suffix}",
+        uid_prefix: "ra_isolation_#{suffix}",
+        data_dir: Path.join(System.tmp_dir!(), "neonfs_ra_isolation_#{suffix}")
+      ]
+    end
+
+    defp run_cluster(identity, fun) do
+      # The module-named supervisor from `setup`'s `start_ra/0` has to be out
+      # of the way before another can register.
+      stop_ra()
+
+      {:ok, sup} = RaSupervisor.start_link(identity)
+
+      try do
+        :ok = RaServer.init_cluster()
+        fun.()
+      after
+        server_id = {identity[:cluster_name], Node.self()}
+        Supervisor.stop(sup, :normal, 5_000)
+        try do: :ra.force_delete_server(identity[:system], server_id), catch: (_, _ -> :ok)
+        try do: :ra_system.stop(identity[:system]), catch: (_, _ -> :ok)
+        File.rm_rf(identity[:data_dir])
+      end
     end
   end
 
@@ -169,15 +273,17 @@ defmodule NeonFS.Core.RaTest do
       {:ok, state_before} = RaSupervisor.get_state()
       assert state_before.data[:persist_key] == :persist_value
 
-      # Stop the Ra server
+      # Stop the Ra server. The system is this test's own, not `:default` —
+      # naming `:default` here answered `{:error, :system_not_started}`.
       server_id = RaSupervisor.server_id()
-      :ok = :ra.stop_server(:default, server_id)
+      system = RaSupervisor.system()
+      :ok = :ra.stop_server(system, server_id)
 
       # Wait for shutdown
       :timer.sleep(500)
 
       # Restart the server (not start - it already exists in Ra's registry)
-      :ok = :ra.restart_server(:default, server_id)
+      :ok = :ra.restart_server(system, server_id)
 
       # Wait for server to be ready
       :timer.sleep(500)

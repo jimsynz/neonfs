@@ -15,10 +15,9 @@ defmodule NeonFS.Core.RaServer do
 
   alias NeonFS.Cluster.State, as: ClusterState
   alias NeonFS.Core.MetadataStateMachine
+  alias NeonFS.Core.RaSupervisor
 
   require Logger
-
-  @cluster_name :neonfs_meta
 
   def start_link(opts) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
@@ -138,7 +137,7 @@ defmodule NeonFS.Core.RaServer do
     ensure_ra_started()
 
     # Check if the Ra system is ready (ETS tables created)
-    case :ets.whereis(:ra_directory) do
+    case :ets.whereis(ra_directory_table()) do
       :undefined ->
         # Not ready yet — schedule a retry
         Process.send_after(self(), {:check_ra_system, 1}, 100)
@@ -181,18 +180,18 @@ defmodule NeonFS.Core.RaServer do
   def handle_call(:reset!, _from, state) do
     # Stop and delete Ra server - always attempt regardless of internal state
     # Ra's registry may have stale data from previous test runs
-    server_id = {@cluster_name, Node.self()}
+    server_id = RaSupervisor.server_id()
 
     Logger.info("Resetting Ra server for testing")
 
     # Always attempt to stop, even if we think it's not running
-    case tolerate_ra_down(fn -> :ra.stop_server(:default, server_id) end) do
+    case tolerate_ra_down(fn -> :ra.stop_server(RaSupervisor.system(), server_id) end) do
       :ok -> Logger.debug("Stopped Ra server")
       {:error, reason} -> Logger.debug("Could not stop Ra server", reason: inspect(reason))
     end
 
     # Always attempt to delete, to clear Ra's registry
-    case tolerate_ra_down(fn -> :ra.force_delete_server(:default, server_id) end) do
+    case tolerate_ra_down(fn -> :ra.force_delete_server(RaSupervisor.system(), server_id) end) do
       :ok ->
         Logger.debug("Deleted Ra server state")
 
@@ -214,25 +213,24 @@ defmodule NeonFS.Core.RaServer do
   @impl true
   def handle_call(:init_cluster, _from, state) do
     node_name = Node.self()
-    server_id = {@cluster_name, node_name}
-    sanitized_node = node_name |> to_string() |> String.replace(~r/[@\.]/, "_")
+    server_id = RaSupervisor.server_id()
 
     # Ra expects machine config as tuple: {module, Mod, Args}
     machine_config = {:module, MetadataStateMachine, %{}}
 
     ra_config = %{
       id: server_id,
-      uid: "neonfs_meta_#{sanitized_node}",
-      cluster_name: @cluster_name,
+      uid: RaSupervisor.uid(),
+      cluster_name: RaSupervisor.cluster_name(),
       machine: machine_config,
       log_init_args: %{
-        uid: "neonfs_meta_#{sanitized_node}"
+        uid: RaSupervisor.uid()
       },
       initial_members: [server_id]
     }
 
     Logger.info("Initialising Ra cluster",
-      cluster_name: inspect(@cluster_name),
+      cluster_name: inspect(RaSupervisor.cluster_name()),
       node: inspect(node_name)
     )
 
@@ -290,17 +288,16 @@ defmodule NeonFS.Core.RaServer do
   @impl true
   def handle_call(:force_reset_to_self, _from, state) do
     node_name = Node.self()
-    server_id = {@cluster_name, node_name}
-    sanitized_node = node_name |> to_string() |> String.replace(~r/[@\.]/, "_")
+    server_id = RaSupervisor.server_id()
 
     Logger.warning("Force-reset: extracting local Ra state and rebootstrapping",
-      cluster_name: inspect(@cluster_name),
+      cluster_name: inspect(RaSupervisor.cluster_name()),
       node: inspect(node_name)
     )
 
     with {:ok, snapshot_state} <- extract_local_ra_state(server_id),
          _ = Logger.debug("Force-reset: state extracted"),
-         {:ok, snapshot_path} <- write_force_reset_snapshot(snapshot_state, sanitized_node),
+         {:ok, snapshot_path} <- write_force_reset_snapshot(snapshot_state),
          _ = Logger.debug("Force-reset: snapshot written"),
          sanitised_state = sanitise_initial_state(snapshot_state, node_name),
          _ = Logger.debug("Force-reset: state sanitised, departed-node entries purged"),
@@ -309,7 +306,7 @@ defmodule NeonFS.Core.RaServer do
          :ok <- wait_for_ra_cleanup(server_id),
          _ = Logger.debug("Force-reset: cleanup done; starting fresh cluster"),
          {:ok, _pid_or_atom} <-
-           start_force_reset_cluster(server_id, sanitized_node, sanitised_state) do
+           start_force_reset_cluster(server_id, sanitised_state) do
       Logger.warning(
         "Force-reset succeeded; survivor #{inspect(node_name)} is a fresh single-node cluster (snapshot=#{snapshot_path})"
       )
@@ -323,14 +320,12 @@ defmodule NeonFS.Core.RaServer do
   end
 
   defp do_join_cluster(existing_members, state) do
-    node_name = Node.self()
-    server_id = {@cluster_name, node_name}
-    sanitized_node = node_name |> to_string() |> String.replace(~r/[@\.]/, "_")
+    server_id = RaSupervisor.server_id()
 
     Logger.info("Starting Ra server to join cluster", members: inspect(existing_members))
 
     # If there's an existing Ra server, stop and delete it first
-    case :ra.stop_server(:default, server_id) do
+    case :ra.stop_server(RaSupervisor.system(), server_id) do
       :ok ->
         Logger.info("Stopped existing Ra server")
 
@@ -338,7 +333,7 @@ defmodule NeonFS.Core.RaServer do
         Logger.debug("No existing Ra server to stop", reason: inspect(reason))
     end
 
-    case :ra.force_delete_server(:default, server_id) do
+    case :ra.force_delete_server(RaSupervisor.system(), server_id) do
       :ok ->
         Logger.info("Deleted existing Ra server state")
 
@@ -353,15 +348,16 @@ defmodule NeonFS.Core.RaServer do
     end
 
     # Build cluster configuration with existing members
-    existing_server_ids = Enum.map(existing_members, &{@cluster_name, &1})
+    cluster_name = RaSupervisor.cluster_name()
+    existing_server_ids = Enum.map(existing_members, &{cluster_name, &1})
 
     ra_config = %{
       id: server_id,
-      uid: "neonfs_meta_#{sanitized_node}",
-      cluster_name: @cluster_name,
+      uid: RaSupervisor.uid(),
+      cluster_name: RaSupervisor.cluster_name(),
       machine: {:module, MetadataStateMachine, %{}},
       log_init_args: %{
-        uid: "neonfs_meta_#{sanitized_node}"
+        uid: RaSupervisor.uid()
       },
       # Include existing cluster members so we can sync from them
       initial_members: [server_id | existing_server_ids]
@@ -369,7 +365,7 @@ defmodule NeonFS.Core.RaServer do
 
     Logger.info("Starting Ra server with cluster config", config: inspect(ra_config))
 
-    case :ra.start_server(:default, ra_config) do
+    case :ra.start_server(RaSupervisor.system(), ra_config) do
       {:ok, pid} ->
         Logger.info("Ra server joined cluster successfully")
         :ra.trigger_election(server_id)
@@ -390,7 +386,7 @@ defmodule NeonFS.Core.RaServer do
   def handle_info({:check_ra_system, attempt}, state) do
     max_attempts = 50
 
-    case :ets.whereis(:ra_directory) do
+    case :ets.whereis(ra_directory_table()) do
       :undefined when attempt >= max_attempts ->
         Logger.error("Ra system did not initialise after max attempts",
           max_attempts: max_attempts
@@ -423,9 +419,9 @@ defmodule NeonFS.Core.RaServer do
   end
 
   defp stop_local_ra_server do
-    server_id = {@cluster_name, Node.self()}
+    server_id = RaSupervisor.server_id()
 
-    case tolerate_ra_down(fn -> :ra.stop_server(:default, server_id) end) do
+    case tolerate_ra_down(fn -> :ra.stop_server(RaSupervisor.system(), server_id) end) do
       :ok ->
         Logger.info("Ra server stopped successfully")
 
@@ -447,19 +443,68 @@ defmodule NeonFS.Core.RaServer do
         Logger.error("Failed to start application", app: app, reason: inspect(reason))
     end
 
-    # CRITICAL: Application.ensure_all_started(:ra) does NOT start the Ra system!
-    # We must explicitly start the default system which creates the ETS tables
-    # and registers the system in persistent_term.
-    case :ra_system.start_default() do
+    # CRITICAL: Application.ensure_all_started(:ra) does NOT start the Ra
+    # system! It has to be started explicitly — that is what creates the ETS
+    # tables and registers the system in persistent_term.
+    case :ra_system.start(ra_system_config()) do
       {:ok, _pid} ->
-        Logger.info("Ra default system started")
+        Logger.info("Ra system started", ra_system: RaSupervisor.system())
 
       {:error, {:already_started, _pid}} ->
-        Logger.debug("Ra default system already started")
+        Logger.debug("Ra system already started", ra_system: RaSupervisor.system())
 
       {:error, reason} ->
-        Logger.error("Failed to start Ra default system", reason: inspect(reason))
+        Logger.error("Failed to start Ra system",
+          ra_system: RaSupervisor.system(),
+          reason: inspect(reason)
+        )
     end
+  end
+
+  # `:default` takes `default_config/0` untouched — byte-identical to the
+  # `start_default/0` this replaced. That is deliberate and load-bearing in two
+  # ways, both of which broke a whole-cluster cold restart when this function
+  # treated every system alike:
+  #
+  #   * **`derive_names(:default)` is not `default_config/0`'s names.** It
+  #     answers `ra_default_log_wal`, `ra_default_directory` and so on, where
+  #     the default config uses the undecorated `ra_log_wal`, `ra_directory`.
+  #     Passing derived names for `:default` renames the production system's
+  #     processes and tables, and `:ra_system.start/1` then answers
+  #     `{:error, {:already_started, _}}` against whatever started first —
+  #     leaving the readiness check below waiting for a table that will never
+  #     exist.
+  #   * **`default_config/0`'s `data_dir` comes from `:ra`'s own application
+  #     env**, not from `:neonfs_core, :ra_data_dir`. Overriding it would change
+  #     where a production node keeps its logs.
+  #
+  # A test-minted system needs the opposite of both: its own names, so it
+  # shares no process or table with anything else in the VM, and its own
+  # directory, so it shares no state. Charlists because Ra passes the path to
+  # DETS, which will not take a binary.
+  defp ra_system_config do
+    system = RaSupervisor.system()
+
+    if system == :default do
+      :ra_system.default_config()
+    else
+      data_dir = String.to_charlist(RaSupervisor.data_dir())
+
+      :ra_system.default_config()
+      |> Map.merge(%{
+        name: system,
+        data_dir: data_dir,
+        wal_data_dir: data_dir,
+        names: :ra_system.derive_names(system)
+      })
+    end
+  end
+
+  # The directory table belongs to the system, so it comes from the same config
+  # that started it. Checking `:ra_directory` unconditionally would report the
+  # default system's readiness whatever system this node is using.
+  defp ra_directory_table do
+    ra_system_config() |> Map.fetch!(:names) |> Map.fetch!(:directory)
   end
 
   # Trigger an election and wait for it to complete
@@ -539,9 +584,9 @@ defmodule NeonFS.Core.RaServer do
   end
 
   defp do_try_auto_restart do
-    server_id = {@cluster_name, Node.self()}
+    server_id = RaSupervisor.server_id()
 
-    case :ra.restart_server(:default, server_id) do
+    case :ra.restart_server(RaSupervisor.system(), server_id) do
       :ok ->
         {:ok, :running}
 
@@ -565,14 +610,10 @@ defmodule NeonFS.Core.RaServer do
   # (used in ra_directory:init/2 when loading from DETS with undefined pids).
   @dialyzer {:nowarn_function, try_recover_lost_directory: 1}
   defp try_recover_lost_directory(server_id) do
-    sanitized_node = Node.self() |> to_string() |> String.replace(~r/[@\.]/, "_")
-    uid = "neonfs_meta_#{sanitized_node}"
-
-    ra_data_dir =
-      Application.get_env(:ra, :data_dir, ~c"/var/lib/neonfs/ra") |> to_string()
+    uid = RaSupervisor.uid()
 
     server_data_dir =
-      Path.join([ra_data_dir, Atom.to_string(Node.self()), uid])
+      Path.join([RaSupervisor.data_dir(), Atom.to_string(Node.self()), uid])
 
     if File.dir?(server_data_dir) do
       Logger.info("Ra directory entry lost but data files exist, recovering: #{server_data_dir}")
@@ -582,15 +623,15 @@ defmodule NeonFS.Core.RaServer do
       {server_name, _node} = server_id
 
       :ra_directory.register_name(
-        :default,
+        RaSupervisor.system(),
         uid,
         :undefined,
         :undefined,
         server_name,
-        @cluster_name
+        RaSupervisor.cluster_name()
       )
 
-      case :ra.restart_server(:default, server_id) do
+      case :ra.restart_server(RaSupervisor.system(), server_id) do
         :ok ->
           {:ok, :running}
 
@@ -605,7 +646,7 @@ defmodule NeonFS.Core.RaServer do
 
   # Start a new Ra server, or restart an existing one if it has persisted state
   defp start_or_restart_ra_server(ra_config, server_id) do
-    case :ra.start_server(:default, ra_config) do
+    case :ra.start_server(RaSupervisor.system(), ra_config) do
       {:ok, pid} -> {:ok, pid}
       :ok -> {:ok, :started}
       {:error, {:already_started, pid}} -> {:error, {:already_started, pid}}
@@ -618,7 +659,7 @@ defmodule NeonFS.Core.RaServer do
   defp restart_existing_server(ra_config, server_id) do
     Logger.info("Ra server has persisted state, restarting...")
 
-    case :ra.restart_server(:default, server_id) do
+    case :ra.restart_server(RaSupervisor.system(), server_id) do
       :ok ->
         {:ok, :restarted}
 
@@ -655,11 +696,9 @@ defmodule NeonFS.Core.RaServer do
   end
 
   defp wait_for_ra_cleanup(server_id, attempts \\ 0) do
-    {_name, node} = server_id
-    sanitized = node |> to_string() |> String.replace(~r/[@\.]/, "_")
-    uid = "neonfs_meta_#{sanitized}"
+    uid = RaSupervisor.uid()
 
-    case tolerate_ra_down(fn -> :ra_directory.pid_of(:default, uid) end) do
+    case tolerate_ra_down(fn -> :ra_directory.pid_of(RaSupervisor.system(), uid) end) do
       :undefined ->
         :ok
 
@@ -679,10 +718,10 @@ defmodule NeonFS.Core.RaServer do
   # Data files were deleted but registry still thinks server exists
   defp force_fresh_start(ra_config, server_id) do
     Logger.info("Restart failed (files missing), cleaning up and starting fresh...")
-    :ra.force_delete_server(:default, server_id)
+    :ra.force_delete_server(RaSupervisor.system(), server_id)
     wait_for_ra_cleanup(server_id)
 
-    case :ra.start_server(:default, ra_config) do
+    case :ra.start_server(RaSupervisor.system(), ra_config) do
       {:ok, pid} -> {:ok, pid}
       :ok -> {:ok, :started}
       {:error, reason} -> {:error, {:fresh_start_failed, reason}}
@@ -766,7 +805,7 @@ defmodule NeonFS.Core.RaServer do
 
   # Persist the extracted state to disk before destroying anything,
   # so an operator can recover by hand if the rebootstrap fails.
-  defp write_force_reset_snapshot(state, sanitized_node) do
+  defp write_force_reset_snapshot(state) do
     data_dir = ra_data_dir()
     snapshot_dir = Path.join(data_dir, "force-reset-snapshots")
     File.mkdir_p!(snapshot_dir)
@@ -774,7 +813,7 @@ defmodule NeonFS.Core.RaServer do
     timestamp = System.system_time(:second)
 
     snapshot_path =
-      Path.join(snapshot_dir, "#{sanitized_node}-#{timestamp}.bin")
+      Path.join(snapshot_dir, "#{RaSupervisor.sanitised_node()}-#{timestamp}.bin")
 
     bin = :erlang.term_to_binary(state)
     File.write!(snapshot_path, bin)
@@ -783,28 +822,28 @@ defmodule NeonFS.Core.RaServer do
   end
 
   defp stop_and_delete_local_server(server_id) do
-    _ = :ra.stop_server(:default, server_id)
+    _ = :ra.stop_server(RaSupervisor.system(), server_id)
 
-    case :ra.force_delete_server(:default, server_id) do
+    case :ra.force_delete_server(RaSupervisor.system(), server_id) do
       :ok -> :ok
       {:error, :name_not_registered} -> :ok
       {:error, reason} -> {:error, {:force_delete_failed, reason}}
     end
   end
 
-  defp start_force_reset_cluster(server_id, sanitized_node, initial_state) do
+  defp start_force_reset_cluster(server_id, initial_state) do
     machine_config = {:module, MetadataStateMachine, %{initial_state: initial_state}}
 
     ra_config = %{
       id: server_id,
-      uid: "neonfs_meta_#{sanitized_node}",
-      cluster_name: @cluster_name,
+      uid: RaSupervisor.uid(),
+      cluster_name: RaSupervisor.cluster_name(),
       machine: machine_config,
-      log_init_args: %{uid: "neonfs_meta_#{sanitized_node}"},
+      log_init_args: %{uid: RaSupervisor.uid()},
       initial_members: [server_id]
     }
 
-    case :ra.start_server(:default, ra_config) do
+    case :ra.start_server(RaSupervisor.system(), ra_config) do
       {:ok, pid} ->
         trigger_and_wait_for_election(server_id)
         {:ok, pid}

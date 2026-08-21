@@ -21,6 +21,7 @@ defmodule NeonFS.Cluster.Join do
     CertificateAuthority,
     DriveManager,
     RaServer,
+    RaSupervisor,
     ServiceRegistry,
     VolumeRegistry
   }
@@ -31,8 +32,6 @@ defmodule NeonFS.Cluster.Join do
   require Logger
 
   import NeonFS.Client.ServiceType, only: [is_service_type: 1]
-
-  @cluster_name :neonfs_meta
 
   @type join_params :: %{
           token: String.t(),
@@ -497,8 +496,8 @@ defmodule NeonFS.Cluster.Join do
 
   defp add_to_ra_cluster(joining_node) do
     this_node = Node.self()
-    server_id = {@cluster_name, this_node}
-    new_server_id = {@cluster_name, joining_node}
+    server_id = {RaSupervisor.cluster_name(), this_node}
+    new_server_id = {RaSupervisor.cluster_name(), joining_node}
 
     # Wait for the Ra server to be ready and have a leader
     case wait_for_leader(server_id) do

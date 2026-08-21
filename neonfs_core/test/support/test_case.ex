@@ -973,89 +973,108 @@ defmodule NeonFS.TestCase do
   end
 
   @doc """
-  Starts RaSupervisor (which includes RaServer), and tears it down when the
-  test ends.
+  Starts an isolated Ra cluster for this test, and tears it down when it ends.
 
   Requires a named Erlang node. Call `ensure_node_named/0` first if needed.
 
-  The `on_exit` teardown is load-bearing, not tidiness. `start_supervised!`
-  stops *our* supervisor, but the Ra server is registered in the global `:ra`
-  `:default` system and outlives it — so without an explicit delete a module
-  that starts Ra leaves one running, still holding everything it wrote. Any
-  later module that does **not** start Ra then inherits it, which is not a
-  state it was written against: reads that should fall back to local ETS get
-  served by a foreign Ra instead. That is how drives registered by one test
-  turned up in another's replica selection and failed volume provisioning
-  against a drive `BlobStore` had never opened.
+  ## Isolated, rather than reset
 
-  Teardown deletes the server and its data directory rather than calling
-  `stop_ra/0`, deliberately. `stop_ra/0` also bounces the whole `:ra`
-  application, and doing that on the way out as well as the way in doubles a
-  global restart that every other Ra-dependent test is exposed to — enough
-  churn to time out a `NamespaceCoordinator` claim on a loaded runner.
-  Deleting the leaked server is what actually fixes the isolation; bouncing
-  the application is not needed for it.
+  Every call mints its own Ra **system**, cluster name, UID and data
+  directory. That is what makes it isolation: a system owns its own
+  supervision tree, ETS tables and server directory, and Ra keys its log
+  tables by UID — so this test's cluster and the last one's share nothing to
+  contaminate.
 
-  Several tests carry a defensive `stop_ra()` in their own setup for this
-  reason. Those are now belt-and-braces rather than the only thing standing
-  between two modules.
+  This used to work the other way round. `start_ra/0` stopped any existing
+  supervisor, `File.rm_rf`'d a shared data directory and bounced the whole
+  `:ra` application, because every test used one system, one cluster name and
+  one UID, so the only way to get a clean slate was to destroy the previous
+  occupant's. Two consequences of that are gone with it:
+
+    * **Contamination while serial.** A module that started Ra left a server
+      registered in the global `:default` system; a later module that did not
+      start Ra inherited it, and reads that should have fallen back to local
+      ETS were served by a foreign Ra. That is how drives registered by one
+      test turned up in another's replica selection and failed volume
+      provisioning against a drive `BlobStore` had never opened.
+    * **`:ra` application churn.** Stopping and restarting `:ra` was needed
+      only because its log ETS tables key on a UID that never changed. A
+      per-test UID leaves nothing stale, so the bounce is gone — and with it
+      the global restart that was enough to time out a `NamespaceCoordinator`
+      claim on a loaded runner.
+
+  What this does *not* do is make the suite concurrent: `RaSupervisor` and
+  `RaServer` still register on `__MODULE__`, and the hundred-odd bare
+  `RaSupervisor.command/2` callsites still resolve the identity per node
+  rather than per caller. That is deliberate and tracked separately.
   """
-  def start_ra do
+  def start_ra(opts \\ []) do
     if Node.self() == :nonode@nohost do
       raise "Ra requires a named Erlang node. Call ensure_node_named/0 first."
     end
 
-    # Stop any existing Ra supervisor and clean up state thoroughly
-    stop_ra()
+    identity = unique_ra_identity()
+    result = start_supervised!({RaSupervisor, Keyword.merge(identity, opts)}, restart: :temporary)
 
-    # CRITICAL: Delete the Ra data directory BEFORE starting
-    # Ra's :default system uses cwd/node_name as data directory
-    delete_ra_data_directory()
-
-    result = start_supervised!(RaSupervisor, restart: :temporary)
-
-    # Reset Ra state AFTER starting to clear any accumulated data from
-    # the global Ra :default system that persists across tests
-    RaServer.reset!()
-
-    on_exit(&discard_ra_server/0)
+    on_exit(fn -> discard_ra_cluster(identity) end)
 
     result
   end
 
-  # The narrow half of `stop_ra/0`: drop the server the test registered in the
-  # `:default` system and its on-disk state, leaving the `:ra` application
-  # alone. See `start_ra/0`'s note on why the application bounce is excluded.
-  defp discard_ra_server do
-    cleanup_ra_from_default_system()
-    cleanup_ra_directories()
+  # A fresh name in every dimension Ra keys on. The suffix is per-call rather
+  # than per-module: two tests in one file are as capable of contaminating each
+  # other as two files are.
+  defp unique_ra_identity do
+    suffix = System.unique_integer([:positive, :monotonic])
+
+    [
+      system: :"neonfs_test_ra_#{suffix}",
+      cluster_name: :"neonfs_meta_test_#{suffix}",
+      uid_prefix: "neonfs_meta_test_#{suffix}",
+      data_dir: Path.join(ra_data_dir(), "test_#{suffix}")
+    ]
+  end
+
+  # `start_supervised!` stops our supervisor; the Ra server is registered in
+  # the *system*, which outlives it. Deleting the server and then stopping the
+  # system is what actually releases the registered names and ETS tables — and
+  # the data directory is this test's alone, so removing it cannot reach
+  # another test's state the way the old shared-directory delete could.
+  defp discard_ra_cluster(identity) do
+    server_id = {identity[:cluster_name], Node.self()}
+    system = identity[:system]
+
+    try do: :ra.stop_server(system, server_id), catch: (_, _ -> :ok)
+    try do: :ra.force_delete_server(system, server_id), catch: (_, _ -> :ok)
+    try do: :ra_system.stop(system), catch: (_, _ -> :ok)
+
+    File.rm_rf(identity[:data_dir])
+    :ok
   end
 
   @doc """
-  Stops the Ra supervisor and resets Ra state.
+  Stops the Ra cluster this test started.
 
-  Use this in tests that need to ensure Ra is NOT running.
+  Use this in tests that need to ensure Ra is NOT running partway through.
+  Isolation between tests does not need it — `start_ra/0`'s teardown handles
+  that — so a `stop_ra()` in a `setup` block is now redundant rather than
+  load-bearing.
   """
   def stop_ra do
+    identity = RaSupervisor.identity()
+
     reset_ra_server_if_running()
     supervisor_ref = monitor_if_running(RaSupervisor)
     stop_ra_supervisor_if_running()
     await_down(supervisor_ref)
-    cleanup_ra_from_default_system()
-    cleanup_ra_directories()
-    bounce_ra_application()
-    :ok
-  end
 
-  # Stops and restarts the `:ra` application so its global ETS tables
-  # (`:ra_log_open_mem_tables`, `:ra_log_closed_mem_tables`,
-  # `:ra_log_snapshot_state`, etc.) are wiped between tests. These
-  # tables key entries by the per-node UID, which is identical across
-  # tests, so `:ra.force_delete_server/2` alone leaves stale log
-  # entries behind that the next `init_cluster` then inherits.
-  defp bounce_ra_application do
-    Application.stop(:ra)
-    Application.ensure_all_started(:ra)
+    discard_ra_cluster(
+      system: identity.system,
+      cluster_name: identity.cluster_name,
+      data_dir: identity.data_dir
+    )
+
+    :ok
   end
 
   defp reset_ra_server_if_running do
@@ -1070,38 +1089,6 @@ defmodule NeonFS.TestCase do
       nil -> :ok
       pid -> try do: Supervisor.stop(pid, :normal, 5000), catch: (:exit, _ -> :ok)
     end
-  end
-
-  defp cleanup_ra_from_default_system do
-    server_id = {:neonfs_meta, Node.self()}
-    try do: :ra.stop_server(:default, server_id), catch: (_, _ -> :ok)
-    try do: :ra.force_delete_server(:default, server_id), catch: (_, _ -> :ok)
-  end
-
-  defp cleanup_ra_directories do
-    case Application.get_env(:neonfs_core, :ra_data_dir) do
-      nil -> :ok
-      ra_data_dir -> File.rm_rf(ra_data_dir)
-    end
-
-    delete_ra_data_directory()
-  end
-
-  # Deletes Ra's actual on-disk data directory for this node.
-  #
-  # Ra's `:default` system reads its data_dir from `Application.get_env(:ra,
-  # :data_dir)` (set in `config/config.exs` for the test env), NOT from
-  # `:neonfs_core, :ra_data_dir` and NOT from CWD. Cleaning the wrong path
-  # leaves WAL / segment / metadata-state-machine state behind, which
-  # `:ra.force_delete_server` does not reliably remove once the prior
-  # test's process tree has been torn down — so claim state from one test
-  # surfaces in the next as ghost conflicts.
-  defp delete_ra_data_directory do
-    File.rm_rf!(ra_node_data_dir())
-  end
-
-  defp ra_node_data_dir do
-    Path.join(ra_data_dir(), Atom.to_string(Node.self()))
   end
 
   defp ra_data_dir do
