@@ -576,6 +576,85 @@ defmodule NeonFS.Core.WriteOperationTest do
     end
   end
 
+  # `BlockIndex.commit/3` publishes hashes of chunks that are already durable
+  # and cannot make one so. This is the primitive that can, and it is a wrapper
+  # over the same pipeline the file path uses rather than a second copy of
+  # replica placement.
+  describe "place_chunk/4" do
+    test "makes a chunk durable and reports what references it", %{volume: volume} do
+      data = :crypto.strong_rand_bytes(4096)
+      write_id = WriteOperation.generate_write_id()
+
+      assert {:ok, placement} = WriteOperation.place_chunk(data, volume, write_id)
+
+      assert placement.original_size == 4096
+      assert placement.stored_size > 0
+      assert placement.drive_id == "default"
+      assert placement.tier == volume.tiering.initial_tier
+
+      # Durable means the bytes come back through the ordinary chunk path —
+      # a stronger claim than the blob existing, since it also proves the
+      # recorded codec matches what was written.
+      assert {:ok, chunk_meta} = ChunkIndex.get(volume.id, placement.hash)
+      assert chunk_meta.hash == placement.hash
+      assert {:ok, ^data} = ReadOperation.fetch_chunk_data(chunk_meta, false, volume.id)
+    end
+
+    # Left uncommitted holding the ref, exactly as a file's chunks are between
+    # placement and commit — publishing it is the caller's job.
+    test "leaves the chunk uncommitted holding the caller's ref", %{volume: volume} do
+      write_id = WriteOperation.generate_write_id()
+
+      assert {:ok, placement} =
+               WriteOperation.place_chunk(:crypto.strong_rand_bytes(4096), volume, write_id)
+
+      assert {:ok, meta} = ChunkIndex.get(volume.id, placement.hash)
+      assert meta.commit_state == :uncommitted
+      assert MapSet.member?(meta.active_write_refs, write_id)
+    end
+
+    test "a placed-but-unpublished chunk is reclaimed by its abort", %{volume: volume} do
+      write_id = WriteOperation.generate_write_id()
+
+      assert {:ok, placement} =
+               WriteOperation.place_chunk(:crypto.strong_rand_bytes(4096), volume, write_id)
+
+      :ok = WriteOperation.abort_chunks(write_id)
+
+      assert {:error, :not_found} = ChunkIndex.get(volume.id, placement.hash)
+    end
+
+    # Identical bytes are one chunk, so a second placement adopts the first
+    # rather than storing it twice — and must not displace the first's ref.
+    test "two placements of identical bytes share one chunk", %{volume: volume} do
+      data = :crypto.strong_rand_bytes(4096)
+      first = WriteOperation.generate_write_id()
+      second = WriteOperation.generate_write_id()
+
+      assert {:ok, a} = WriteOperation.place_chunk(data, volume, first)
+      assert {:ok, b} = WriteOperation.place_chunk(data, volume, second)
+
+      assert a.hash == b.hash
+      assert {:ok, meta} = ChunkIndex.get(volume.id, a.hash)
+      assert MapSet.member?(meta.active_write_refs, first)
+      assert MapSet.member?(meta.active_write_refs, second)
+    end
+
+    test "reuses a supplied encryption context", %{volume: volume} do
+      write_id = WriteOperation.generate_write_id()
+
+      assert {:ok, placement} =
+               WriteOperation.place_chunk(
+                 :crypto.strong_rand_bytes(4096),
+                 volume,
+                 write_id,
+                 enc_ctx: nil
+               )
+
+      assert placement.crypto == nil
+    end
+  end
+
   describe "compression handling" do
     test "respects min_size threshold for compression", %{volume: volume} do
       # Set compression with min_size threshold
