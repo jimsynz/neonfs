@@ -461,34 +461,50 @@ defmodule NeonFS.Core.RaServer do
     end
   end
 
-  # A named system rather than `:default`, so several can coexist in one VM.
-  # `derive_names/1` is what makes that true: every process and ETS table the
-  # system owns is named after it, so two systems share nothing. Without it a
-  # second system would try to register `:ra_log_wal` and friends a second
-  # time.
+  # `:default` takes `default_config/0` untouched — byte-identical to the
+  # `start_default/0` this replaced. That is deliberate and load-bearing in two
+  # ways, both of which broke a whole-cluster cold restart when this function
+  # treated every system alike:
   #
-  # `data_dir` is set explicitly rather than inherited from `:ra`'s
-  # application env, since the whole point of a named system here is that its
-  # logs and snapshots are its own. Charlists because Ra passes these
-  # to DETS, which will not take binaries.
+  #   * **`derive_names(:default)` is not `default_config/0`'s names.** It
+  #     answers `ra_default_log_wal`, `ra_default_directory` and so on, where
+  #     the default config uses the undecorated `ra_log_wal`, `ra_directory`.
+  #     Passing derived names for `:default` renames the production system's
+  #     processes and tables, and `:ra_system.start/1` then answers
+  #     `{:error, {:already_started, _}}` against whatever started first —
+  #     leaving the readiness check below waiting for a table that will never
+  #     exist.
+  #   * **`default_config/0`'s `data_dir` comes from `:ra`'s own application
+  #     env**, not from `:neonfs_core, :ra_data_dir`. Overriding it would change
+  #     where a production node keeps its logs.
+  #
+  # A test-minted system needs the opposite of both: its own names, so it
+  # shares no process or table with anything else in the VM, and its own
+  # directory, so it shares no state. Charlists because Ra passes the path to
+  # DETS, which will not take a binary.
   defp ra_system_config do
     system = RaSupervisor.system()
-    data_dir = String.to_charlist(RaSupervisor.data_dir())
 
-    :ra_system.default_config()
-    |> Map.merge(%{
-      name: system,
-      data_dir: data_dir,
-      wal_data_dir: data_dir,
-      names: :ra_system.derive_names(system)
-    })
+    if system == :default do
+      :ra_system.default_config()
+    else
+      data_dir = String.to_charlist(RaSupervisor.data_dir())
+
+      :ra_system.default_config()
+      |> Map.merge(%{
+        name: system,
+        data_dir: data_dir,
+        wal_data_dir: data_dir,
+        names: :ra_system.derive_names(system)
+      })
+    end
   end
 
-  # The directory table belongs to the system, so its name is derived like
-  # every other. Checking `:ra_directory` unconditionally would report the
+  # The directory table belongs to the system, so it comes from the same config
+  # that started it. Checking `:ra_directory` unconditionally would report the
   # default system's readiness whatever system this node is using.
   defp ra_directory_table do
-    RaSupervisor.system() |> :ra_system.derive_names() |> Map.fetch!(:directory)
+    ra_system_config() |> Map.fetch!(:names) |> Map.fetch!(:directory)
   end
 
   # Trigger an election and wait for it to complete
