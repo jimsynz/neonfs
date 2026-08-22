@@ -30,22 +30,37 @@ defmodule NeonFS.Core.Volume.BlockDeviceTest do
 
   describe "new/1" do
     test "stamps created_at when the caller does not" do
-      device = BlockDevice.new(id: "d", size_bytes: 1024, chunk_bytes: 512)
+      device = BlockDevice.new(id: "d", path: "/dev.img", size_bytes: 1024, chunk_bytes: 512)
 
       assert %DateTime{} = device.created_at
     end
 
     test "keeps a supplied created_at" do
       at = ~U[2026-01-02 03:04:05Z]
-      device = BlockDevice.new(id: "d", size_bytes: 1024, chunk_bytes: 512, created_at: at)
+
+      device =
+        BlockDevice.new(
+          id: "d",
+          path: "/dev.img",
+          size_bytes: 1024,
+          chunk_bytes: 512,
+          created_at: at
+        )
 
       assert device.created_at == at
     end
 
-    test "refuses to build a device without geometry" do
-      assert_raise KeyError, fn -> BlockDevice.new(id: "d", size_bytes: 1024) end
-      assert_raise KeyError, fn -> BlockDevice.new(id: "d", chunk_bytes: 512) end
-      assert_raise KeyError, fn -> BlockDevice.new(size_bytes: 1024, chunk_bytes: 512) end
+    test "refuses to build a device without geometry, a name or an id" do
+      assert_raise KeyError, fn -> BlockDevice.new(id: "d", path: "/d", size_bytes: 1024) end
+      assert_raise KeyError, fn -> BlockDevice.new(id: "d", path: "/d", chunk_bytes: 512) end
+
+      assert_raise KeyError, fn ->
+        BlockDevice.new(id: "d", size_bytes: 1024, chunk_bytes: 512)
+      end
+
+      assert_raise KeyError, fn ->
+        BlockDevice.new(path: "/d", size_bytes: 1024, chunk_bytes: 512)
+      end
     end
   end
 
@@ -54,6 +69,7 @@ defmodule NeonFS.Core.Volume.BlockDeviceTest do
       device =
         BlockDevice.new(
           id: "dev-abc",
+          path: "/dev.img",
           size_bytes: 64 * 1024 * 1024,
           chunk_bytes: 131_072,
           created_at: ~U[2026-08-20 12:00:00Z]
@@ -68,6 +84,19 @@ defmodule NeonFS.Core.Volume.BlockDeviceTest do
     test "refuses a term that is not a header" do
       assert {:error, {:malformed_device_header, _}} =
                BlockDevice.decode(:erlang.term_to_binary(%{id: "d"}))
+
+      # A header from before the device recorded its own name decodes as a
+      # header everywhere the name is not checked, which is how a second
+      # device would silently alias onto the volume's only one.
+      assert {:error, {:malformed_device_header, _}} =
+               BlockDevice.decode(
+                 :erlang.term_to_binary(%{
+                   id: "d",
+                   size_bytes: 1024,
+                   chunk_bytes: 512,
+                   created_at: ~U[2026-08-20 12:00:00Z]
+                 })
+               )
 
       assert {:error, {:malformed_device_header, _}} =
                BlockDevice.decode(:erlang.term_to_binary({:not, :a, :header}))

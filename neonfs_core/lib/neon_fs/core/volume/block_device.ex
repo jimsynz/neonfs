@@ -53,11 +53,12 @@ defmodule NeonFS.Core.Volume.BlockDevice do
   uses, so adding a field later is a struct entry rather than a format change.
   """
 
-  @enforce_keys [:id, :size_bytes, :chunk_bytes, :created_at]
-  defstruct [:id, :size_bytes, :chunk_bytes, :created_at]
+  @enforce_keys [:id, :path, :size_bytes, :chunk_bytes, :created_at]
+  defstruct [:id, :path, :size_bytes, :chunk_bytes, :created_at]
 
   @type t :: %__MODULE__{
           id: binary(),
+          path: String.t(),
           size_bytes: non_neg_integer(),
           chunk_bytes: pos_integer(),
           created_at: DateTime.t()
@@ -88,11 +89,18 @@ defmodule NeonFS.Core.Volume.BlockDevice do
   `chunk_bytes` is the width of the device's extents and is fixed for its life:
   it is what turns a byte offset into an extent index, so changing it would
   re-address every extent the device already holds.
+
+  `path` is the name the device answers to — the second half of the
+  `{volume, path}` key its attachment claim and its fencing epoch are both
+  keyed on. It is recorded rather than assumed so that opening the volume's
+  device under some other name is refused instead of silently aliasing onto
+  this one.
   """
   @spec new(keyword()) :: t()
   def new(attrs) do
     %__MODULE__{
       id: Keyword.fetch!(attrs, :id),
+      path: Keyword.fetch!(attrs, :path),
       size_bytes: Keyword.fetch!(attrs, :size_bytes),
       chunk_bytes: Keyword.fetch!(attrs, :chunk_bytes),
       created_at: Keyword.get_lazy(attrs, :created_at, &DateTime.utc_now/0)
@@ -113,7 +121,7 @@ defmodule NeonFS.Core.Volume.BlockDevice do
   @spec decode(binary()) :: {:ok, t()} | decode_error()
   def decode(encoded) when is_binary(encoded) do
     case :erlang.binary_to_term(encoded, [:safe]) do
-      %{id: _, size_bytes: _, chunk_bytes: _, created_at: _} = attrs ->
+      %{id: _, path: _, size_bytes: _, chunk_bytes: _, created_at: _} = attrs ->
         {:ok, struct!(__MODULE__, attrs)}
 
       other ->

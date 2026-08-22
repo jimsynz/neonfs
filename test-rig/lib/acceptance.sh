@@ -38,16 +38,15 @@ CIFS_PASS="${CIFS_PASS:-neonfs-rig}"
 # Block device (NBD). The volume's size is the device's size, so the two are
 # derived from one number rather than restated.
 #
-# Creating the volume writes the whole device as zeroes, one metadata entry
-# per 128 KiB chunk, and that is what bounds the size a rig run can afford —
-# not the bytes. Measured on a single-node rig VM: 64 MiB in 82 s, 256 MiB
-# in 273 s, about 7 chunks/s either way. Worse, 64 MiB commits its chunk
-# list as a single batch that exceeds the volume committer's deadline, so
-# the create is refused outright; 8 MiB provisions in seconds and still
-# crosses every device boundary these steps care about. Raise `BLOCK_MIB`
-# to exercise a larger device once the extent map lands.
+# Creating the volume publishes a device header and nothing else: every
+# extent starts as a hole and a hole reads as zeroes, so provisioning is one
+# metadata commit whatever the size. What used to bound this number — a
+# zero-fill of one metadata entry per 128 KiB chunk, committed as a single
+# batch that a 64 MiB device could not fit inside the volume committer's
+# deadline — is gone. 256 MiB exercises a device several extent groups wide
+# while keeping the fio and mkfs steps quick.
 BLOCK_VOL="${BLOCK_VOL:-accept_block}"
-BLOCK_MIB="${BLOCK_MIB:-8}"
+BLOCK_MIB="${BLOCK_MIB:-256}"
 BLOCK_SIZE="${BLOCK_MIB}M"
 BLOCK_BYTES=$(( BLOCK_MIB * 1024 * 1024 ))
 BLOCK_DEV="${BLOCK_DEV:-/dev/nbd0}"
@@ -526,8 +525,8 @@ echo "fio --verify=crc32c reported no verification errors"
 REMOTE
 }
 
-# Detaching must leave the data where it was: the backing file is a file in a
-# NeonFS volume and outlives any attachment of it.
+# Detaching must leave the data where it was: the device is the volume's own
+# and outlives any attachment of it.
 s_block_detach() {
   [ "${BLOCK_READY}" = 1 ] || return 77
   node_ssh 1 "sudo bash -s ${BLOCK_VOL} ${BLOCK_DEV} ${BLOCK_MNT} ${TAG}" 2>&1 <<'REMOTE' | sed 's/^/  /' >&2

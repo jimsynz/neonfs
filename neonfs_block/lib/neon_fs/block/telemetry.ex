@@ -15,43 +15,37 @@ defmodule NeonFS.Block.Telemetry do
     * `[:neonfs, :block, :attached]` / `[:neonfs, :block, :detached]` —
       a device gaining or losing a holder. Measurement `holders`;
       metadata `export`.
-    * `[:neonfs, :client, :chunk_reader, :chunk_fetched]` — emitted by
-      `NeonFS.Client.ChunkReader` on this node, once per chunk a read
-      fetched. Not a block event, which is why it is filtered to the
-      ones `NeonFS.Block.Device` tagged with an `export`: on an omnibus
-      node the same event also carries FUSE's and S3's reads.
 
   Flush latency is the one to alert on: a flush is a durability barrier,
   so a guest filesystem's journal commits at whatever rate flush returns.
 
   ## Amplification
 
-  Both directions export the chunk-layer bytes beside the guest bytes,
-  so the ratio is taken at query time rather than baked into a gauge
-  that cannot be re-aggregated:
+  A write exports the chunk-layer bytes beside the guest bytes, so the
+  ratio is taken at query time rather than baked into a gauge that cannot
+  be re-aggregated:
 
       neonfs_block_command_chunk_bytes{command="write"}
         / neonfs_block_command_bytes{command="write"}
 
-      neonfs_block_read_chunk_bytes / neonfs_block_command_bytes{command="read"}
-
-  The two numerators come from different places because the measurement
-  does. A write's cost is arithmetic over the chunk geometry, which core
-  does and returns; a read's is only known to the client library that
-  fetched the chunks. Neither is computable here, and computing either
-  from the request's own offset and length would give an upper bound
-  rather than a measurement — a sparse device's unwritten region reads
-  as zeroes with no chunk fetched at all.
+  There is deliberately **no read counterpart**. A write's cost is
+  arithmetic over the extent geometry, which core does and returns; a
+  read's is known only where the extent map is resolved, which is also
+  core — this node asks for a byte range and is handed bytes. Computing
+  it here from the request's own offset and length would give an upper
+  bound rather than a measurement, since a sparse device's unwritten
+  region reads as zeroes with nothing fetched at all. A read metric
+  returns when the resolution does, with the extents' chunk references
+  reaching this node and its own fetches to count.
 
   A zero-fill is on the `chunk_bytes` numerator too, but its ratio is not
-  the number to watch: it rewrites only the chunks it clips, so a
+  the number to watch: it rewrites only the extents it clips, so a
   full-device TRIM's amplification tends to zero however much it cost.
   What it cost is the metadata:
 
       neonfs_block_command_chunks_replaced{command="write_zeroes"}
 
-  one entry per chunk the range covered, against the single zero blob
-  they all now point at.
+  one entry per extent the range dropped from the map.
   """
 
   import Telemetry.Metrics
@@ -106,14 +100,7 @@ defmodule NeonFS.Block.Telemetry do
         measurement: :chunks_replaced,
         tags: [:export, :command],
         keep: &(&1.command == :write_zeroes),
-        description: "Chunks a zero-fill replaced by hash rather than rewriting"
-      ),
-      sum("neonfs.block.read.chunk_bytes",
-        event_name: [:neonfs, :client, :chunk_reader, :chunk_fetched],
-        measurement: :chunk_size,
-        tags: [:export],
-        keep: &is_map_key(&1, :export),
-        description: "Chunk-layer bytes fetched to serve block reads"
+        description: "Extents a zero-fill dropped from the map rather than rewriting"
       )
     ]
   end

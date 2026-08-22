@@ -175,7 +175,9 @@ defmodule NeonFS.Block.LiveServerTest do
       payload = :binary.copy(<<0xEF>>, @block)
       :ok = :gen_tcp.send(socket, request(@write, 1, @block, @block) <> payload)
 
-      assert_receive {:core_call, :write, ["vol", "file-id", 4096, ^payload]}, 2_000
+      assert_receive {:core_call, :write, ["vol", "/dev.img", 4096, ^payload, [epoch: 0]]},
+                     2_000
+
       assert {:ok, <<@simple_reply_magic::32, 0::32, 1::64>>} = :gen_tcp.recv(socket, 16, 2_000)
     end
 
@@ -248,7 +250,7 @@ defmodule NeonFS.Block.LiveServerTest do
       refute_receive {:core_call, :write, _args}, 200
 
       :ok = :gen_tcp.send(socket, tail)
-      assert_receive {:core_call, :write, ["vol", "file-id", 0, ^payload]}, 2_000
+      assert_receive {:core_call, :write, ["vol", "/dev.img", 0, ^payload, [epoch: 0]]}, 2_000
     end
 
     test "a flush is not acknowledged before the backing flush returns", %{port: port} do
@@ -278,11 +280,17 @@ defmodule NeonFS.Block.LiveServerTest do
       {:ok, _export} = handshake(socket, @export)
 
       :ok = :gen_tcp.send(socket, request(@trim, 3, @block, 2 * @block))
-      assert_receive {:core_call, :write_zeroes, ["vol", "file-id", 4096, 8192]}, 2_000
+
+      assert_receive {:core_call, :write_zeroes, ["vol", "/dev.img", 4096, 8192, [epoch: 0]]},
+                     2_000
+
       assert {:ok, <<_magic::32, 0::32, 3::64>>} = :gen_tcp.recv(socket, 16, 2_000)
 
       :ok = :gen_tcp.send(socket, request(@write_zeroes, 4, 0, @block))
-      assert_receive {:core_call, :write_zeroes, ["vol", "file-id", 0, 4096]}, 2_000
+
+      assert_receive {:core_call, :write_zeroes, ["vol", "/dev.img", 0, 4096, [epoch: 0]]},
+                     2_000
+
       assert {:ok, <<_magic::32, 0::32, 4::64>>} = :gen_tcp.recv(socket, 16, 2_000)
     end
 
@@ -448,8 +456,10 @@ defmodule NeonFS.Block.LiveServerTest do
   defp open_device_reply do
     {:ok,
      %{
-       file_id: "file-id",
+       id: "device-id",
        size: @size,
+       chunk_bytes: @chunk,
+       epoch: 0,
        logical_block_bytes: @block,
        physical_block_bytes: @block
      }}

@@ -2,36 +2,32 @@ defmodule NeonFS.Core.BlockBackingTest do
   use ExUnit.Case, async: false
   use NeonFS.TestCase
 
-  alias NeonFS.Core.{BlockBacking, VolumeRegistry}
+  alias NeonFS.Core.{BlockBacking, BlockEpoch, BlockIndex, ChunkIndex}
 
   @moduletag :tmp_dir
 
   @chunk BlockBacking.chunk_bytes()
   @block 4096
 
+  # The extent map is a real metadata tree, so these need a provisioned
+  # cluster rather than the index GenServers alone — and the fencing epoch
+  # is a consensus read, so they need Ra as well.
   setup %{tmp_dir: tmp_dir} do
-    configure_test_dirs(tmp_dir)
-    stop_ra()
-    start_drive_registry()
-    start_blob_store()
-    start_chunk_index()
-    start_file_index()
-    start_stripe_index()
-    start_volume_registry()
-    ensure_chunk_access_tracker()
+    {:ok, _cluster_id} = start_provisioned_cluster(tmp_dir)
 
-    on_exit(fn -> cleanup_test_dirs() end)
+    on_exit(fn ->
+      stop_ra()
+      cleanup_test_dirs()
+    end)
 
     volume_name = "block-#{:rand.uniform(999_999)}"
-    {:ok, volume} = VolumeRegistry.create(volume_name, [])
+    {:ok, volume} = create_provisioned_volume(volume_name)
 
     {:ok, volume: volume, volume_name: volume_name}
   end
 
   describe "create_device/4" do
-    test "lays down a sized device whose zero chunks dedup to one blob", %{
-      volume_name: volume_name
-    } do
+    test "publishes a header and no device data at all", %{volume_name: volume_name} do
       size = 8 * @chunk
 
       {:ok, device} = BlockBacking.create_device(volume_name, "/dev.img", size)
@@ -41,16 +37,19 @@ defmodule NeonFS.Core.BlockBackingTest do
       assert device.logical_block_bytes == @block
       assert device.physical_block_bytes == @block
 
-      {:ok, meta} = NeonFS.Core.get_file_meta_by_id(volume_name, device.file_id)
+      assert {:ok, header} = BlockIndex.get_device(volume_name)
+      assert header.path == "/dev.img"
+      assert header.size_bytes == size
 
-      assert length(meta.chunks) == 8
-      assert meta.chunks |> Enum.uniq() |> length() == 1
+      # No file, and no extent: every extent of a fresh device is a hole.
+      assert {:error, _reason} = NeonFS.Core.get_file_meta(volume_name, "/dev.img")
+      assert {:ok, []} = BlockIndex.range(volume_name, 0, 7)
     end
 
     test "an unwritten device reads as zeroes", %{volume_name: volume_name} do
-      {:ok, device} = BlockBacking.create_device(volume_name, "/dev.img", 4 * @chunk)
+      {:ok, _device} = BlockBacking.create_device(volume_name, "/dev.img", 4 * @chunk)
 
-      assert {:ok, data} = BlockBacking.read(volume_name, device.file_id, 0, 2 * @block)
+      assert {:ok, data} = BlockBacking.read(volume_name, "/dev.img", 0, 2 * @block)
       assert data == :binary.copy(<<0>>, 2 * @block)
     end
 
@@ -66,31 +65,23 @@ defmodule NeonFS.Core.BlockBackingTest do
 
     test "refuses a device larger than the volume's max_size" do
       volume_name = "block-capped-#{:rand.uniform(999_999)}"
-      {:ok, _volume} = VolumeRegistry.create(volume_name, max_size: 2 * @chunk)
+      {:ok, _volume} = create_provisioned_volume(volume_name, max_size: 2 * @chunk)
 
       assert {:error, {:device_exceeds_volume_max_size, _size, _max}} =
                BlockBacking.create_device(volume_name, "/dev.img", 4 * @chunk)
     end
 
-    test "refuses a chunk strategy other than the forced fixed one", %{volume_name: volume_name} do
-      assert {:error, {:unsupported_chunk_strategy, :auto}} =
-               BlockBacking.create_device(volume_name, "/dev.img", @chunk, chunk_strategy: :auto)
-
-      assert {:error, {:unsupported_chunk_strategy, {:fastcdc, 65_536}}} =
-               BlockBacking.create_device(volume_name, "/dev.img", @chunk,
-                 chunk_strategy: {:fastcdc, 65_536}
-               )
-    end
-
-    test "refuses to take a path that already holds a device", %{volume_name: volume_name} do
+    test "refuses a second device, naming the one the volume already holds", %{
+      volume_name: volume_name
+    } do
       {:ok, _device} = BlockBacking.create_device(volume_name, "/dev.img", @chunk)
 
       assert {:error, %NeonFS.Error.AlreadyExists{resource: "/dev.img"}} =
-               BlockBacking.create_device(volume_name, "/dev.img", @chunk)
+               BlockBacking.create_device(volume_name, "/second.img", @chunk)
     end
   end
 
-  describe "per-volume chunk size" do
+  describe "per-volume extent width" do
     test "defaults to the spike's 128 KiB, so the measured baseline carries over" do
       name = "block-default-#{:rand.uniform(999_999)}"
       {:ok, volume} = NeonFS.Core.create_volume(name, type: :block, max_size: 4 * @chunk)
@@ -100,36 +91,40 @@ defmodule NeonFS.Core.BlockBackingTest do
       assert device.chunk_bytes == BlockBacking.chunk_bytes()
     end
 
-    test "a volume stores its device at the size it names" do
+    test "a volume stores its device at the width it names" do
       name = "block-sized-#{:rand.uniform(999_999)}"
-      size = 4096 * 8
+      width = 4096 * 8
 
       {:ok, volume} =
         NeonFS.Core.create_volume(name,
           type: :block,
-          max_size: 16 * size,
-          block_chunk_bytes: size
+          max_size: 16 * width,
+          block_chunk_bytes: width
         )
 
-      assert volume.block_chunk_bytes == size
+      assert volume.block_chunk_bytes == width
 
       assert {:ok, device} = BlockBacking.open_device(name, BlockBacking.device_path())
-      assert device.chunk_bytes == size
+      assert device.chunk_bytes == width
 
-      {:ok, meta} = NeonFS.Core.get_file_meta_by_id(name, device.file_id)
-      assert length(meta.chunks) == 16
+      # One extent per `width` bytes, so a whole-device write lays down 16.
+      {:ok, _} =
+        BlockBacking.write(name, device.path, 0, :binary.copy(<<0xAA>>, 16 * width))
+
+      assert {:ok, extents} = BlockIndex.range(name, 0, 15)
+      assert length(extents) == 16
     end
 
     # A volume predating the field reads as the default rather than as `nil`,
     # which would divide by zero somewhere further down.
-    test "a volume with no size recorded reads as the default" do
+    test "a volume with no width recorded reads as the default" do
       assert BlockBacking.chunk_bytes_for(%{block_chunk_bytes: nil}) ==
                BlockBacking.chunk_bytes()
 
       assert BlockBacking.chunk_bytes_for(%{}) == BlockBacking.chunk_bytes()
     end
 
-    test "a filesystem volume records no block chunk size" do
+    test "a filesystem volume records no block extent width" do
       name = "fs-nochunk-#{:rand.uniform(999_999)}"
       {:ok, volume} = NeonFS.Core.create_volume(name, max_size: 4 * @chunk)
 
@@ -155,12 +150,11 @@ defmodule NeonFS.Core.BlockBackingTest do
 
       {:ok, _volume} = NeonFS.Core.create_volume(name, max_size: 4 * @chunk)
 
-      assert {:error, _reason} = BlockBacking.open_device(name, BlockBacking.device_path())
+      assert {:error, {:device_not_found, ^name, _path}} =
+               BlockBacking.open_device(name, BlockBacking.device_path())
     end
 
     test "deleting a block volume takes its device with it" do
-      # Removing the device is an unlink, which refuses to run when it
-      # cannot establish the file's pin state.
       start_namespace_coordination()
       name = "block-deleted-#{:rand.uniform(999_999)}"
 
@@ -182,7 +176,7 @@ defmodule NeonFS.Core.BlockBackingTest do
       assert Exception.message(error) =~ "cannot delete"
     end
 
-    test "a device that cannot be written takes its volume with it" do
+    test "a device that cannot be published takes its volume with it" do
       name = "block-unaligned-#{:rand.uniform(999_999)}"
 
       assert {:error, {:invalid_device_size, 4097}} =
@@ -198,7 +192,7 @@ defmodule NeonFS.Core.BlockBackingTest do
       {:ok, device: device}
     end
 
-    test "a block write rewrites only the chunk it lands in", %{
+    test "a block write rewrites only the extent it lands in", %{
       volume_name: volume_name,
       device: device
     } do
@@ -208,7 +202,7 @@ defmodule NeonFS.Core.BlockBackingTest do
       payload = :binary.copy(<<0xAB>>, @block)
       offset = 3 * @chunk
 
-      assert {:ok, cost} = BlockBacking.write(volume_name, device.file_id, offset, payload)
+      assert {:ok, cost} = BlockBacking.write(volume_name, device.path, offset, payload)
 
       assert_receive {[:neonfs, :block, :write], ^ref, measurements, _meta}, 1_000
       assert measurements.guest_bytes == @block
@@ -219,19 +213,18 @@ defmodule NeonFS.Core.BlockBackingTest do
       # another node never sees this node's telemetry.
       assert cost == %{chunk_bytes: @chunk, chunks_rewritten: 1}
 
-      assert {:ok, ^payload} = BlockBacking.read(volume_name, device.file_id, offset, @block)
+      assert {:ok, ^payload} = BlockBacking.read(volume_name, device.path, offset, @block)
 
       assert {:ok, tail} =
-               BlockBacking.read(volume_name, device.file_id, offset + @block, @block)
+               BlockBacking.read(volume_name, device.path, offset + @block, @block)
 
       assert tail == :binary.copy(<<0>>, @block)
 
-      {:ok, meta} = NeonFS.Core.get_file_meta_by_id(volume_name, device.file_id)
-      assert length(meta.chunks) == 8
-      assert meta.size == 8 * @chunk
+      # Only the extent it landed in exists; the rest of the device is holes.
+      assert {:ok, [{3, {:chunk, _hash}}]} = BlockIndex.range(volume_name, 0, 7)
     end
 
-    test "a write spanning a chunk boundary rewrites both chunks", %{
+    test "a write spanning an extent boundary rewrites both extents", %{
       volume_name: volume_name,
       device: device
     } do
@@ -240,7 +233,7 @@ defmodule NeonFS.Core.BlockBackingTest do
       offset = @chunk - @block
       payload = :binary.copy(<<0xCD>>, 2 * @block)
 
-      assert {:ok, cost} = BlockBacking.write(volume_name, device.file_id, offset, payload)
+      assert {:ok, cost} = BlockBacking.write(volume_name, device.path, offset, payload)
 
       assert_receive {[:neonfs, :block, :write], ^ref, measurements, _meta}, 1_000
       assert measurements.chunks_rewritten == 2
@@ -249,15 +242,29 @@ defmodule NeonFS.Core.BlockBackingTest do
       assert cost == %{chunk_bytes: 2 * @chunk, chunks_rewritten: 2}
 
       assert {:ok, ^payload} =
-               BlockBacking.read(volume_name, device.file_id, offset, 2 * @block)
+               BlockBacking.read(volume_name, device.path, offset, 2 * @block)
+    end
+
+    test "the chunks a write published are committed, not left holding its ref", %{
+      volume_name: volume_name,
+      volume: volume,
+      device: device
+    } do
+      assert {:ok, _cost} =
+               BlockBacking.write(volume_name, device.path, 0, :binary.copy(<<9>>, @block))
+
+      assert {:ok, [{0, {:chunk, hash}}]} = BlockIndex.range(volume_name, 0, 0)
+      assert {:ok, chunk_meta} = ChunkIndex.get(volume.id, hash)
+      assert chunk_meta.commit_state == :committed
+      assert MapSet.size(chunk_meta.active_write_refs) == 0
     end
 
     test "refuses an unaligned offset or length", %{volume_name: volume_name, device: device} do
       assert {:error, {:unaligned_request, 1, _}} =
-               BlockBacking.write(volume_name, device.file_id, 1, :binary.copy(<<1>>, @block))
+               BlockBacking.write(volume_name, device.path, 1, :binary.copy(<<1>>, @block))
 
       assert {:error, {:unaligned_request, 0, 3}} =
-               BlockBacking.write(volume_name, device.file_id, 0, <<1, 2, 3>>)
+               BlockBacking.write(volume_name, device.path, 0, <<1, 2, 3>>)
     end
 
     test "refuses a write past the end of the device", %{
@@ -267,248 +274,247 @@ defmodule NeonFS.Core.BlockBackingTest do
       assert {:error, {:out_of_range, _offset, _length, _size}} =
                BlockBacking.write(
                  volume_name,
-                 device.file_id,
+                 device.path,
                  8 * @chunk - @block,
                  :binary.copy(<<1>>, 2 * @block)
-               )
-
-      {:ok, meta} = NeonFS.Core.get_file_meta_by_id(volume_name, device.file_id)
-      assert meta.size == 8 * @chunk
-    end
-
-    test "refuses a chunk strategy other than the forced fixed one", %{
-      volume_name: volume_name,
-      device: device
-    } do
-      assert {:error, {:unsupported_chunk_strategy, :auto}} =
-               BlockBacking.write(
-                 volume_name,
-                 device.file_id,
-                 0,
-                 :binary.copy(<<1>>, @block),
-                 chunk_strategy: :auto
                )
     end
   end
 
+  describe "fencing" do
+    setup %{volume_name: volume_name} do
+      {:ok, _device} = BlockBacking.create_device(volume_name, "/dev.img", 2 * @chunk)
+      {:ok, attached} = BlockBacking.open_device(volume_name, "/dev.img")
+      {:ok, attached: attached}
+    end
+
+    test "a preempted holder's write is refused, and the preemptor's is not", %{
+      volume: volume,
+      volume_name: volume_name,
+      attached: attached
+    } do
+      payload = :binary.copy(<<0x5A>>, @block)
+
+      assert {:ok, _cost} =
+               BlockBacking.write(volume_name, attached.path, 0, payload, epoch: attached.epoch)
+
+      assert {:ok, preemptor} = BlockEpoch.bump({volume.id, attached.path})
+      assert preemptor > attached.epoch
+
+      assert {:error, {:fenced, ^preemptor}} =
+               BlockBacking.write(volume_name, attached.path, @chunk, payload,
+                 epoch: attached.epoch
+               )
+
+      assert {:ok, _cost} =
+               BlockBacking.write(volume_name, attached.path, @chunk, payload, epoch: preemptor)
+    end
+
+    test "a fenced write leaves nothing behind for its extent", %{
+      volume: volume,
+      volume_name: volume_name,
+      attached: attached
+    } do
+      {:ok, _preemptor} = BlockEpoch.bump({volume.id, attached.path})
+
+      assert {:error, {:fenced, _current}} =
+               BlockBacking.write(volume_name, attached.path, 0, :binary.copy(<<3>>, @block),
+                 epoch: attached.epoch
+               )
+
+      assert {:ok, []} = BlockIndex.range(volume_name, 0, 1)
+      assert {:ok, zeroes} = BlockBacking.read(volume_name, attached.path, 0, @block)
+      assert zeroes == :binary.copy(<<0>>, @block)
+    end
+  end
+
   describe "read_stream/4" do
-    test "yields one element per chunk of the range", %{volume_name: volume_name} do
+    test "yields one element per extent of the range", %{volume_name: volume_name} do
       {:ok, device} = BlockBacking.create_device(volume_name, "/dev.img", 4 * @chunk)
 
-      assert {:ok, stream} = BlockBacking.read_stream(volume_name, device.file_id, 0, 4 * @chunk)
+      assert {:ok, stream} = BlockBacking.read_stream(volume_name, device.path, 0, 4 * @chunk)
 
       sizes = stream |> Enum.map(&byte_size/1)
 
       assert Enum.sum(sizes) == 4 * @chunk
       assert Enum.all?(sizes, &(&1 <= @chunk))
+      assert length(sizes) == 4
     end
   end
 
-  describe "write_zeroes/4 and discard/4" do
+  describe "write_zeroes/5 and discard/5" do
     setup %{volume_name: volume_name} do
       {:ok, device} = BlockBacking.create_device(volume_name, "/dev.img", 4 * @chunk)
-      {:ok, meta} = NeonFS.Core.get_file_meta_by_id(volume_name, device.file_id)
-      {:ok, device: device, zero_hash: hd(meta.chunks)}
+      {:ok, device: device}
     end
 
-    test "zeroing written chunks returns them to the canonical zero chunk", %{
+    test "zeroing written extents drops them from the map", %{
       volume_name: volume_name,
-      device: device,
-      zero_hash: zero_hash
+      device: device
     } do
       {:ok, _} =
-        BlockBacking.write(volume_name, device.file_id, 0, :binary.copy(<<0xEF>>, 2 * @chunk))
+        BlockBacking.write(volume_name, device.path, 0, :binary.copy(<<0xEF>>, 2 * @chunk))
 
-      {:ok, dirty} = NeonFS.Core.get_file_meta_by_id(volume_name, device.file_id)
-      refute Enum.at(dirty.chunks, 0) == zero_hash
+      assert {:ok, [{0, _}, {1, _}]} = BlockIndex.range(volume_name, 0, 3)
 
-      assert {:ok, _cost} =
-               BlockBacking.write_zeroes(volume_name, device.file_id, 0, 2 * @chunk)
+      assert {:ok, _cost} = BlockBacking.write_zeroes(volume_name, device.path, 0, 2 * @chunk)
 
-      {:ok, clean} = NeonFS.Core.get_file_meta_by_id(volume_name, device.file_id)
-      assert clean.chunks == List.duplicate(zero_hash, 4)
-      assert clean.size == 4 * @chunk
+      assert {:ok, []} = BlockIndex.range(volume_name, 0, 3)
 
-      assert {:ok, data} = BlockBacking.read(volume_name, device.file_id, 0, 2 * @block)
+      assert {:ok, data} = BlockBacking.read(volume_name, device.path, 0, 2 * @block)
       assert data == :binary.copy(<<0>>, 2 * @block)
     end
 
-    # 24 chunks is three of the 1 MiB batches the previous implementation
-    # zeroed in, so a single commit here is the property under test rather
-    # than an artefact of the range fitting one batch.
-    test "a range spanning many chunks costs one metadata commit", %{volume_name: volume_name} do
-      {:ok, big} = BlockBacking.create_device(volume_name, "/big.img", 24 * @chunk)
-
-      {:ok, _} =
-        BlockBacking.write(volume_name, big.file_id, 0, :binary.copy(<<0xEF>>, 24 * @chunk))
-
-      ref =
-        :telemetry_test.attach_event_handlers(self(), [[:neonfs, :write_operation, :stop]])
-
-      assert {:ok, _cost} =
-               BlockBacking.write_zeroes(volume_name, big.file_id, 0, 24 * @chunk)
-
-      assert_receive {[:neonfs, :write_operation, :stop], ^ref, _measurements, _meta}, 5_000
-      refute_receive {[:neonfs, :write_operation, :stop], ^ref, _measurements, _meta}, 200
-
-      :telemetry.detach(ref)
-
-      {:ok, meta} = NeonFS.Core.get_file_meta_by_id(volume_name, big.file_id)
-      assert meta.chunks == List.duplicate(hd(meta.chunks), 24)
-      assert meta.size == 24 * @chunk
-    end
-
-    test "zeroing a range costs no commit when nothing under it changes", %{
-      volume_name: volume_name,
-      device: device
-    } do
-      ref =
-        :telemetry_test.attach_event_handlers(self(), [[:neonfs, :write_operation, :stop]])
-
-      assert {:ok, _cost} =
-               BlockBacking.write_zeroes(volume_name, device.file_id, 0, 4 * @chunk)
-
-      assert_receive {[:neonfs, :write_operation, :stop], ^ref, _measurements, _meta}, 1_000
-
-      :telemetry.detach(ref)
-    end
-
-    test "a whole-device zero-fill costs one stored chunk and an entry per chunk", %{
+    test "a whole-device zero-fill stores nothing and punches every extent", %{
       volume_name: volume_name,
       device: device
     } do
       {:ok, _} =
-        BlockBacking.write(volume_name, device.file_id, 0, :binary.copy(<<0xEF>>, 4 * @chunk))
+        BlockBacking.write(volume_name, device.path, 0, :binary.copy(<<0xEF>>, 4 * @chunk))
 
       ref = :telemetry_test.attach_event_handlers(self(), [[:neonfs, :block, :write_zeroes]])
 
-      assert {:ok, cost} =
-               BlockBacking.write_zeroes(volume_name, device.file_id, 0, 4 * @chunk)
+      assert {:ok, cost} = BlockBacking.write_zeroes(volume_name, device.path, 0, 4 * @chunk)
 
-      # The whole device is covered end to end, so nothing is read back and
-      # the four chunks all point at the one zero chunk that was stored.
-      assert cost == %{chunk_bytes: @chunk, chunks_rewritten: 0, chunks_replaced: 4}
+      assert cost == %{chunk_bytes: 0, chunks_rewritten: 0, chunks_replaced: 4}
 
       assert_receive {[:neonfs, :block, :write_zeroes], ^ref, measurements, _meta}, 1_000
       assert measurements.guest_bytes == 4 * @chunk
-      assert measurements.chunk_bytes == @chunk
+      assert measurements.chunk_bytes == 0
       assert measurements.chunks_replaced == 4
 
       :telemetry.detach(ref)
 
-      {:ok, meta} = NeonFS.Core.get_file_meta_by_id(volume_name, device.file_id)
-      assert meta.chunks |> Enum.uniq() |> Enum.count() == 1
-      assert Enum.count(meta.chunks) == cost.chunks_replaced
+      assert {:ok, []} = BlockIndex.range(volume_name, 0, 3)
     end
 
-    # A device whose size is not a whole multiple of the chunk size ends in a
-    # short chunk, and a zero chunk of its size cannot be the one the full
-    # chunks share.
-    test "a short final chunk costs a second stored zero chunk", %{volume_name: volume_name} do
+    # A device whose size is not a whole multiple of the extent width ends in
+    # a short extent, which a range reaching the end still covers entirely.
+    test "a short final extent is punched like any other", %{volume_name: volume_name} do
       size = 2 * @chunk + @block
-      {:ok, ragged} = BlockBacking.create_device(volume_name, "/ragged.img", size)
+      other = "ragged-#{:rand.uniform(999_999)}"
+      {:ok, _volume} = create_provisioned_volume(other)
+      {:ok, ragged} = BlockBacking.create_device(other, "/ragged.img", size)
 
-      {:ok, _} = BlockBacking.write(volume_name, ragged.file_id, 0, :binary.copy(<<0xEF>>, size))
+      {:ok, _} = BlockBacking.write(other, ragged.path, 0, :binary.copy(<<0xEF>>, size))
 
-      assert {:ok, cost} = BlockBacking.write_zeroes(volume_name, ragged.file_id, 0, size)
+      assert {:ok, cost} = BlockBacking.write_zeroes(other, ragged.path, 0, size)
 
-      assert cost == %{
-               chunk_bytes: @chunk + @block,
-               chunks_rewritten: 0,
-               chunks_replaced: 3
-             }
+      assert cost == %{chunk_bytes: 0, chunks_rewritten: 0, chunks_replaced: 3}
 
-      # The two sizes the arithmetic charged for are two hashes in the file.
-      {:ok, meta} = NeonFS.Core.get_file_meta_by_id(volume_name, ragged.file_id)
-      assert meta.chunks |> Enum.uniq() |> Enum.count() == 2
-
-      assert {:ok, data} = BlockBacking.read(volume_name, ragged.file_id, 0, @block)
+      assert {:ok, []} = BlockIndex.range(other, 0, 2)
+      assert {:ok, data} = BlockBacking.read(other, ragged.path, 2 * @chunk, @block)
       assert data == :binary.copy(<<0>>, @block)
     end
 
-    test "a partial chunk at each end is read-modify-written, the middle replaced", %{
-      volume_name: volume_name,
-      device: device,
-      zero_hash: zero_hash
-    } do
-      {:ok, _} =
-        BlockBacking.write(volume_name, device.file_id, 0, :binary.copy(<<0xEF>>, 4 * @chunk))
-
-      # Straddles chunk 0's tail and chunk 3's head, covering 1 and 2 whole.
-      offset = @chunk - @block
-      length = 2 * @chunk + 2 * @block
-
-      assert {:ok, cost} =
-               BlockBacking.write_zeroes(volume_name, device.file_id, offset, length)
-
-      # Both edges read back and rewritten in full, the two chunks between
-      # them replaced by the single zero chunk that was stored for them.
-      assert cost == %{chunk_bytes: 3 * @chunk, chunks_rewritten: 2, chunks_replaced: 2}
-
-      {:ok, meta} = NeonFS.Core.get_file_meta_by_id(volume_name, device.file_id)
-      assert length(meta.chunks) == 4
-      assert meta.size == 4 * @chunk
-      assert Enum.slice(meta.chunks, 1, 2) == [zero_hash, zero_hash]
-      refute Enum.at(meta.chunks, 0) == zero_hash
-      refute Enum.at(meta.chunks, 3) == zero_hash
-
-      assert {:ok, zeroed} = BlockBacking.read(volume_name, device.file_id, offset, length)
-      assert zeroed == :binary.copy(<<0>>, length)
-
-      assert {:ok, kept_head} = BlockBacking.read(volume_name, device.file_id, 0, @block)
-      assert kept_head == :binary.copy(<<0xEF>>, @block)
-
-      assert {:ok, kept_tail} =
-               BlockBacking.read(volume_name, device.file_id, offset + length, @block)
-
-      assert kept_tail == :binary.copy(<<0xEF>>, @block)
-    end
-
-    test "a sub-chunk discard zero-fills without disturbing its neighbours", %{
+    test "a partial extent at each end is read-modify-written, the middle punched", %{
       volume_name: volume_name,
       device: device
     } do
       {:ok, _} =
-        BlockBacking.write(volume_name, device.file_id, 0, :binary.copy(<<0xEF>>, @chunk))
+        BlockBacking.write(volume_name, device.path, 0, :binary.copy(<<0xEF>>, 4 * @chunk))
 
-      assert {:ok, cost} = BlockBacking.discard(volume_name, device.file_id, 0, @block)
+      # Straddles extent 0's tail and extent 3's head, covering 1 and 2 whole.
+      offset = @chunk - @block
+      length = 2 * @chunk + 2 * @block
 
-      # A 4 KiB discard covers no chunk end to end, so it buys nothing the
+      assert {:ok, cost} =
+               BlockBacking.write_zeroes(volume_name, device.path, offset, length)
+
+      assert cost == %{chunk_bytes: 2 * @chunk, chunks_rewritten: 2, chunks_replaced: 2}
+
+      assert {:ok, [{0, _}, {3, _}]} = BlockIndex.range(volume_name, 0, 3)
+
+      assert {:ok, zeroed} = BlockBacking.read(volume_name, device.path, offset, length)
+      assert zeroed == :binary.copy(<<0>>, length)
+
+      assert {:ok, kept_head} = BlockBacking.read(volume_name, device.path, 0, @block)
+      assert kept_head == :binary.copy(<<0xEF>>, @block)
+
+      assert {:ok, kept_tail} =
+               BlockBacking.read(volume_name, device.path, offset + length, @block)
+
+      assert kept_tail == :binary.copy(<<0xEF>>, @block)
+    end
+
+    test "an extent zeroed a block at a time ends up punched, not stored", %{
+      volume_name: volume_name,
+      device: device
+    } do
+      {:ok, _} =
+        BlockBacking.write(volume_name, device.path, 0, :binary.copy(<<0xEF>>, @chunk))
+
+      for offset <- 0..(div(@chunk, @block) - 1) do
+        assert {:ok, _cost} =
+                 BlockBacking.discard(volume_name, device.path, offset * @block, @block)
+      end
+
+      assert {:ok, []} = BlockIndex.range(volume_name, 0, 0)
+    end
+
+    test "a sub-extent discard zero-fills without disturbing its neighbours", %{
+      volume_name: volume_name,
+      device: device
+    } do
+      {:ok, _} =
+        BlockBacking.write(volume_name, device.path, 0, :binary.copy(<<0xEF>>, @chunk))
+
+      assert {:ok, cost} = BlockBacking.discard(volume_name, device.path, 0, @block)
+
+      # A 4 KiB discard covers no extent end to end, so it buys nothing the
       # equivalent write would not have cost.
       assert cost == %{chunk_bytes: @chunk, chunks_rewritten: 1, chunks_replaced: 0}
 
-      assert {:ok, discarded} = BlockBacking.read(volume_name, device.file_id, 0, @block)
+      assert {:ok, discarded} = BlockBacking.read(volume_name, device.path, 0, @block)
       assert discarded == :binary.copy(<<0>>, @block)
 
-      assert {:ok, kept} = BlockBacking.read(volume_name, device.file_id, @block, @block)
+      assert {:ok, kept} = BlockBacking.read(volume_name, device.path, @block, @block)
       assert kept == :binary.copy(<<0xEF>>, @block)
     end
   end
 
   describe "flush/2" do
-    test "returns once the backing file's chunks are durable", %{volume_name: volume_name} do
+    test "returns once the device's chunks are durable", %{volume_name: volume_name} do
       {:ok, device} = BlockBacking.create_device(volume_name, "/dev.img", @chunk)
-      {:ok, _} = BlockBacking.write(volume_name, device.file_id, 0, :binary.copy(<<7>>, @block))
+      {:ok, _} = BlockBacking.write(volume_name, device.path, 0, :binary.copy(<<7>>, @block))
 
       ref = :telemetry_test.attach_event_handlers(self(), [[:neonfs, :block, :flush]])
 
-      assert :ok = BlockBacking.flush(volume_name, device.file_id)
+      assert :ok = BlockBacking.flush(volume_name, device.path)
       assert_receive {[:neonfs, :block, :flush], ^ref, _measurements, %{status: :ok}}, 1_000
     end
   end
 
-  describe "open_device/2 and device_info/2" do
-    test "a device stays addressable by id across a rename", %{volume_name: volume_name} do
-      {:ok, device} = BlockBacking.create_device(volume_name, "/dev.img", @chunk)
+  describe "open_device/2" do
+    test "carries the device's current epoch", %{volume: volume, volume_name: volume_name} do
+      {:ok, _device} = BlockBacking.create_device(volume_name, "/dev.img", @chunk)
 
-      assert {:ok, opened} = BlockBacking.open_device(volume_name, "/dev.img")
-      assert opened.file_id == device.file_id
+      assert {:ok, first} = BlockBacking.open_device(volume_name, "/dev.img")
+      assert first.epoch == 0
 
-      :ok = NeonFS.Core.rename_file(volume_name, "/dev.img", "/renamed.img")
+      {:ok, bumped} = BlockEpoch.bump({volume.id, "/dev.img"})
 
-      assert {:ok, info} = BlockBacking.device_info(volume_name, device.file_id)
-      assert info.size == @chunk
-      assert info.path == "/renamed.img"
+      assert {:ok, second} = BlockBacking.open_device(volume_name, "/dev.img")
+      assert second.epoch == bumped
+    end
+
+    test "refuses a name the volume's device does not answer to", %{volume_name: volume_name} do
+      {:ok, _device} = BlockBacking.create_device(volume_name, "/dev.img", @chunk)
+
+      assert {:error, {:device_path_mismatch, "/other.img", "/dev.img"}} =
+               BlockBacking.open_device(volume_name, "/other.img")
+    end
+
+    # A device from before the extent map is a file with a chunk list. There
+    # is no conversion, so the refusal has to say which of the two it is.
+    test "names a file-backed device as the reason rather than reporting it absent", %{
+      volume_name: volume_name
+    } do
+      {:ok, _meta} =
+        NeonFS.Core.write_file_streamed(volume_name, "/dev.img", [:binary.copy(<<0>>, @block)])
+
+      assert {:error, {:file_backed_device, ^volume_name, "/dev.img"}} =
+               BlockBacking.open_device(volume_name, "/dev.img")
     end
   end
 end

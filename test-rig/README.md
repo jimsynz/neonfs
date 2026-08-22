@@ -311,14 +311,13 @@ cannot load the `nbd` module or attach a block device at all:
   the proof the device is coherent, superblock backups included.
 - **block device detach** — detach, confirm the kernel no longer sizes the
   device, then re-attach and confirm the filesystem and its contents survived.
-  The backing file is a file in a volume and outlives any attachment of it.
+  The device is the volume's own and outlives any attachment of it.
 
 The steps `SKIP` where `nbd-client` or `fio` cannot be installed or the `nbd`
-module will not load. The device is sized by `BLOCK_MIB` (default 8): creating
-it writes the whole device as zeroes at one metadata entry per 128 KiB, and
-that chunk list is committed as a single batch — a 64 MiB device already
-exceeds the volume committer's deadline and is refused, while 8 MiB
-provisions in seconds.
+module will not load. The device is sized by `BLOCK_MIB` (default 256):
+creating it publishes a device header and no data at all, since an extent
+nothing has written reads as zeroes, so provisioning costs one metadata
+commit whatever the size.
 
 ```bash
 ./neonfs-rig up            # bring a single-node cluster up first

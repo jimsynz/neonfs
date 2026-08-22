@@ -2,7 +2,7 @@ defmodule NeonFS.Core.BlockDeviceInvariantTest do
   use ExUnit.Case, async: false
   use NeonFS.TestCase
 
-  alias NeonFS.Core.{BlockBacking, VolumeRegistry}
+  alias NeonFS.Core.{BlockBacking, BlockIndex}
 
   @moduletag :tmp_dir
 
@@ -10,41 +10,37 @@ defmodule NeonFS.Core.BlockDeviceInvariantTest do
   @block 4096
 
   setup %{tmp_dir: tmp_dir} do
-    configure_test_dirs(tmp_dir)
-    stop_ra()
-    start_drive_registry()
-    start_blob_store()
-    start_chunk_index()
-    start_file_index()
-    start_stripe_index()
-    start_volume_registry()
-    ensure_chunk_access_tracker()
-    on_exit(fn -> cleanup_test_dirs() end)
+    {:ok, _cluster_id} = start_provisioned_cluster(tmp_dir)
+
+    on_exit(fn ->
+      stop_ra()
+      cleanup_test_dirs()
+    end)
 
     name = "blkinv-#{:rand.uniform(999_999)}"
-    {:ok, _volume} = VolumeRegistry.create(name, [])
+    {:ok, _volume} = create_provisioned_volume(name)
     {:ok, device} = BlockBacking.create_device(name, "/dev.img", 32 * @chunk)
     {:ok, volume_name: name, device: device}
   end
 
-  test "a device's chunk list keeps its length under many partial writes", %{
+  test "the extent map holds one entry per extent a write touched, however many writes", %{
     volume_name: volume_name,
     device: device
   } do
-    expected = div(device.size, @chunk)
+    extents = div(device.size, @chunk)
 
-    for _ <- 1..40 do
-      offset = :rand.uniform(div(device.size, @block)) * @block - @block
-      payload = :binary.copy(<<:rand.uniform(255)>>, @block)
-      assert {:ok, _cost} = BlockBacking.write(volume_name, device.file_id, offset, payload)
-    end
+    touched =
+      for _ <- 1..40, into: MapSet.new() do
+        offset = :rand.uniform(div(device.size, @block)) * @block - @block
+        payload = :binary.copy(<<:rand.uniform(255)>>, @block)
+        assert {:ok, _cost} = BlockBacking.write(volume_name, device.path, offset, payload)
+        div(offset, @chunk)
+      end
 
-    {:ok, meta} = NeonFS.Core.get_file_meta_by_id(volume_name, device.file_id)
+    assert {:ok, written} = BlockIndex.range(volume_name, 0, extents - 1)
 
-    assert length(meta.chunks) == expected,
-           "chunk list grew from #{expected} to #{length(meta.chunks)}"
-
-    assert meta.size == device.size
+    assert written |> Enum.map(&elem(&1, 0)) |> MapSet.new() == touched,
+           "the map holds an entry for exactly the extents that were written"
   end
 
   test "every written block reads back after many overlapping writes", %{
@@ -55,28 +51,25 @@ defmodule NeonFS.Core.BlockDeviceInvariantTest do
       for index <- 0..31 do
         offset = index * @block
         payload = :binary.copy(<<index>>, @block)
-        assert {:ok, _} = BlockBacking.write(volume_name, device.file_id, offset, payload)
+        assert {:ok, _} = BlockBacking.write(volume_name, device.path, offset, payload)
         {offset, payload}
       end
 
     for {offset, payload} <- writes do
-      assert {:ok, ^payload} = BlockBacking.read(volume_name, device.file_id, offset, @block)
+      assert {:ok, ^payload} = BlockBacking.read(volume_name, device.path, offset, @block)
     end
   end
 
   # What `fio --verify` at iodepth=8 does, and what a guest filesystem does
-  # whenever it has more than one write in flight — eight is `fio`'s
-  # `iodepth=8`, the shape that found this. Each write is a
-  # read-modify-write of the file's chunk list, so without the commit
-  # comparing the snapshot it was computed from, two in flight at once
-  # each commit a list built from the same starting point and the second
-  # silently discards the first's chunk.
+  # whenever it has more than one write in flight. Disjoint extents are
+  # distinct keys, so the writers collide only on the shard roots they share
+  # — which the commit's compare-and-swap has to resolve by retrying rather
+  # than by the last writer winning.
   @tag timeout: 120_000
-  test "concurrent writes to distinct chunks all survive", %{
+  test "concurrent writes to distinct extents all survive", %{
     volume_name: volume_name,
     device: device
   } do
-    expected = div(device.size, @chunk)
     parent = self()
 
     writers =
@@ -85,7 +78,7 @@ defmodule NeonFS.Core.BlockDeviceInvariantTest do
         payload = :binary.copy(<<index + 1>>, @block)
 
         spawn(fn ->
-          result = BlockBacking.write(volume_name, device.file_id, offset, payload)
+          result = BlockBacking.write(volume_name, device.path, offset, payload)
           send(parent, {:written, index, result})
         end)
 
@@ -96,11 +89,8 @@ defmodule NeonFS.Core.BlockDeviceInvariantTest do
       assert_receive {:written, ^index, {:ok, _cost}}, 60_000
     end
 
-    {:ok, meta} = NeonFS.Core.get_file_meta_by_id(volume_name, device.file_id)
-    assert length(meta.chunks) == expected
-
     for {offset, payload} <- writers do
-      assert {:ok, ^payload} = BlockBacking.read(volume_name, device.file_id, offset, @block),
+      assert {:ok, ^payload} = BlockBacking.read(volume_name, device.path, offset, @block),
              "the write at offset #{offset} did not survive"
     end
   end
