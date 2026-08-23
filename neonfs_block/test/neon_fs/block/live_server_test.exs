@@ -374,6 +374,28 @@ defmodule NeonFS.Block.LiveServerTest do
       :telemetry.detach(ref)
     end
 
+    # A fenced holder has been preempted: its epoch is behind the device's, so
+    # it can no longer write — and a connection that keeps answering reads out
+    # of a map it cannot write is the worse half, because it looks healthy.
+    test "a fenced write ends the connection rather than reporting a fault", %{port: port} do
+      socket = connect(port)
+      {:ok, _export} = handshake(socket, @export)
+
+      stub_core(fn _module, function, args ->
+        if function == :commit_written,
+          do: {:error, {:fenced, 9}},
+          else: default_reply(function, args)
+      end)
+
+      :ok = :gen_tcp.send(socket, request(@write, 12, 0, @block) <> :binary.copy(<<4>>, @block))
+
+      # ESHUTDOWN, not EIO: the disk is not broken, this server has stopped
+      # serving it — and a guest ext4 remounts read-only over EIO rather than
+      # letting the attach be retaken elsewhere.
+      assert {:ok, <<_magic::32, 108::32, 12::64>>} = :gen_tcp.recv(socket, 16, 2_000)
+      assert {:error, :closed} = :gen_tcp.recv(socket, 0, 2_000)
+    end
+
     # EAGAIN past the budget: honest about what happened, and the caveat that
     # a client may not act on it is why the retry above exists at all.
     test "a span contended past the retry budget answers EAGAIN", %{port: port} do

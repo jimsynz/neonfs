@@ -158,4 +158,89 @@ defmodule NeonFS.Block.DeviceRegistryTest do
       assert DeviceRegistry.attached(registry) == %{}
     end
   end
+
+  # A fence is per device, so it takes every holder of it — including the
+  # ones that have only been reading, which are the dangerous ones because
+  # they look healthy.
+  describe "fenced/3" do
+    test "tells every holder and drops the device", %{registry: registry} do
+      stub_core()
+      stub_coordinator({:ok, "claim-1"})
+
+      first = spawn_holder()
+      second = spawn_holder()
+
+      {:ok, _device} = DeviceRegistry.attach("blockvol", first, registry)
+      {:ok, _device} = DeviceRegistry.attach("blockvol", second, registry)
+      assert DeviceRegistry.attached(registry) == %{"blockvol" => 2}
+
+      :ok = DeviceRegistry.fenced("blockvol", 7, registry)
+
+      assert_receive {:holder_notified, ^first, "blockvol", 7}, 1_000
+      assert_receive {:holder_notified, ^second, "blockvol", 7}, 1_000
+      assert DeviceRegistry.attached(registry) == %{}
+    end
+
+    # Released immediately rather than when the last holder notices, because
+    # the point of preempting a device is that it can be attached elsewhere
+    # without racing the losers' teardown.
+    test "releases the attachment claim without waiting for the holders", %{registry: registry} do
+      stub_core()
+      stub_coordinator({:ok, "claim-1"})
+
+      {:ok, _device} = DeviceRegistry.attach("blockvol", spawn_holder(), registry)
+
+      :ok = DeviceRegistry.fenced("blockvol", 3, registry)
+
+      assert_receive {:coordinator_call, :release, ["claim-1"]}, 1_000
+    end
+
+    test "emits what was fenced and how much went with it", %{registry: registry} do
+      stub_core()
+      stub_coordinator({:ok, "claim-1"})
+      ref = :telemetry_test.attach_event_handlers(self(), [[:neonfs, :block, :fenced]])
+
+      {:ok, _device} = DeviceRegistry.attach("blockvol", spawn_holder(), registry)
+      :ok = DeviceRegistry.fenced("blockvol", 11, registry)
+
+      assert_receive {[:neonfs, :block, :fenced], ^ref, measurements, %{export: "blockvol"}},
+                     1_000
+
+      assert measurements.holders == 1
+      assert measurements.current_epoch == 11
+
+      :telemetry.detach(ref)
+    end
+
+    # Two connections can discover the same fence at once, and the second
+    # must not fight the first.
+    test "a device already gone is not an error", %{registry: registry} do
+      assert :ok = DeviceRegistry.fenced("never-attached", 1, registry)
+    end
+
+    test "the export can be attached again afterwards", %{registry: registry} do
+      stub_core()
+      stub_coordinator({:ok, "claim-1"})
+
+      {:ok, _device} = DeviceRegistry.attach("blockvol", spawn_holder(), registry)
+      :ok = DeviceRegistry.fenced("blockvol", 2, registry)
+
+      assert {:ok, _device} = DeviceRegistry.attach("blockvol", spawn_holder(), registry)
+      assert DeviceRegistry.attached(registry) == %{"blockvol" => 1}
+    end
+  end
+
+  # A holder that reports what it was told, so the notification is asserted
+  # where it lands rather than inferred from the registry's state.
+  defp spawn_holder do
+    test = self()
+
+    spawn(fn ->
+      receive do
+        {:fenced, export, epoch} -> send(test, {:holder_notified, self(), export, epoch})
+      after
+        5_000 -> :timeout
+      end
+    end)
+  end
 end
