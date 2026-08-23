@@ -6,8 +6,8 @@ defmodule NeonFS.Core.BlockBackingBenchTest do
   It reports, per guest write size, the bytes the chunk layer actually
   rewrote and the rate at which the metadata layer accepted the commits.
   A guest write costs a whole extent rewrite plus one metadata commit, so
-  the numbers here are what a coalescing window has to improve on — and
-  what the file-backed spike's figures are compared against.
+  the numbers here are what a coalescing window has to improve on, and what
+  the figures measured before the extent map are compared against.
 
   Single node, one drive, no cluster — the metadata-commit ceiling
   measured here is the local path's, and a peer cluster's quorum commit is

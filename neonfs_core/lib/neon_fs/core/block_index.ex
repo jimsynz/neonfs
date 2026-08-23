@@ -336,9 +336,10 @@ defmodule NeonFS.Core.BlockIndex do
   @doc """
   The volume's device header, or `:not_found` where it has none.
 
-  A volume with extents but no header is a file-backed device from before the
-  extent map, or a provisioning that did not finish. Either way its geometry is
-  unknown, so this reports the absence rather than inventing a size.
+  A volume with extents but no header is a provisioning that did not finish.
+  Its geometry is unknown, so this reports the absence rather than inventing
+  a size — a device addressed at a guessed extent width reads the wrong
+  bytes rather than failing.
   """
   @spec get_device(String.t(), keyword()) ::
           {:ok, BlockDevice.t()} | {:error, term()}

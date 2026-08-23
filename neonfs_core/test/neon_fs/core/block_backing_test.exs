@@ -721,18 +721,6 @@ defmodule NeonFS.Core.BlockBackingTest do
       assert {:error, {:device_path_mismatch, "/other.img", "/dev.img"}} =
                BlockBacking.open_device(volume_name, "/other.img")
     end
-
-    # A device from before the extent map is a file with a chunk list. There
-    # is no conversion, so the refusal has to say which of the two it is.
-    test "names a file-backed device as the reason rather than reporting it absent", %{
-      volume_name: volume_name
-    } do
-      {:ok, _meta} =
-        NeonFS.Core.write_file_streamed(volume_name, "/dev.img", [:binary.copy(<<0>>, @block)])
-
-      assert {:error, {:file_backed_device, ^volume_name, "/dev.img"}} =
-               BlockBacking.open_device(volume_name, "/dev.img")
-    end
   end
 
   # Puts a chunk on this node's blob store the way an interface node would

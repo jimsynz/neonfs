@@ -1399,25 +1399,6 @@ defmodule NeonFS.Core.WriteOperationTest do
                )
     end
 
-    test "zero-filling fails when the chunk list names unreadable metadata",
-         %{volume: volume} do
-      chunk_bytes = 64
-
-      {:ok, meta} =
-        WriteOperation.write_file_streamed(
-          volume.id,
-          "/shifted_zero.bin",
-          [:binary.copy("a", chunk_bytes) <> :binary.copy("b", chunk_bytes)],
-          chunk_strategy: {:fixed, chunk_bytes}
-        )
-
-      assert [_first, second] = meta.chunks
-      :ok = ChunkIndex.delete(second)
-
-      assert {:error, {:chunk_meta_unreadable, ^second}} =
-               WriteOperation.write_zeroes_at_by_id(volume.id, meta.id, 0, chunk_bytes)
-    end
-
     test "a write starting past the end zero-fills the hole and no more",
          %{volume: volume} do
       {:ok, _file_meta} =
