@@ -15,6 +15,9 @@ defmodule NeonFS.Block.Telemetry do
     * `[:neonfs, :block, :attached]` / `[:neonfs, :block, :detached]` —
       a device gaining or losing a holder. Measurement `holders`;
       metadata `export`.
+    * `[:neonfs, :block, :fenced]` — a device taken from every holder
+      because its epoch fell behind. Measurements `holders` and
+      `current_epoch`; metadata `export`.
     * `[:neonfs, :client, :chunk_reader, :chunk_fetched]` — emitted by
       `NeonFS.Client.ChunkReader` on this node, once per chunk a read
       fetched. Not a block event, which is why it is filtered to the
@@ -134,6 +137,14 @@ defmodule NeonFS.Block.Telemetry do
         event_name: [:neonfs, :block, :detached],
         tags: [:export],
         description: "Total device releases"
+      ),
+      # Worth alerting on rather than charting: a device is fenced when
+      # something took it, which either was an operator preempting a
+      # partitioned node or was not supposed to happen at all.
+      counter("neonfs.block.fenced.count",
+        event_name: [:neonfs, :block, :fenced],
+        tags: [:export],
+        description: "Total devices taken from their holders by a fencing epoch"
       )
     ]
   end

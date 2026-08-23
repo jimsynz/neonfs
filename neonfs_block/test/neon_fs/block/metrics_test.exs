@@ -11,6 +11,7 @@ defmodule NeonFS.Block.MetricsTest do
         [:neonfs, :block, :command],
         [:neonfs, :block, :attached],
         [:neonfs, :block, :detached],
+        [:neonfs, :block, :fenced],
         # Not a block event: `NeonFS.Client.ChunkReader` emits it on this
         # node for the reads `NeonFS.Block.Device` asks it to serve.
         [:neonfs, :client, :chunk_reader, :chunk_fetched]
@@ -20,6 +21,14 @@ defmodule NeonFS.Block.MetricsTest do
         assert metric.event_name in emitted,
                "#{inspect(metric.name)} listens for #{inspect(metric.event_name)}, which nothing emits"
       end
+    end
+
+    # A device taken from its holders is the one attachment event an operator
+    # has to see, so it is exported rather than only logged.
+    test "a fenced device is counted" do
+      names = Enum.map(Telemetry.metrics(), & &1.name)
+
+      assert [:neonfs, :block, :fenced, :count] in names
     end
 
     test "covers duration, count and bytes for commands" do

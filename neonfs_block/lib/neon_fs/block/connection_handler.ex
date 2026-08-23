@@ -268,6 +268,24 @@ defmodule NeonFS.Block.ConnectionHandler do
     {:continue, state}
   end
 
+  # A fenced holder does not get to carry on. Its epoch is behind the
+  # device's, so it can no longer write — and a connection that answers
+  # reads out of a map it cannot write is the worse half of the problem,
+  # because it looks healthy. The status goes out and the connection ends,
+  # and `DeviceRegistry` takes the device from every holder rather than only
+  # this one: the epoch is per device, so a bump fences the node.
+  defp reply_error(socket, request, {:fenced, current} = reason, state) do
+    Logger.warning("NBD device fenced; ending the connection",
+      command: request.type,
+      export: state.device.export,
+      current_epoch: current
+    )
+
+    :ok = Socket.send(socket, Protocol.encode_simple_reply(error_code(reason), request.cookie))
+    DeviceRegistry.fenced(state.device.export, current)
+    {:close, state}
+  end
+
   defp reply_error(socket, request, reason, state) do
     Logger.debug("NBD command failed",
       command: request.type,
@@ -277,6 +295,17 @@ defmodule NeonFS.Block.ConnectionHandler do
 
     :ok = Socket.send(socket, Protocol.encode_simple_reply(error_code(reason), request.cookie))
     {:continue, state}
+  end
+
+  @impl GenServer
+  def handle_info({:fenced, export, current}, {socket, state}) do
+    Logger.warning("NBD device fenced by another holder's write; closing",
+      export: export,
+      current_epoch: current
+    )
+
+    Socket.close(socket)
+    {:noreply, {socket, state}}
   end
 
   defp stream_to_socket(stream, socket) do
@@ -311,6 +340,14 @@ defmodule NeonFS.Block.ConnectionHandler do
   defp error_code(%{class: :forbidden}), do: :eperm
 
   defp error_code(:stale_chunks), do: :eagain
+
+  # NBD defines ESHUTDOWN as "the server is shutting down", which is what
+  # being fenced means for this device: it is not that the disk is broken,
+  # it is that this server has stopped serving it. `EIO` — the catch-all —
+  # would say the former, and a guest ext4 typically remounts read-only over
+  # one rather than letting the attach be retaken elsewhere.
+  defp error_code({:fenced, _current}), do: :eshutdown
+
   defp error_code(_reason), do: :eio
 
   # Every device operation goes through the behaviour rather than naming the

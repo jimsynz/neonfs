@@ -35,12 +35,29 @@ defmodule NeonFS.Block.DeviceRegistry do
   coordinator cannot be reached at all — a control-plane outage is exactly
   the window a split-brain double attach happens in.
 
+  ## Being fenced is not the same as being detached
+
+  Two clients reaching one device through this node are both admitted, which
+  the claim cannot prevent — so the fencing epoch is what tells a preempted
+  holder it has lost the device. A commit refused with `{:fenced, current}`
+  brings `fenced/3` here, and it takes the device from **every** holder
+  rather than the one that discovered it: the epoch is per device, so a bump
+  fences the node. A sibling connection that has only been reading is the
+  more dangerous of the two, because it looks healthy.
+
+  The claim is released there and then, rather than when the last holder
+  finishes closing. Waiting would make the preemption race the losers'
+  teardown, which is the opposite of what preempting a device is for.
+
   ## Telemetry
 
     * `[:neonfs, :block, :attached]` — Measurements: `holders`. Metadata:
       `export`.
     * `[:neonfs, :block, :detached]` — Measurements: `holders`, which is `0`
       when the device was released. Metadata: `export`.
+    * `[:neonfs, :block, :fenced]` — Measurements: `holders`, how many went
+      with the device, and `current_epoch`, what it lost to. Metadata:
+      `export`. A device taken out from under a guest is worth a line.
   """
 
   use GenServer
@@ -86,6 +103,26 @@ defmodule NeonFS.Block.DeviceRegistry do
   end
 
   @doc """
+  Drops a device every holder of which has been fenced, and tells them.
+
+  The fencing epoch is per *device*, not per connection, so a bump fences
+  the whole node's hold on it: the connection that discovered it at its own
+  write is not the only stale one, and a sibling that has only been reading
+  is the more dangerous of the two because it looks healthy.
+
+  Releases the attachment claim immediately rather than waiting for the last
+  holder to notice, so the device can be attached elsewhere without racing
+  the holders' teardown — which is the point of preempting it.
+
+  Idempotent: a device already gone is `:ok`, so two connections discovering
+  the same fence do not fight.
+  """
+  @spec fenced(export(), non_neg_integer(), GenServer.server()) :: :ok
+  def fenced(export, current_epoch, server \\ __MODULE__) do
+    GenServer.call(server, {:fenced, export, current_epoch}, 30_000)
+  end
+
+  @doc """
   The exports currently attached, and how many connections hold each.
   """
   @spec attached(GenServer.server()) :: %{export() => pos_integer()}
@@ -125,6 +162,19 @@ defmodule NeonFS.Block.DeviceRegistry do
     {:reply, :ok, note_detach(state, export, holder)}
   end
 
+  def handle_call({:fenced, export, current_epoch}, _from, state) do
+    case Map.fetch(state.devices, export) do
+      {:ok, %{holders: holders} = device} ->
+        emit_fenced(export, current_epoch, MapSet.size(holders))
+        release_claim(device)
+        Enum.each(holders, &send(&1, {:fenced, export, current_epoch}))
+        {:reply, :ok, forget_device(state, export, holders)}
+
+      :error ->
+        {:reply, :ok, state}
+    end
+  end
+
   def handle_call(:attached, _from, state) do
     counts =
       Map.new(state.devices, fn {export, %{holders: holders}} ->
@@ -161,6 +211,28 @@ defmodule NeonFS.Block.DeviceRegistry do
       {:ok, %{holders: holders}} -> MapSet.size(holders)
       :error -> 0
     end
+  end
+
+  # The device is dropped in one step rather than by draining holders: each
+  # of them is about to close, and a holder that closes against a device
+  # already forgotten is the idempotent `:error` branch of `drop_holder/4`.
+  defp forget_device(state, export, holders) do
+    state = %{state | devices: Map.delete(state.devices, export)}
+
+    Enum.reduce(holders, state, fn holder, acc ->
+      forget_holder(acc, holder, export, true)
+    end)
+  end
+
+  # A device taken out from under its guest with nothing in the log is the
+  # failure mode this project keeps designing out, so the fence says which
+  # epoch it lost to and how many connections went with it.
+  defp emit_fenced(export, current_epoch, holders) do
+    :telemetry.execute(
+      [:neonfs, :block, :fenced],
+      %{holders: holders, current_epoch: current_epoch},
+      %{export: export}
+    )
   end
 
   defp emit(event, export, holders) do
