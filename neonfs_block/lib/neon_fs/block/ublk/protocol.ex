@@ -2,11 +2,17 @@ defmodule NeonFS.Block.Ublk.Protocol do
   @moduledoc """
   The wire between the ublk helper process and this node.
 
-  A fixed binary header plus a raw payload, `{packet, 4}`-framed by the
-  socket. Not ETF: the ublk work exists for its numbers, and encoding and
+  A fixed binary header plus a raw payload, behind a four-byte big-endian
+  length. Not ETF: the ublk work exists for its numbers, and encoding and
   decoding a term per 4 KiB IO would put the codec in the measurement. The
   cost is a hand-rolled format on both sides, which is why it has tests on
   both sides.
+
+  The length prefix is written by hand rather than by `{packet, 4}`, because
+  the socket option wants the whole frame in one `send` and a read's payload
+  is a stream. Its size is known before its bytes are — it is what the guest
+  asked for — so the prefix goes out first and the chunks follow as they
+  arrive, and a read costs one chunk of memory rather than one request.
 
   ## Requests, helper to BEAM
 
@@ -63,11 +69,12 @@ defmodule NeonFS.Block.Ublk.Protocol do
   def op_code(op), do: Map.fetch!(@ops, op)
 
   @doc """
-  Decodes one request frame.
+  Decodes one request frame, its length prefix already consumed.
 
-  `:incomplete` is not a case here: `{packet, 4}` delivers whole frames, so
-  a short frame is a malformed one rather than a partial read — the
-  distinction that matters for NBD's byte stream does not arise.
+  `:incomplete` is not a case here: the caller reads the prefix and then
+  exactly that many bytes, so a short frame is a malformed one rather than a
+  partial read — the distinction that matters for NBD's byte stream does not
+  arise.
   """
   @spec decode_request(binary()) :: {:ok, request()} | {:error, term()}
   def decode_request(<<@version::8, op::8, tag::16, offset::64, length::32, data::binary>>) do
@@ -99,15 +106,15 @@ defmodule NeonFS.Block.Ublk.Protocol do
     do: {:error, {:unexpected_payload, op, byte_size(data)}}
 
   @doc """
-  Encodes a successful reply, with `data` for a read and empty otherwise.
+  A successful reply's header, declaring `payload_length` bytes to follow.
   """
-  @spec encode_ok(tag(), binary()) :: iodata()
-  def encode_ok(tag, data \\ <<>>) do
-    [<<@version::8, 0::8, tag::16, byte_size(data)::32>>, data]
+  @spec header_ok(tag(), non_neg_integer()) :: binary()
+  def header_ok(tag, payload_length \\ 0) do
+    <<@version::8, 0::8, tag::16, payload_length::32>>
   end
 
   @doc """
-  Encodes a failure as the errno the helper will hand the kernel.
+  A failure's header, carrying the errno the helper will hand the kernel.
 
   A reason with no mapping becomes `EIO`, which is the honest default for
   "this device could not serve that" — but the mappings that exist matter:
@@ -115,10 +122,28 @@ defmodule NeonFS.Block.Ublk.Protocol do
   this node has stopped serving, which is not the same claim as a broken
   disk.
   """
-  @spec encode_error(tag(), term()) :: iodata()
-  def encode_error(tag, reason) do
-    [<<@version::8, errno(reason)::8, tag::16, 0::32>>]
+  @spec header_error(tag(), term()) :: binary()
+  def header_error(tag, reason) do
+    <<@version::8, errno(reason)::8, tag::16, 0::32>>
   end
+
+  @doc "Prefixes a complete reply with its length."
+  @spec frame(iodata()) :: iodata()
+  def frame(reply), do: [<<IO.iodata_length(reply)::32>>, reply]
+
+  @doc """
+  The length prefix for a reply whose payload has yet to be produced.
+
+  The streaming counterpart of `frame/1`: a read's size is known from the
+  request, so the frame can be announced before a single chunk has been
+  fetched.
+  """
+  @spec prefix(non_neg_integer()) :: binary()
+  def prefix(payload_length), do: <<@reply_header_bytes + payload_length::32>>
+
+  @doc "The bytes of length that precede every frame in either direction."
+  @spec length_prefix_bytes() :: pos_integer()
+  def length_prefix_bytes, do: 4
 
   @doc "The errno a failure reason becomes on the wire."
   @spec errno(term()) :: pos_integer()

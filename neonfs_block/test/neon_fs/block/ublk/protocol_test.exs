@@ -64,23 +64,35 @@ defmodule NeonFS.Block.Ublk.ProtocolTest do
   end
 
   describe "encoding a reply" do
-    test "a success carries its payload's length, not the request's" do
-      data = :binary.copy(<<0xB2>>, 4096)
-
-      assert <<@version::8, 0::8, 3::16, length::32, ^data::binary>> =
-               Protocol.encode_ok(3, data) |> IO.iodata_to_binary()
-
-      assert length == 4096
+    test "a success declares the payload that will follow it" do
+      assert <<@version::8, 0::8, 3::16, 4096::32>> = Protocol.header_ok(3, 4096)
     end
 
-    test "a success with no payload is a bare header" do
-      assert <<@version::8, 0::8, 9::16, 0::32>> =
-               Protocol.encode_ok(9) |> IO.iodata_to_binary()
+    test "a success with no payload declares none" do
+      assert <<@version::8, 0::8, 9::16, 0::32>> = Protocol.header_ok(9)
     end
 
     test "a failure carries the errno and echoes the tag" do
-      assert <<@version::8, 11::8, 12::16, 0::32>> =
-               Protocol.encode_error(12, :stale_chunks) |> IO.iodata_to_binary()
+      assert <<@version::8, 11::8, 12::16, 0::32>> = Protocol.header_error(12, :stale_chunks)
+    end
+  end
+
+  # The prefix is what lets a read's payload be streamed: it is derived from
+  # the request, so it can go out before a single chunk has been fetched.
+  describe "framing" do
+    test "a complete reply is prefixed with its own length" do
+      header = Protocol.header_ok(1, 0)
+
+      assert <<8::32, ^header::binary>> = Protocol.frame(header) |> IO.iodata_to_binary()
+    end
+
+    test "a streamed reply's prefix counts the header and the payload to come" do
+      assert Protocol.prefix(4096) == <<8 + 4096::32>>
+      assert Protocol.prefix(0) == <<8::32>>
+    end
+
+    test "both directions agree on how long a length is" do
+      assert Protocol.length_prefix_bytes() == 4
     end
   end
 

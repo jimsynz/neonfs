@@ -198,7 +198,7 @@ defmodule NeonFS.Block.Ublk.Target do
       case :gen_tcp.listen(0, [
              {:ifaddr, {:local, path}},
              :binary,
-             packet: 4,
+             packet: :raw,
              active: false,
              reuseaddr: true
            ]) do

@@ -112,7 +112,7 @@ defmodule NeonFS.Block.Ublk.QueueTest do
   test "a frame it cannot read is refused rather than guessed at" do
     socket = connected_queue()
 
-    :ok = :gen_tcp.send(socket, <<@version + 1::8, 0::8, 3::16, 0::64, 512::32>>)
+    send_frame(socket, <<@version + 1::8, 0::8, 3::16, 0::64, 512::32>>)
 
     assert %{status: 5, tag: 0} = recv_reply(socket)
     refute_receive {:core, :read_stream, _offset, _length}
@@ -136,13 +136,13 @@ defmodule NeonFS.Block.Ublk.QueueTest do
     path = Path.join(System.tmp_dir!(), "ublk-test-#{System.unique_integer([:positive])}")
 
     {:ok, listener} =
-      :gen_tcp.listen(0, [{:ifaddr, {:local, path}}, :binary, packet: 4, active: false])
+      :gen_tcp.listen(0, [{:ifaddr, {:local, path}}, :binary, packet: :raw, active: false])
 
     test = self()
     server = spawn(fn -> Queue.serve(device, info, 0, listener) end)
 
     {:ok, socket} =
-      :gen_tcp.connect({:local, path}, 0, [:binary, packet: 4, active: false], 5_000)
+      :gen_tcp.connect({:local, path}, 0, [:binary, packet: :raw, active: false], 5_000)
 
     on_exit(fn ->
       :gen_tcp.close(listener)
@@ -160,15 +160,25 @@ defmodule NeonFS.Block.Ublk.QueueTest do
     frame =
       <<@version::8, Protocol.op_code(op)::8, tag::16, offset::64, length::32>> <> payload
 
-    :ok = :gen_tcp.send(socket, frame)
+    send_frame(socket, frame)
     recv_reply(socket)
   end
 
-  defp recv_reply(socket) do
-    {:ok, <<@version::8, status::8, tag::16, length::32, data::binary>>} =
-      :gen_tcp.recv(socket, 0, 5_000)
+  defp send_frame(socket, frame) do
+    :ok = :gen_tcp.send(socket, <<byte_size(frame)::32>>)
+    :ok = :gen_tcp.send(socket, frame)
+  end
 
-    assert byte_size(data) == length
+  # Reads exactly what the prefix names, which is what proves a streamed read
+  # announced its own length correctly: a frame that overstates it would hang
+  # here rather than arriving short.
+  defp recv_reply(socket) do
+    {:ok, <<length::32>>} = :gen_tcp.recv(socket, 4, 5_000)
+
+    {:ok, <<@version::8, status::8, tag::16, declared::32, data::binary>>} =
+      :gen_tcp.recv(socket, length, 5_000)
+
+    assert byte_size(data) == declared
     %{status: status, tag: tag, data: data}
   end
 end

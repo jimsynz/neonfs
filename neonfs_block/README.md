@@ -25,7 +25,8 @@ it. What differs is the transport and who initiates.
 
 The ublk helper (`native/neonfs_ublk`) is a small Rust binary: it owns the
 `io_uring` and ublk control ioctls and forwards every IO to the BEAM over a
-socket per queue. It carries no policy at all, which is the point — the half
+socket per queue, with a four-byte length in front of each frame in either
+direction. It carries no policy at all, which is the point — the half
 that needs a kernel feature the CI containers do not have is the half with
 nothing in it to get wrong, and everything decided about an IO is decided on
 the BEAM side where it is testable everywhere.

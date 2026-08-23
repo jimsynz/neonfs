@@ -106,7 +106,8 @@ pub fn write_frame<W: Write>(sink: &mut W, frame: &[u8]) -> io::Result<()> {
 }
 
 /// Reads one whole frame, or fails. A partial frame is not a case a caller
-/// has to handle: `{packet, 4}` is all-or-nothing in both directions.
+/// has to handle: the length is read first and then exactly that many bytes,
+/// so a frame is either whole or an error.
 pub fn read_frame<R: Read>(source: &mut R, buffer: &mut Vec<u8>) -> io::Result<()> {
     let mut length = [0u8; 4];
     source.read_exact(&mut length)?;
