@@ -201,6 +201,17 @@ defmodule NeonFS.TestCase do
 
   `opts` are forwarded to `commit_written/4`, so a test can pass `:epoch` or
   `:expect`.
+
+  ## It retries a contended commit, because a real caller does
+
+  `NeonFS.Block.Device` redoes a write whose extent moved under its read or
+  whose compare-and-swap ran out of attempts — losing a race is contention,
+  not a fault, and no guest ever sees it. A test driving this boundary
+  directly has no frontend in front of it, so without the same retry it
+  would assert against a failure mode no caller experiences. A queue of
+  concurrent publishers is exactly where that shows up.
+
+  An error that is not contention is returned unchanged.
   """
   @spec write_block_extent(String.t(), String.t(), non_neg_integer(), binary(), keyword()) ::
           {:ok, binary()} | {:error, term()}
@@ -217,11 +228,30 @@ defmodule NeonFS.TestCase do
         opts
       )
 
-    case BlockBacking.commit_written(volume_name, path, [{index, hash}], commit_opts) do
-      {:ok, _published} -> {:ok, hash}
-      {:error, _reason} = error -> error
+    commit_block_extent(volume_name, path, index, hash, commit_opts, 0)
+  end
+
+  @block_extent_retries 5
+
+  defp commit_block_extent(volume_name, path, index, hash, opts, attempt) do
+    case BlockBacking.commit_written(volume_name, path, [{index, hash}], opts) do
+      {:ok, _published} ->
+        {:ok, hash}
+
+      {:error, reason} = error ->
+        if attempt < @block_extent_retries and contended_commit?(reason) do
+          Process.sleep(10 * 2 ** attempt)
+          commit_block_extent(volume_name, path, index, hash, opts, attempt + 1)
+        else
+          error
+        end
     end
   end
+
+  defp contended_commit?(:stale_chunks), do: true
+  defp contended_commit?({:cas_retries_exhausted, _}), do: true
+  defp contended_commit?({_stage, {:cas_retries_exhausted, _}}), do: true
+  defp contended_commit?(_reason), do: false
 
   @doc """
   Adds drives to an already-bootstrapped cluster on the fast path:
