@@ -5,22 +5,20 @@ defmodule NeonFS.Core.BlockBackingTest do
   alias NeonFS.Core.{BlobStore, BlockBacking, BlockEpoch, BlockIndex, ChunkIndex}
   alias NeonFS.Core.WriteOperation
 
-  @moduletag :tmp_dir
-
   @chunk BlockBacking.chunk_bytes()
   @block 4096
 
   # The extent map is a real metadata tree, so these need a provisioned
   # cluster rather than the index GenServers alone — and the fencing epoch
-  # is a consensus read, so they need Ra as well.
-  setup %{tmp_dir: tmp_dir} do
-    {:ok, _cluster_id} = start_provisioned_cluster(tmp_dir)
+  # is a consensus read, so they need Ra as well. One cluster for the module:
+  # every test creates its own volume, so there is nothing here for a
+  # per-test cluster to isolate.
+  setup_all do
+    {:ok, _cluster_id, _dir} = start_shared_provisioned_cluster("block_backing")
+    :ok
+  end
 
-    on_exit(fn ->
-      stop_ra()
-      cleanup_test_dirs()
-    end)
-
+  setup do
     volume_name = "block-#{:rand.uniform(999_999)}"
     {:ok, volume} = create_provisioned_volume(volume_name)
 

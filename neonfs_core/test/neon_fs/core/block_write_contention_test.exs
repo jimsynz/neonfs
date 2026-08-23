@@ -20,10 +20,12 @@ defmodule NeonFS.Core.BlockWriteContentionTest do
   ## Why the commit deadline is raised here
 
   Every publication is its own commit through the volume's committer, which
-  serialises them: a queue of 32 is 32 metadata rounds one after another. At
-  the default 30 s deadline the last writer in the queue times out under a
-  loaded suite, which fails this test for a reason it is not about. What the
-  queueing costs belongs to the coalescing window and the bench.
+  serialises them: a queue of 32 is 32 metadata rounds one after another, so
+  the last writer waits for all of them. The deadline is raised because that
+  wait is the shape of the test rather than a fault in it — a runner slow
+  enough to push the tail past the default would fail this test for a reason
+  it is not about. What the queueing costs belongs to the coalescing window
+  and the bench.
   """
 
   use ExUnit.Case, async: false
@@ -31,22 +33,19 @@ defmodule NeonFS.Core.BlockWriteContentionTest do
 
   alias NeonFS.Core.{BlockBacking, BlockIndex, ChunkIndex}
 
-  @moduletag :tmp_dir
   @moduletag timeout: 300_000
 
   @chunk BlockBacking.chunk_bytes()
   @writers 32
 
-  setup %{tmp_dir: tmp_dir} do
+  setup_all do
     Application.put_env(:neonfs_core, :volume_commit_timeout_ms, 240_000)
-    {:ok, _cluster_id} = start_provisioned_cluster(tmp_dir)
+    on_exit(fn -> Application.delete_env(:neonfs_core, :volume_commit_timeout_ms) end)
+    {:ok, _cluster_id, _dir} = start_shared_provisioned_cluster("block_contention")
+    :ok
+  end
 
-    on_exit(fn ->
-      Application.delete_env(:neonfs_core, :volume_commit_timeout_ms)
-      stop_ra()
-      cleanup_test_dirs()
-    end)
-
+  setup do
     name = "blkcon-#{:rand.uniform(999_999)}"
     {:ok, volume} = NeonFS.Core.create_volume(name, type: :block, max_size: @writers * @chunk)
     {:ok, device} = BlockBacking.open_device(name, BlockBacking.device_path())

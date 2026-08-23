@@ -30,7 +30,6 @@ defmodule NeonFS.Core.BlockBackingBenchTest do
   alias NeonFS.Core.{BlockBacking, BlockIndex}
 
   @moduletag :benchmark
-  @moduletag :tmp_dir
   @moduletag timeout: 600_000
 
   @chunk BlockBacking.chunk_bytes()
@@ -43,16 +42,14 @@ defmodule NeonFS.Core.BlockBackingBenchTest do
   # is what says whether it does.
   @scaling_device_sizes [64 * @chunk, 512 * @chunk, 4096 * @chunk]
 
-  setup %{tmp_dir: tmp_dir} do
+  setup_all do
     Application.put_env(:neonfs_core, :volume_commit_timeout_ms, 240_000)
-    {:ok, _cluster_id} = start_provisioned_cluster(tmp_dir)
+    on_exit(fn -> Application.delete_env(:neonfs_core, :volume_commit_timeout_ms) end)
+    {:ok, _cluster_id, _dir} = start_shared_provisioned_cluster("block_bench")
+    :ok
+  end
 
-    on_exit(fn ->
-      Application.delete_env(:neonfs_core, :volume_commit_timeout_ms)
-      stop_ra()
-      cleanup_test_dirs()
-    end)
-
+  setup do
     {:ok, prefix: "block-bench-#{:rand.uniform(999_999)}"}
   end
 
