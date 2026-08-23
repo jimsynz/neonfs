@@ -748,19 +748,11 @@ k3s_assert_csi_ready() {
 
 # --- ublk ---------------------------------------------------------------------
 
-# Pinned to a commit rather than a tag: `ublksrv` publishes no releases, and
-# this is the one #2015 verified builds clean and serves I/O on a rig guest.
-# Read back by anything that caches the build, so the pin and the cache key
-# cannot drift apart.
-UBLKSRV_COMMIT="${UBLKSRV_COMMIT:-abbfea2b59184b26e7212ce3d4c47702450510df}"
-UBLKSRV_REPO="${UBLKSRV_REPO:-https://github.com/ublk-org/ublksrv.git}"
-UBLKSRV_SRC="${UBLKSRV_SRC:-/opt/ublksrv}"
-
-ublksrv_commit() { echo "${UBLKSRV_COMMIT}"; }
-
-# Debian ships `ublk_drv` but no `ublksrv` at all — not even a `-dev` package —
-# so the library the frontend links has to be built from source on the guest.
-# Everything else it needs (`liburing-dev`, autotools) is in the archive.
+# The ublk frontend links `libublk` (Rust) and ships its helper binary in the
+# `neonfs_block` release, so nothing has to be built on the guest: Debian's
+# `ublk_drv` module is the whole dependency. An earlier revision built the C
+# `ublksrv` from a pinned commit to borrow its `null` target as a probe — that
+# is gone with the target it probed.
 provision_ublk() {
   local i="$1"
 
@@ -771,29 +763,7 @@ provision_ublk() {
   node_ssh "$i" "test -c /dev/ublk-control" \
     || { warn "node ${i} has no /dev/ublk-control after modprobe"; return 77; }
 
-  if node_ssh "$i" "test -f ${UBLKSRV_SRC}/.neonfs-built-${UBLKSRV_COMMIT}"; then
-    log "ublksrv ${UBLKSRV_COMMIT:0:12} already built on node ${i}"
-    return 0
-  fi
-
-  log "building ublksrv ${UBLKSRV_COMMIT:0:12} on node ${i} (from source — Debian has no package)"
-  node_ssh "$i" "sudo apt-get update -qq"
-  node_ssh "$i" "sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q \
-    liburing-dev build-essential autoconf automake libtool pkg-config git"
-
-  # Checked out at the pin rather than cloned shallow at HEAD, so a rerun a
-  # month later builds the same thing this was verified against.
-  node_ssh "$i" "sudo rm -rf ${UBLKSRV_SRC} && sudo git clone -q ${UBLKSRV_REPO} ${UBLKSRV_SRC} \
-    && cd ${UBLKSRV_SRC} && sudo git checkout -q ${UBLKSRV_COMMIT}"
-
-  node_ssh "$i" "cd ${UBLKSRV_SRC} && sudo autoreconf -i >/dev/null 2>&1 \
-    && sudo ./configure >/dev/null 2>&1 && sudo make -j\$(nproc) >/dev/null 2>&1" \
-    || { warn "ublksrv failed to build on node ${i}"; return 1; }
-
-  node_ssh "$i" "cd ${UBLKSRV_SRC} && sudo make install >/dev/null 2>&1 && sudo ldconfig"
-  node_ssh "$i" "sudo touch ${UBLKSRV_SRC}/.neonfs-built-${UBLKSRV_COMMIT}"
-
-  log "ublksrv built and installed on node ${i}"
+  log "ublk_drv loaded on node ${i}"
 }
 
 # --- cluster bootstrap -----------------------------------------------------

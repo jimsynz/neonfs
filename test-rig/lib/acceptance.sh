@@ -652,58 +652,33 @@ acceptance_cleanup() {
 
 # --- ublk ---------------------------------------------------------------------
 #
-# The environment the ublk frontend (#2010) needs, proven rather than assumed:
-# the driver loads, the library builds, and a device attaches and serves I/O.
-# A `-t null` target because what is under test here is the ublk path itself —
-# a NeonFS-backed target is the frontend's job, not this step's.
+# What this proves is the *environment* the ublk frontend needs: the driver
+# loads, the control device appears, and the helper binary the release ships
+# is there to be spawned. Serving bytes over it needs something to attach the
+# device, which arrives with frontend selection — until then a step here could
+# only re-prove the driver using a target NeonFS does not use.
 
-UBLK_DEV="${UBLK_DEV:-/dev/ublkb0}"
-UBLK_IO_MIB="${UBLK_IO_MIB:-8}"
-
-s_ublk_provision() {
+s_ublk_driver() {
   local rc=0
   provision_ublk 1 || rc=$?
 
   case "${rc}" in
     0) : ;;
     77) echo "  ublk unavailable on this host" >&2; return 77 ;;
-    *) echo "  ublksrv provisioning failed" >&2; return 1 ;;
+    *) echo "  ublk driver provisioning failed" >&2; return 1 ;;
   esac
-
-  node_ssh 1 "test -x ${UBLKSRV_SRC}/ublk" 2>/dev/null \
-    || { echo "  ublksrv built but its ublk binary is missing" >&2; return 1; }
 }
 
-# Attach, round-trip through O_DIRECT, detach, and assert the device is gone —
-# a leaked ublk device outlives the test and takes its queue threads with it.
-s_ublk_roundtrip() {
-  node_ssh 1 "test -c /dev/ublk-control && test -x ${UBLKSRV_SRC}/ublk" 2>/dev/null \
+# The helper is built by `neonfs_block`'s own compile step and travels in the
+# release's `priv`, so its absence means the release was assembled without it
+# — which no test of the BEAM side would notice.
+s_ublk_helper() {
+  node_ssh 1 "test -c /dev/ublk-control" 2>/dev/null \
     || { echo "  ublk not provisioned — see the previous step" >&2; return 77; }
 
-  node_ssh 1 "cd ${UBLKSRV_SRC} && sudo ./ublk add -t null -q 1 -d 64" 2>&1 \
-    | sed 's/^/  /' >&2
-
-  node_ssh 1 "for i in \$(seq 1 20); do test -b ${UBLK_DEV} && exit 0; sleep 1; done; exit 1" \
-    2>/dev/null || { echo "  ${UBLK_DEV} never appeared" >&2; ublk_cleanup; return 1; }
-
-  if ! node_ssh 1 "sudo dd if=/dev/zero of=${UBLK_DEV} bs=1M count=${UBLK_IO_MIB} oflag=direct \
-    && sudo dd if=${UBLK_DEV} of=/dev/null bs=1M count=${UBLK_IO_MIB} iflag=direct" 2>&1 \
-    | sed 's/^/  /' >&2; then
-    ublk_cleanup
-    echo "  O_DIRECT round trip failed against ${UBLK_DEV}" >&2
-    return 1
-  fi
-
-  ublk_cleanup
-
-  node_ssh 1 "test -b ${UBLK_DEV}" 2>/dev/null \
-    && { echo "  ${UBLK_DEV} survived deletion" >&2; return 1; }
-
-  :
-}
-
-ublk_cleanup() {
-  node_ssh 1 "cd ${UBLKSRV_SRC} && sudo ./ublk del -n 0 >/dev/null 2>&1" 2>/dev/null || true
+  node_ssh 1 "sudo find ${OMNIBUS_ROOT:-/usr/lib/neonfs/omnibus} -type f -name neonfs_ublk \
+    -perm -u+x -print -quit | grep -q ." 2>/dev/null \
+    || { echo "  the release ships no executable neonfs_ublk helper" >&2; return 1; }
 }
 
 acceptance_run() {
@@ -733,8 +708,8 @@ acceptance_run() {
   step "block device detach (data survives)"         s_block_detach
   step "volume show reflects stored data"           s_volume_stats
   step "FUSE unmount does not wedge control plane"  s_fuse_unmount_resilience
-  step "ublk driver + ublksrv provisioned"           s_ublk_provision
-  step "ublk device attach + O_DIRECT round trip"     s_ublk_roundtrip
+  step "ublk driver loaded"                          s_ublk_driver
+  step "ublk helper present in the release"          s_ublk_helper
   step "replication across nodes"                   s_replication
 
   acceptance_cleanup

@@ -13,6 +13,7 @@ defmodule NeonFS.Block.MixProject do
     [
       aliases: aliases(),
       app: :neonfs_block,
+      compilers: Mix.compilers() ++ [:neonfs_ublk],
       consolidate_protocols: Mix.env() != :dev,
       deps: deps(),
       description: @moduledoc,
@@ -51,7 +52,9 @@ defmodule NeonFS.Block.MixProject do
   end
 
   defp aliases, do: []
-  defp dialyzer, do: [ignore_warnings: ".dialyzer_ignore.exs"]
+  # `:mix` because this project ships a compiler task, and without it the
+  # task's own module is unanalysable rather than merely unchecked.
+  defp dialyzer, do: [ignore_warnings: ".dialyzer_ignore.exs", plt_add_apps: [:mix]]
   defp docs, do: [main: "readme", extras: ["README.md"]]
   defp elixirc_paths(:test), do: ["lib", "test/support"]
   defp elixirc_paths(_), do: ["lib"]

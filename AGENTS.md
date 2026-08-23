@@ -194,7 +194,7 @@ Release notes live in [`CHANGELOG.md`](CHANGELOG.md), generated from conventiona
 
 Releases are cut with `resources/scripts/neonfs-release`, which runs `mix git_ops.release` in the release tooling project at `resources/release/` (the repository root has no Mix project).
 
-`git_ops` bumps the `version =` field in every Elixir `mix.exs` and every Rust `Cargo.toml` it tracks, but **does not** regenerate the three workspace `Cargo.lock` files (`neonfs_core/`, `neonfs-cli/`, `neonfs_client/native/neonfs_chunker/`). After a release commit, run `cargo update -p <workspace-package>` in each workspace and commit the lockfile changes — otherwise the next clean checkout's first `cargo build` produces an uncommitted lockfile drift (`<pkg> v0.1.0 → v<new>`) that shows up in every subsequent `git status`.
+`git_ops` bumps the `version =` field in every Elixir `mix.exs` and every Rust `Cargo.toml` it tracks, but **does not** regenerate the four workspace `Cargo.lock` files (`neonfs_core/`, `neonfs-cli/`, `neonfs_client/native/neonfs_chunker/`, `neonfs_block/native/neonfs_ublk/`). After a release commit, run `cargo update -p <workspace-package>` in each workspace and commit the lockfile changes — otherwise the next clean checkout's first `cargo build` produces an uncommitted lockfile drift (`<pkg> v0.1.0 → v<new>`) that shows up in every subsequent `git status`.
 
 ## Testing
 

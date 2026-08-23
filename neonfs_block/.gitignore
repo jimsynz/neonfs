@@ -7,3 +7,6 @@ erl_crash.dump
 *.ez
 neonfs_block-*.tar
 .elixir_ls
+
+# Rust binary artifacts
+target/

@@ -2,8 +2,8 @@ defmodule NeonFS.Block.Supervisor do
   @moduledoc """
   Top-level supervisor for `neonfs_block`.
 
-  Owns the device registry, the NBD listener, and the registrar that
-  advertises this node as a `:block` service.
+  Owns the device registry, this node's ublk attachments, the NBD listener,
+  and the registrar that advertises this node as a `:block` service.
 
   The registry starts whether or not the listener does, and before it: a
   device outlives any one connection, so the thing tracking attachments must
@@ -27,7 +27,7 @@ defmodule NeonFS.Block.Supervisor do
 
   use Supervisor
 
-  alias NeonFS.Block.{DeviceRegistry, Listener, MetricsSupervisor}
+  alias NeonFS.Block.{DeviceRegistry, Listener, MetricsSupervisor, Ublk}
   alias NeonFS.Client.Registrar
 
   @spec start_link(keyword()) :: Supervisor.on_start()
@@ -40,7 +40,12 @@ defmodule NeonFS.Block.Supervisor do
     register? = Application.get_env(:neonfs_block, :register_service, true)
 
     children =
-      [DeviceRegistry, Listener.child_spec(opts)]
+      [
+        DeviceRegistry,
+        {Registry, keys: :unique, name: Ublk.Supervisor.registry()},
+        Ublk.Supervisor,
+        Listener.child_spec(opts)
+      ]
       |> maybe_add_registrar(register?)
       |> Kernel.++(metrics_children())
 
@@ -67,10 +72,18 @@ defmodule NeonFS.Block.Supervisor do
   # knows what the listener bound.
   defp registration_metadata do
     %{
-      capabilities: [:nbd],
+      capabilities: capabilities(),
       nbd_endpoint: {advertised_host(), Listener.port()},
       version: to_string(Application.spec(:neonfs_block, :vsn) || "0.0.0")
     }
+  end
+
+  # A host without the ublk driver cannot serve a ublk device at all, so
+  # advertising the capability there would have a caller choose a frontend
+  # this node will then refuse. It is decided at registration because the
+  # driver does not appear and disappear under a running node.
+  defp capabilities do
+    if Ublk.Target.available?(), do: [:nbd, :ublk], else: [:nbd]
   end
 
   # A loopback bind is only reachable from the node itself, and telling a
