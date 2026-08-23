@@ -50,8 +50,13 @@ defmodule NeonFS.Block.DeviceTest do
       Application.delete_env(:neonfs_block, :failing_commits)
     end)
 
-    {:ok, device} = Device.open(@export)
-    {:ok, device: device}
+    # An attached device has a write window, because that is what
+    # `DeviceRegistry` gives it. Driving `Device` without one would be
+    # driving something that cannot exist.
+    {:ok, opened} = Device.open(@export)
+    window = start_supervised!({NeonFS.Block.WriteWindow, opened})
+
+    {:ok, device: Map.put(opened, :window, window)}
   end
 
   describe "read_stream/3" do
@@ -101,6 +106,7 @@ defmodule NeonFS.Block.DeviceTest do
       write_extents([0])
 
       assert :ok = Device.write(device, 0, :binary.copy(<<0xAA>>, @chunk))
+      assert :ok = Device.flush(device)
 
       refute_received {:fetched, 0, _opts}
       assert_received {:written, [@chunk]}
@@ -110,6 +116,7 @@ defmodule NeonFS.Block.DeviceTest do
       write_extents([0])
 
       assert :ok = Device.write(device, @block, :binary.copy(<<0xBB>>, @block))
+      assert :ok = Device.flush(device)
 
       assert_received {:fetched, 0, _opts}
       assert_received {:written, [@chunk]}
@@ -123,6 +130,7 @@ defmodule NeonFS.Block.DeviceTest do
 
       # Covers extent 0's tail and all of extent 1.
       assert :ok = Device.write(device, @chunk - @block, :binary.copy(<<0xCC>>, @chunk + @block))
+      assert :ok = Device.flush(device)
 
       assert_received {:core_call, :commit_written, [_volume, _path, extents, opts]}
       assert [{0, _}, {1, _}] = extents
@@ -131,6 +139,7 @@ defmodule NeonFS.Block.DeviceTest do
 
     test "stamps the commit with the attachment's epoch", %{device: device} do
       assert :ok = Device.write(device, 0, :binary.copy(<<1>>, @chunk))
+      assert :ok = Device.flush(device)
 
       assert_received {:core_call, :commit_written, [_volume, _path, _extents, opts]}
       assert Keyword.fetch!(opts, :epoch) == 0
@@ -138,6 +147,7 @@ defmodule NeonFS.Block.DeviceTest do
 
     test "one data-plane call places every extent the write spans", %{device: device} do
       assert :ok = Device.write(device, 0, :binary.copy(<<2>>, 3 * @chunk))
+      assert :ok = Device.flush(device)
 
       assert_received {:written, [@chunk, @chunk, @chunk]}
       refute_received {:written, _sizes}
@@ -154,6 +164,7 @@ defmodule NeonFS.Block.DeviceTest do
 
       fail_commits(1, :stale_chunks)
       assert :ok = Device.write(device, 0, :binary.copy(<<1>>, @block))
+      assert :ok = Device.flush(device)
     end
 
     test "retries a commit whose compare-and-swap ran out of attempts", %{device: device} do
@@ -162,13 +173,15 @@ defmodule NeonFS.Block.DeviceTest do
 
       fail_commits(1, {:chunk_index_failed, {:cas_retries_exhausted, %{}}})
       assert :ok = Device.write(device, 0, :binary.copy(<<1>>, @block))
+      assert :ok = Device.flush(device)
     end
 
     # An error that is not contention is the caller's answer, not something
     # to grind against.
     test "does not retry an error that is not contention", %{device: device} do
       fail_commits(99, :eperm)
-      assert {:error, :eperm} = Device.write(device, 0, :binary.copy(<<1>>, @block))
+      assert :ok = Device.write(device, 0, :binary.copy(<<1>>, @block))
+      assert {:error, :eperm} = Device.flush(device)
     end
   end
 

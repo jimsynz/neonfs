@@ -18,6 +18,9 @@ defmodule NeonFS.Block.Telemetry do
     * `[:neonfs, :block, :fenced]` — a device taken from every holder
       because its epoch fell behind. Measurements `holders` and
       `current_epoch`; metadata `export`.
+    * `[:neonfs, :block, :window_drain]` — one write-window drain.
+      Measurements `extents`, `writes`, `chunk_bytes` and `duration`;
+      metadata `export` and `reason`.
     * `[:neonfs, :client, :chunk_reader, :chunk_fetched]` — emitted by
       `NeonFS.Client.ChunkReader` on this node, once per chunk a read
       fetched. Not a block event, which is why it is filtered to the
@@ -33,18 +36,24 @@ defmodule NeonFS.Block.Telemetry do
   so the ratio is taken at query time rather than baked into a gauge
   that cannot be re-aggregated:
 
-      neonfs_block_command_chunk_bytes{command="write"}
+      neonfs_block_window_drain_chunk_bytes
         / neonfs_block_command_bytes{command="write"}
 
       neonfs_block_read_chunk_bytes / neonfs_block_command_bytes{command="read"}
 
-  The two numerators come from different places because the measurement
-  does. A write's cost is the extents it rewrote, which the write path
-  counts as it places them; a read's is the chunks it fetched, which only
-  the client library that fetched them knows. Neither is computable from
-  the request's own offset and length, which would give an upper bound
-  rather than a measurement — a sparse device's unwritten region reads as
-  zeroes with no chunk fetched at all.
+  A write's numerator is the **drain's**, not the write's. A buffered write
+  has moved nothing yet, so charging its amplification to its own command
+  event would report a cost that had not been paid — and the whole point of
+  the window is that sixteen writes into one extent pay it once. The
+  coalescing itself is the same two numbers the other way up:
+
+      neonfs_block_window_drain_writes / neonfs_block_window_drain_extents
+
+  A read's numerator is the chunks it fetched, which only the client library
+  that fetched them knows. Neither is computable from the request's own
+  offset and length, which would give an upper bound rather than a
+  measurement — a sparse device's unwritten region reads as zeroes with no
+  chunk fetched at all.
 
   A zero-fill is on the `chunk_bytes` numerator too, but its ratio is not
   the number to watch: it rewrites only the extents it clips, so a
@@ -100,8 +109,34 @@ defmodule NeonFS.Block.Telemetry do
         event_name: [:neonfs, :block, :command],
         measurement: :chunk_bytes,
         tags: [:export, :command],
-        keep: &(&1.command in [:write, :write_zeroes]),
-        description: "Chunk-layer bytes rewritten to serve block writes and zero-fills"
+        keep: &(&1.command == :write_zeroes),
+        description: "Chunk-layer bytes rewritten to serve block zero-fills"
+      ),
+      sum("neonfs.block.window_drain.chunk_bytes",
+        event_name: [:neonfs, :block, :window_drain],
+        measurement: :chunk_bytes,
+        tags: [:export],
+        description: "Chunk-layer bytes the write window landed"
+      ),
+      sum("neonfs.block.window_drain.writes",
+        event_name: [:neonfs, :block, :window_drain],
+        measurement: :writes,
+        tags: [:export],
+        description: "Guest writes the write window absorbed"
+      ),
+      sum("neonfs.block.window_drain.extents",
+        event_name: [:neonfs, :block, :window_drain],
+        measurement: :extents,
+        tags: [:export],
+        description: "Extents the write window committed"
+      ),
+      distribution("neonfs.block.window_drain.duration",
+        event_name: [:neonfs, :block, :window_drain],
+        measurement: :duration,
+        unit: {:native, :second},
+        tags: [:export, :reason],
+        description: "Duration of write-window drains",
+        reporter_options: [buckets: @io_buckets]
       ),
       sum("neonfs.block.command.chunks_replaced",
         event_name: [:neonfs, :block, :command],
