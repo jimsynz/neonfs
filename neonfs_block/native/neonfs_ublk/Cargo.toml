@@ -1,0 +1,19 @@
+[package]
+name = "neonfs_ublk"
+version = "0.6.1"
+edition = "2021"
+license = "Apache-2.0"
+description = "ublk frontend helper for a NeonFS block device"
+publish = false
+
+[[bin]]
+name = "neonfs_ublk"
+path = "src/main.rs"
+
+[dependencies]
+# Pure Rust rather than the C `libublksrv`: a static binary has nothing to
+# provision on a guest and nothing to ship alongside it in a container.
+libublk = "0.4"
+
+[profile.release]
+strip = true

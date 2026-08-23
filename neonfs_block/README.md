@@ -1,13 +1,47 @@
 # NeonFS Block
 
-Serves NeonFS volumes as Linux block devices over the Network Block Device
-protocol.
+Serves NeonFS volumes as Linux block devices, over the Network Block Device
+protocol or — on a host whose kernel has `ublk_drv` — directly through
+`io_uring`.
 
 A device is one sized file in a NeonFS volume, written through
 `NeonFS.Core.BlockBacking` with a forced fixed chunk size so a guest write
 lands on a predictable chunk boundary. Reads pull chunks over the TLS data
 plane; a guest flush or FUA maps onto the volume's durability barrier and is
 never acknowledged early.
+
+## Frontends
+
+Both frontends answer the same `NeonFS.Block.Frontend` callbacks against the
+same IO core, so the device's behaviour does not depend on how a guest reached
+it. What differs is the transport and who initiates.
+
+| | NBD | ublk |
+| --- | --- | --- |
+| Reached by | a client dialling the listener | this node attaching the device |
+| Per-device process | `NeonFS.Block.ConnectionHandler` | `NeonFS.Block.Ublk.Target` |
+| Transport | TCP | `io_uring`, via a helper process on Unix sockets |
+| Needs | nothing on the host | `ublk_drv`, i.e. `/dev/ublk-control` |
+
+The ublk helper (`native/neonfs_ublk`) is a small Rust binary: it owns the
+`io_uring` and ublk control ioctls and forwards every IO to the BEAM over a
+socket per queue, with a four-byte length in front of each frame in either
+direction. It carries no policy at all, which is the point — the half
+that needs a kernel feature the CI containers do not have is the half with
+nothing in it to get wrong, and everything decided about an IO is decided on
+the BEAM side where it is testable everywhere.
+
+It is compiled by `neonfs_block`'s own `mix compile` (see
+`Mix.Tasks.Compile.NeonfsUblk`) even on hosts that cannot run it, so building
+this package needs **`libclang-dev`** — `libublk-rs-sys` generates the ublk
+bindings with bindgen, which loads `libclang` at build time. Both halves
+of `NeonFS.Block.Ublk.Protocol` are hand-rolled against one written layout, so
+compiling them together is what stops a change to one side reaching a host
+with ublk before anything notices.
+
+`NeonFS.Block.Ublk.Supervisor.attach/2` takes the device; a node without the
+driver refuses the attach rather than failing later, and does not advertise the
+`:ublk` capability at all.
 
 ## Encryption
 

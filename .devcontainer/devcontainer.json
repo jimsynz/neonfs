@@ -27,7 +27,7 @@
   "features": {
     "ghcr.io/devcontainers/features/github-cli": {},
     "ghcr.io/devcontainers-extra/features/apt-packages:1": {
-      "packages": "autoconf,m4,libwxgtk3.2-dev,libwxgtk-webview3.2-dev,libgl1-mesa-dev,libglu1-mesa-dev,libpng-dev,libssh-dev,unixodbc-dev,xsltproc,fop,libxml2-utils,libncurses-dev,libfuse3-dev,fuse3,e2fsprogs,mount"
+      "packages": "autoconf,m4,libwxgtk3.2-dev,libwxgtk-webview3.2-dev,libgl1-mesa-dev,libglu1-mesa-dev,libpng-dev,libssh-dev,unixodbc-dev,xsltproc,fop,libxml2-utils,libncurses-dev,libclang-dev,libfuse3-dev,fuse3,e2fsprogs,mount"
     },
     "ghcr.io/devcontainer-community/devcontainer-features/asdf-vm.com:1": {},
     "ghcr.io/anthropics/devcontainer-features/claude-code:1": {},

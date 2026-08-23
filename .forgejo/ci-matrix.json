@@ -11,8 +11,9 @@
   },
   {
     "name": "neonfs_block",
-    "cache_paths": "neonfs_client/deps\nneonfs_client/_build\nneonfs_client/native/neonfs_chunker/target\nneonfs_client/priv/native\nneonfs_block/deps\nneonfs_block/_build",
-    "lockfiles": "neonfs_block/mix.lock neonfs_client/native/neonfs_chunker/Cargo.lock"
+    "apt": "libclang-dev",
+    "cache_paths": "neonfs_client/deps\nneonfs_client/_build\nneonfs_client/native/neonfs_chunker/target\nneonfs_client/priv/native\nneonfs_block/deps\nneonfs_block/_build\nneonfs_block/native/neonfs_ublk/target",
+    "lockfiles": "neonfs_block/mix.lock neonfs_block/native/neonfs_ublk/Cargo.lock neonfs_client/native/neonfs_chunker/Cargo.lock"
   },
   {
     "name": "neonfs_fuse",
@@ -67,7 +68,8 @@
   },
   {
     "name": "neonfs_omnibus",
-    "cache_paths": "neonfs_client/deps\nneonfs_client/_build\nneonfs_client/native/neonfs_chunker/target\nneonfs_client/priv/native\nneonfs_core/target\nneonfs_core/priv/native\nneonfs_block/deps\nneonfs_block/_build\nneonfs_omnibus/deps\nneonfs_omnibus/_build",
-    "lockfiles": "neonfs_omnibus/mix.lock neonfs_block/mix.lock neonfs_core/Cargo.lock neonfs_client/native/neonfs_chunker/Cargo.lock"
+    "apt": "libclang-dev",
+    "cache_paths": "neonfs_client/deps\nneonfs_client/_build\nneonfs_client/native/neonfs_chunker/target\nneonfs_client/priv/native\nneonfs_core/target\nneonfs_core/priv/native\nneonfs_block/deps\nneonfs_block/_build\nneonfs_block/native/neonfs_ublk/target\nneonfs_omnibus/deps\nneonfs_omnibus/_build",
+    "lockfiles": "neonfs_omnibus/mix.lock neonfs_block/mix.lock neonfs_block/native/neonfs_ublk/Cargo.lock neonfs_core/Cargo.lock neonfs_client/native/neonfs_chunker/Cargo.lock"
   }
 ]
