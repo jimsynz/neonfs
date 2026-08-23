@@ -15,6 +15,10 @@ defmodule NeonFS.Integration.BlockBackingTest do
   `factor: 2, min_copies: 2` for that reason: the integration suite's
   default durability is single-copy, under which nothing here could be
   distinguished from a local read.
+
+  Extents are published the way an interface node publishes them — the
+  chunk placed on a node's blob store, then `commit_written/4` verifying
+  that claim and publishing the map. There is no other device write path.
   """
 
   use NeonFS.TestSupport.ClusterCase, async: false
@@ -54,16 +58,12 @@ defmodule NeonFS.Integration.BlockBackingTest do
     overwritten_at = 2 * @chunk
     untouched_at = 5 * @chunk
 
-    {:ok, _} =
-      block_rpc(cluster, :node1, :write, [@volume, device.path, overwritten_at, stale])
-
-    {:ok, _} =
-      block_rpc(cluster, :node1, :write, [@volume, device.path, untouched_at, untouched])
+    {:ok, _} = publish(cluster, device, 2, extent(stale))
+    {:ok, _} = publish(cluster, device, 5, extent(untouched))
 
     :ok = block_rpc(cluster, :node1, :flush, [@volume, device.path])
 
-    {:ok, _} =
-      block_rpc(cluster, :node1, :write, [@volume, device.path, overwritten_at, fresh])
+    {:ok, _} = publish(cluster, device, 2, extent(fresh))
 
     :ok = block_rpc(cluster, :node1, :flush, [@volume, device.path])
 
@@ -91,16 +91,16 @@ defmodule NeonFS.Integration.BlockBackingTest do
     {:ok, device} =
       block_rpc(cluster, :node1, :create_device, [@volume, @device, @device_chunks * @chunk])
 
-    payload = :binary.copy(<<0xD4>>, 2 * @chunk)
+    kept = :binary.copy(<<0xD4>>, @chunk)
 
-    {:ok, _} = block_rpc(cluster, :node1, :write, [@volume, device.path, 0, payload])
+    {:ok, _} = publish(cluster, device, 0, kept)
+    {:ok, _} = publish(cluster, device, 1, kept)
     :ok = block_rpc(cluster, :node1, :flush, [@volume, device.path])
 
-    # The cost rides back on the reply, which is why it is returned rather
-    # than only emitted: node1's telemetry is invisible to an exporter on
-    # the interface node that asked for the zero-fill.
-    assert {:ok, %{chunks_replaced: 1, chunks_rewritten: 0, chunk_bytes: 0}} =
-             block_rpc(cluster, :node1, :write_zeroes, [@volume, device.path, 0, @chunk])
+    # Discarding an extent drops it from the map. Nothing is written in its
+    # place, which is exactly why the bytes it held must not come back.
+    assert {:ok, _published} =
+             block_rpc(cluster, :node1, :commit_written, [@volume, device.path, [{0, :hole}]])
 
     :ok = block_rpc(cluster, :node1, :flush, [@volume, device.path])
 
@@ -114,6 +114,33 @@ defmodule NeonFS.Integration.BlockBackingTest do
              block_rpc(cluster, :node2, :read, [@volume, device.path, @chunk, @block])
 
     assert kept == :binary.copy(<<0xD4>>, @block)
+  end
+
+  # An extent's worth of one byte, since a device write is whole extents.
+  defp extent(block), do: :binary.copy(block, div(@chunk, byte_size(block)))
+
+  # Places the chunk on node1's blob store — what an interface node does over
+  # the data plane — and publishes the extent that names it.
+  defp publish(cluster, device, index, bytes) do
+    hash = :crypto.hash(:sha256, bytes)
+    node1 = PeerCluster.get_node!(cluster, :node1).node
+
+    {:ok, ^hash, _info} =
+      PeerCluster.rpc(cluster, :node1, NeonFS.Core.BlobStore, :write_chunk, [
+        bytes,
+        "default",
+        "hot"
+      ])
+
+    block_rpc(cluster, :node1, :commit_written, [
+      @volume,
+      device.path,
+      [{index, hash}],
+      [
+        locations: %{hash => [%{node: node1, drive_id: "default", tier: :hot}]},
+        chunk_codecs: %{hash => %{compression: :none, crypto: nil}}
+      ]
+    ])
   end
 
   defp block_rpc(cluster, node, function, args) do

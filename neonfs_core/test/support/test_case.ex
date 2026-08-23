@@ -31,6 +31,7 @@ defmodule NeonFS.TestCase do
 
   alias NeonFS.Core.{
     BlobStore,
+    BlockBacking,
     Drive,
     DriveConfig,
     DriveManager,
@@ -148,6 +149,39 @@ defmodule NeonFS.TestCase do
     start_ra()
 
     ClusterInit.init_cluster(cluster_name, drive_config)
+  end
+
+  @doc """
+  Writes one extent of a block device the way an interface node does: the
+  bytes go to this node's blob store over what would be the data plane, and
+  `BlockBacking.commit_written/4` verifies the claim and publishes the map.
+
+  There is no core-side device write path to reach for instead — the device's
+  IO lives on the interface node — so a core test that needs an extent to
+  hold something goes the same way a real writer does.
+
+  `opts` are forwarded to `commit_written/4`, so a test can pass `:epoch` or
+  `:expect`.
+  """
+  @spec write_block_extent(String.t(), String.t(), non_neg_integer(), binary(), keyword()) ::
+          {:ok, binary()} | {:error, term()}
+  def write_block_extent(volume_name, path, index, bytes, opts \\ []) do
+    hash = :crypto.hash(:sha256, bytes)
+    {:ok, ^hash, _info} = BlobStore.write_chunk(bytes, "default", "hot")
+
+    commit_opts =
+      Keyword.merge(
+        [
+          locations: %{hash => [%{node: node(), drive_id: "default", tier: :hot}]},
+          chunk_codecs: %{hash => %{compression: :none, crypto: nil}}
+        ],
+        opts
+      )
+
+    case BlockBacking.commit_written(volume_name, path, [{index, hash}], commit_opts) do
+      {:ok, _published} -> {:ok, hash}
+      {:error, _reason} = error -> error
+    end
   end
 
   @doc """

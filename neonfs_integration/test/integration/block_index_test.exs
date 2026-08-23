@@ -136,21 +136,42 @@ defmodule NeonFS.Integration.BlockIndexTest do
     payload = :binary.copy(<<0xE5>>, @chunk)
     device_path = PeerCluster.rpc(cluster, :node1, NeonFS.Core.BlockBacking, :device_path, [])
 
-    # A device write is the whole setup: it places the chunk and publishes
-    # the extent naming it, and there is no file anywhere in the volume. So
-    # the extent map is the only reference by construction — the state every
-    # chunk of a block device is in.
-    {:ok, _cost} =
+    # A device write is the whole setup: the chunk goes to a blob store and
+    # the extent naming it is published, with no file anywhere in the volume.
+    # So the extent map is the only reference by construction — the state
+    # every chunk of a block device is in.
+    hash = :crypto.hash(:sha256, payload)
+    node1 = PeerCluster.get_node!(cluster, :node1).node
+
+    {:ok, ^hash, _info} =
+      PeerCluster.rpc(
+        cluster,
+        :node1,
+        NeonFS.Core.BlobStore,
+        :write_chunk,
+        [payload, "default", "hot"],
+        120_000
+      )
+
+    {:ok, _published} =
       PeerCluster.rpc(
         cluster,
         :node1,
         NeonFS.Core.BlockBacking,
-        :write,
-        [@block_volume, device_path, 2 * @chunk, payload],
+        :commit_written,
+        [
+          @block_volume,
+          device_path,
+          [{2, hash}],
+          [
+            locations: %{hash => [%{node: node1, drive_id: "default", tier: :hot}]},
+            chunk_codecs: %{hash => %{compression: :none, crypto: nil}}
+          ]
+        ],
         120_000
       )
 
-    assert {:ok, {:chunk, hash}} = block_index(cluster, :node1, :get, [@block_volume, 2])
+    assert {:ok, {:chunk, ^hash}} = block_index(cluster, :node1, :get, [@block_volume, 2])
 
     {:ok, volume} =
       PeerCluster.rpc(cluster, :node1, NeonFS.Core.VolumeRegistry, :get_by_name, [@block_volume])

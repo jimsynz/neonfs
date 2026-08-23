@@ -47,6 +47,7 @@ defmodule NeonFS.Block.DeviceTest do
       Application.delete_env(:neonfs_block, :write_chunks_fn)
       Application.delete_env(:neonfs_block, :fetch_chunk_fn)
       Application.delete_env(:neonfs_block, :written_extents)
+      Application.delete_env(:neonfs_block, :failing_commits)
     end)
 
     {:ok, device} = Device.open(@export)
@@ -143,6 +144,34 @@ defmodule NeonFS.Block.DeviceTest do
     end
   end
 
+  # Losing a race is not a device fault. The metadata layer answers both of
+  # these when a burst of writes collides with itself, and a guest that is
+  # handed an IO error for one remounts read-only over a queue depth.
+  describe "contended writes" do
+    test "retries a commit whose extent moved under its read", %{device: device} do
+      Application.put_env(:neonfs_block, :stale_write_backoff_ms, 1)
+      on_exit(fn -> Application.delete_env(:neonfs_block, :stale_write_backoff_ms) end)
+
+      fail_commits(1, :stale_chunks)
+      assert :ok = Device.write(device, 0, :binary.copy(<<1>>, @block))
+    end
+
+    test "retries a commit whose compare-and-swap ran out of attempts", %{device: device} do
+      Application.put_env(:neonfs_block, :stale_write_backoff_ms, 1)
+      on_exit(fn -> Application.delete_env(:neonfs_block, :stale_write_backoff_ms) end)
+
+      fail_commits(1, {:chunk_index_failed, {:cas_retries_exhausted, %{}}})
+      assert :ok = Device.write(device, 0, :binary.copy(<<1>>, @block))
+    end
+
+    # An error that is not contention is the caller's answer, not something
+    # to grind against.
+    test "does not retry an error that is not contention", %{device: device} do
+      fail_commits(99, :eperm)
+      assert {:error, :eperm} = Device.write(device, 0, :binary.copy(<<1>>, @block))
+    end
+  end
+
   describe "write_zeroes/3" do
     test "punches an extent the range covers end to end, writing nothing", %{device: device} do
       write_extents([0, 1, 2, 3])
@@ -174,6 +203,11 @@ defmodule NeonFS.Block.DeviceTest do
   end
 
   # ─── The stub cluster ──────────────────────────────────────────────────
+
+  defp fail_commits(count, reason) do
+    Application.put_env(:neonfs_block, :failing_commits, {count, reason})
+    on_exit(fn -> Application.delete_env(:neonfs_block, :failing_commits) end)
+  end
 
   defp write_extents(indices) do
     Application.put_env(:neonfs_block, :written_extents, MapSet.new(indices))
@@ -223,8 +257,16 @@ defmodule NeonFS.Block.DeviceTest do
     {:ok, %{chunk_bytes: @chunk, size: @size, extents: extents}}
   end
 
-  defp reply(:commit_written, [_volume, _path, extents, _opts]),
-    do: {:ok, %{chunks_published: Enum.count(extents, &is_binary(elem(&1, 1)))}}
+  defp reply(:commit_written, [_volume, _path, extents, _opts]) do
+    case Application.get_env(:neonfs_block, :failing_commits) do
+      {remaining, reason} when remaining > 0 ->
+        Application.put_env(:neonfs_block, :failing_commits, {remaining - 1, reason})
+        {:error, reason}
+
+      _settled ->
+        {:ok, %{chunks_published: Enum.count(extents, &is_binary(elem(&1, 1)))}}
+    end
+  end
 
   defp reply(_other, _args), do: :ok
 

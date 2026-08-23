@@ -1,27 +1,29 @@
 defmodule NeonFS.Core.BlockWriteContentionTest do
   @moduledoc """
-  Concurrent writers to distinct extents of one block device.
+  Concurrent publishers of distinct extents of one block device.
 
   An extent is its own key, so two writers to different parts of a device
-  no longer read, splice and rewrite one shared chunk list — which is what
-  made a crowded device thrash, each loser redoing a read, re-chunk,
-  re-hash, re-encrypt and re-store it then discarded. What they still share
-  is the shard root of the extent group they land in, and the commit's
-  compare-and-swap has to resolve that by retrying rather than by the last
-  writer winning.
+  never read, splice and rewrite one shared value — which is what made a
+  crowded device thrash when a device was a file, each loser redoing a read,
+  re-chunk, re-hash, re-encrypt and re-store it then discarded. What they
+  still share is the shard root of the extent group they land in, and the
+  commit's compare-and-swap has to resolve that by retrying rather than by
+  the last writer winning.
 
-  This is a correctness test: every writer commits and nothing is lost.
-  Its runtime is not the assertion — timing belongs in the rig's bench.
+  The bytes are placed the way an interface node places them and published
+  through `commit_written/4`, because that is the only device write path
+  there is.
+
+  This is a correctness test: every writer commits and nothing is lost. Its
+  runtime is not the assertion — timing belongs in the rig's bench.
 
   ## Why the commit deadline is raised here
 
-  Every write is its own commit through the volume's committer, which
-  serialises them: a queue of 32 is 32 metadata rounds one after another,
-  where the file path folded concurrent writers into shared batches on the
-  way in. At the default 30 s deadline the last writer in the queue times
-  out under a loaded suite, which fails this test for a reason it is not
-  about. The deadline is raised so the assertion stays "nothing is lost";
-  what the queueing costs belongs to the coalescing window and the bench.
+  Every publication is its own commit through the volume's committer, which
+  serialises them: a queue of 32 is 32 metadata rounds one after another. At
+  the default 30 s deadline the last writer in the queue times out under a
+  loaded suite, which fails this test for a reason it is not about. What the
+  queueing costs belongs to the coalescing window and the bench.
   """
 
   use ExUnit.Case, async: false
@@ -60,18 +62,17 @@ defmodule NeonFS.Core.BlockWriteContentionTest do
     # payload is as detectable as one that is still a hole.
     payloads = Map.new(0..(@writers - 1), &{&1, :binary.copy(<<&1 + 1>>, @chunk)})
 
-    results =
-      payloads
-      |> Task.async_stream(
-        fn {index, payload} ->
-          BlockBacking.write(volume_name, device.path, index * @chunk, payload)
-        end,
-        max_concurrency: @writers,
-        timeout: 240_000
-      )
-      |> Enum.map(fn {:ok, result} -> result end)
-
-    for result <- results, do: assert({:ok, _cost} = result)
+    payloads
+    |> Task.async_stream(
+      fn {index, payload} ->
+        {index, write_block_extent(volume_name, device.path, index, payload)}
+      end,
+      max_concurrency: @writers,
+      timeout: 240_000
+    )
+    |> Enum.each(fn {:ok, {index, result}} ->
+      assert {:ok, _hash} = result, "writer #{index} did not commit: #{inspect(result)}"
+    end)
 
     for {index, payload} <- payloads do
       assert {:ok, read} = BlockBacking.read(volume_name, device.path, index * @chunk, @chunk)
@@ -79,31 +80,6 @@ defmodule NeonFS.Core.BlockWriteContentionTest do
       assert read == payload,
              "extent #{index} did not read back the payload its writer committed"
     end
-  end
-
-  # Two 4 KiB writes into one 128 KiB extent are both read-modify-writes of
-  # the whole extent, computed from the same starting point. Without the
-  # commit comparing what the read saw, whichever lands second discards the
-  # other's block — which is what `fio --verify` at any queue depth does to
-  # a device whose extents are wider than its writes.
-  test "two writers to distinct blocks of one extent both survive", %{
-    volume_name: volume_name,
-    device: device
-  } do
-    block = 4096
-    first = :binary.copy(<<0xA1>>, block)
-    second = :binary.copy(<<0xB2>>, block)
-
-    [{0, first}, {block, second}]
-    |> Task.async_stream(
-      fn {offset, payload} -> BlockBacking.write(volume_name, device.path, offset, payload) end,
-      max_concurrency: 2,
-      timeout: 120_000
-    )
-    |> Enum.each(fn {:ok, result} -> assert {:ok, _cost} = result end)
-
-    assert {:ok, ^first} = BlockBacking.read(volume_name, device.path, 0, block)
-    assert {:ok, ^second} = BlockBacking.read(volume_name, device.path, block, block)
   end
 
   test "the map gains one entry per writer, and every hash it names is indexed", %{
@@ -115,18 +91,13 @@ defmodule NeonFS.Core.BlockWriteContentionTest do
     |> Task.async_stream(
       fn index ->
         {index,
-         BlockBacking.write(
-           volume_name,
-           device.path,
-           index * @chunk,
-           :binary.copy(<<index + 1>>, @chunk)
-         )}
+         write_block_extent(volume_name, device.path, index, :binary.copy(<<index + 1>>, @chunk))}
       end,
       max_concurrency: @writers,
       timeout: 240_000
     )
     |> Enum.each(fn {:ok, {index, result}} ->
-      assert {:ok, _cost} = result, "writer #{index} did not commit: #{inspect(result)}"
+      assert {:ok, _hash} = result, "writer #{index} did not commit: #{inspect(result)}"
     end)
 
     assert {:ok, extents} = BlockIndex.range(volume_name, 0, @writers - 1)
