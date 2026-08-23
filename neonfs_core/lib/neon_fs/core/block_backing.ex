@@ -120,11 +120,13 @@ defmodule NeonFS.Core.BlockBacking do
   # request.
   @max_request_bytes 32 * 1024 * 1024
 
-  # How many times a read-modify-write redoes itself against an extent that
-  # changed under it. Small on purpose: the losers of a genuinely contended
-  # extent are serialised by the retry, and a device is single-attach, so
-  # sustained contention on one extent is a queue depth rather than a crowd.
-  @stale_retries 3
+  # How many times a write redoes itself against contention it lost — an
+  # extent that changed under its read, or a metadata compare-and-swap that
+  # ran out of attempts of its own. Small on purpose: the losers of a
+  # genuinely contended extent are serialised by the retry, and a device is
+  # single-attach, so sustained contention is a queue depth rather than a
+  # crowd.
+  @contended_retries 3
 
   @type device :: %{
           volume: String.t(),
@@ -601,16 +603,28 @@ defmodule NeonFS.Core.BlockBacking do
   # on another one would pay a round trip to redo them.
   defp publish(device, volume_record, opts, build, attempt \\ 0) do
     case attempt_publish(device, volume_record, opts, build) do
-      {:error, :stale_chunks} = error when attempt >= @stale_retries ->
-        error
-
-      {:error, :stale_chunks} ->
-        publish(device, volume_record, opts, build, attempt + 1)
+      {:error, reason} = error ->
+        if attempt < @contended_retries and contended?(reason) do
+          publish(device, volume_record, opts, build, attempt + 1)
+        else
+          error
+        end
 
       result ->
         result
     end
   end
+
+  # Two ways a write loses a race it should simply run again. `:stale_chunks`
+  # is an extent that moved under this write's read. A compare-and-swap that
+  # ran out of attempts is the metadata layer giving up on a burst — a device
+  # write places a chunk and commits a map, which is two root updates against
+  # one volume, so a queue of them collides with itself. Neither is a reason
+  # to hand a guest an IO error.
+  defp contended?(:stale_chunks), do: true
+  defp contended?({:cas_retries_exhausted, _}), do: true
+  defp contended?({_stage, {:cas_retries_exhausted, _}}), do: true
+  defp contended?(_reason), do: false
 
   defp attempt_publish(device, volume_record, opts, build) do
     write_id = WriteOperation.generate_write_id()
