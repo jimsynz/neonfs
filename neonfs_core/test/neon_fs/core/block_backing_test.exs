@@ -2,7 +2,7 @@ defmodule NeonFS.Core.BlockBackingTest do
   use ExUnit.Case, async: false
   use NeonFS.TestCase
 
-  alias NeonFS.Core.{BlockBacking, BlockEpoch, BlockIndex, ChunkIndex}
+  alias NeonFS.Core.{BlobStore, BlockBacking, BlockEpoch, BlockIndex, ChunkIndex}
 
   @moduletag :tmp_dir
 
@@ -735,7 +735,7 @@ defmodule NeonFS.Core.BlockBackingTest do
   defp stage_chunk(volume, data) do
     hash = :crypto.hash(:sha256, data)
 
-    case NeonFS.Core.BlobStore.write_chunk(data, "default", "hot") do
+    case BlobStore.write_chunk(data, "default", "hot") do
       {:ok, ^hash, _info} -> {:ok, hash}
       other -> other
     end

@@ -148,6 +148,23 @@ defmodule NeonFS.Client.ChunkReader do
           telemetry_metadata: map()
         ]
 
+  # A chunk reference as core describes it. Only the two keys each function
+  # actually reads are required: the map a caller holds carries whatever else
+  # the call that produced it saw fit to include — a file's read window, a
+  # block extent's index and width — and narrowing to exactly these two would
+  # make every such caller's map the wrong type.
+  @type chunk_ref :: %{
+          required(:hash) => binary(),
+          required(:locations) => [map()],
+          optional(atom()) => any()
+        }
+
+  @type codec_ref :: %{
+          required(:compression) => atom(),
+          required(:encrypted) => boolean(),
+          optional(atom()) => any()
+        }
+
   @type stream_result ::
           {:ok, %{stream: Enumerable.t(), file_size: non_neg_integer()}}
           | {:error, term()}
@@ -209,8 +226,7 @@ defmodule NeonFS.Client.ChunkReader do
   its stored bytes do not hash to its id and only core holds the key, so
   those must go back through a core call. `chunk_readable?/1` is the test.
   """
-  @spec fetch_chunk(String.t(), %{hash: binary(), locations: [map()]}, read_opts()) ::
-          {:ok, binary()} | {:error, term()}
+  @spec fetch_chunk(String.t(), chunk_ref(), read_opts()) :: {:ok, binary()} | {:error, term()}
   def fetch_chunk(volume_name, ref, opts \\ []) do
     fetch_chunk_bytes(fetch_ctx(volume_name, opts), ref)
   end
@@ -223,7 +239,7 @@ defmodule NeonFS.Client.ChunkReader do
   cannot serve it and the caller has to ask core. Answering here rather
   than at each callsite keeps the two halves of that rule together.
   """
-  @spec chunk_readable?(%{compression: atom(), encrypted: boolean()}) :: boolean()
+  @spec chunk_readable?(codec_ref()) :: boolean()
   def chunk_readable?(ref), do: not needs_server_processing?(ref)
 
   defp do_read(volume_name, target, opts) do
