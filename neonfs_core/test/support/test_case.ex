@@ -152,6 +152,45 @@ defmodule NeonFS.TestCase do
   end
 
   @doc """
+  Boots one provisioned cluster for a whole test module, from `setup_all`.
+
+  Same cluster as `start_provisioned_cluster/2`, and the same caveat about
+  what that costs: booting Ra and running `init_cluster` takes a second or
+  two, and a module that does it per test pays it per test. Where the tests
+  in a module do not need to be isolated from each other's cluster state —
+  each creating its own volume, which is the usual shape — one boot for the
+  module is the same coverage for a fraction of the wall clock.
+
+  The tests are still isolated from *other modules*: each gets its own Ra
+  system, name, UID and data directory, which is what
+  `start_provisioned_cluster/2` established and what this does not weaken.
+  What is shared is the cluster within one file.
+
+  Takes a directory name rather than the `:tmp_dir` tag, because a tag is
+  per-test and this runs once. Pass something derived from the module so two
+  files cannot collide.
+
+  Returns `{:ok, cluster_id, dir}` so a caller can put the directory in the
+  module's context if it needs it.
+  """
+  @spec start_shared_provisioned_cluster(String.t(), keyword()) ::
+          {:ok, String.t(), Path.t()} | {:error, term()}
+  def start_shared_provisioned_cluster(name, opts \\ []) do
+    dir = Path.join(System.tmp_dir!(), "neonfs_shared_#{name}_#{:rand.uniform(999_999)}")
+    File.mkdir_p!(dir)
+
+    ExUnit.Callbacks.on_exit(fn ->
+      stop_ra()
+      cleanup_test_dirs()
+      File.rm_rf(dir)
+    end)
+
+    with {:ok, cluster_id} <- start_provisioned_cluster(dir, opts) do
+      {:ok, cluster_id, dir}
+    end
+  end
+
+  @doc """
   Writes one extent of a block device the way an interface node does: the
   bytes go to this node's blob store over what would be the data plane, and
   `BlockBacking.commit_written/4` verifies the claim and publishes the map.
@@ -162,6 +201,17 @@ defmodule NeonFS.TestCase do
 
   `opts` are forwarded to `commit_written/4`, so a test can pass `:epoch` or
   `:expect`.
+
+  ## It retries a contended commit, because a real caller does
+
+  `NeonFS.Block.Device` redoes a write whose extent moved under its read or
+  whose compare-and-swap ran out of attempts — losing a race is contention,
+  not a fault, and no guest ever sees it. A test driving this boundary
+  directly has no frontend in front of it, so without the same retry it
+  would assert against a failure mode no caller experiences. A queue of
+  concurrent publishers is exactly where that shows up.
+
+  An error that is not contention is returned unchanged.
   """
   @spec write_block_extent(String.t(), String.t(), non_neg_integer(), binary(), keyword()) ::
           {:ok, binary()} | {:error, term()}
@@ -178,11 +228,30 @@ defmodule NeonFS.TestCase do
         opts
       )
 
-    case BlockBacking.commit_written(volume_name, path, [{index, hash}], commit_opts) do
-      {:ok, _published} -> {:ok, hash}
-      {:error, _reason} = error -> error
+    commit_block_extent(volume_name, path, index, hash, commit_opts, 0)
+  end
+
+  @block_extent_retries 5
+
+  defp commit_block_extent(volume_name, path, index, hash, opts, attempt) do
+    case BlockBacking.commit_written(volume_name, path, [{index, hash}], opts) do
+      {:ok, _published} ->
+        {:ok, hash}
+
+      {:error, reason} = error ->
+        if attempt < @block_extent_retries and contended_commit?(reason) do
+          Process.sleep(10 * 2 ** attempt)
+          commit_block_extent(volume_name, path, index, hash, opts, attempt + 1)
+        else
+          error
+        end
     end
   end
+
+  defp contended_commit?(:stale_chunks), do: true
+  defp contended_commit?({:cas_retries_exhausted, _}), do: true
+  defp contended_commit?({_stage, {:cas_retries_exhausted, _}}), do: true
+  defp contended_commit?(_reason), do: false
 
   @doc """
   Adds drives to an already-bootstrapped cluster on the fast path:
