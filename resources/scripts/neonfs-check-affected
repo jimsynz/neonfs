@@ -20,8 +20,17 @@
 #
 # Changed paths are the branch's commits against its base, plus anything
 # uncommitted or untracked in the working tree.
+#
+# MIX_ENV defaults to `test` because that is what CI sets, and the difference
+# is not cosmetic: `elixirc_paths(:test)` adds `test/support`, so a dev-env
+# run does not compile those modules and dialyzer never analyses them. A
+# behaviour implemented by a test support module can therefore be green here
+# and red in CI, which is the opposite of what this script is for. Export it
+# yourself to override.
 
 set -euo pipefail
+
+export MIX_ENV="${MIX_ENV:-test}"
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 ci_affected="$repo_root/resources/scripts/ci-affected"

@@ -38,6 +38,7 @@ defmodule NeonFS.Block.StubCore do
        id: "stub-id",
        chunk_bytes: @block,
        epoch: 0,
+       window: nil,
        size: @size,
        logical_block_size: @block,
        physical_block_size: @block,
