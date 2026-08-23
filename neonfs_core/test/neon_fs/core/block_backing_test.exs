@@ -501,6 +501,7 @@ defmodule NeonFS.Core.BlockBackingTest do
       assert [first, second] = extents
       assert first.index == 0
       assert first.target == :hole
+      assert first.hash == nil
       assert first.width == @chunk
       assert first.read_start == 0
       assert first.read_length == @chunk
@@ -520,6 +521,10 @@ defmodule NeonFS.Core.BlockBackingTest do
                BlockBacking.read_refs(volume_name, device.path, 0, @block)
 
       assert {:chunk, hash} = ref.target
+
+      # The hash is a field rather than something to dig out of the target:
+      # it is what the caller hands the data plane.
+      assert ref.hash == hash
       assert ref.read_start == 0
       assert ref.read_length == @block
       assert ref.width == @chunk

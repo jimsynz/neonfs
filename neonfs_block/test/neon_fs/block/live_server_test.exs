@@ -481,6 +481,7 @@ defmodule NeonFS.Block.LiveServerTest do
           read_start: span_start - extent_start,
           read_length: span_end - span_start,
           target: :hole,
+          hash: nil,
           locations: [],
           compression: :none,
           encrypted: false

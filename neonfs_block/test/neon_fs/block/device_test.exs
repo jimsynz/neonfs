@@ -32,8 +32,13 @@ defmodule NeonFS.Block.DeviceTest do
       {:ok, Enum.map(chunks, &chunk_ref/1)}
     end)
 
+    # The seam asserts the ref's shape rather than accepting anything: the
+    # real `ChunkReader.fetch_chunk/3` dials `hash` and `locations`, and a ref
+    # missing either is a crash on the first real read.
     Application.put_env(:neonfs_block, :fetch_chunk_fn, fn _volume, ref, opts ->
       send(test, {:fetched, ref.index, opts})
+      %{hash: hash, locations: [_ | _]} = ref
+      true = is_binary(hash)
       {:ok, stored_bytes(ref)}
     end)
 
@@ -65,6 +70,18 @@ defmodule NeonFS.Block.DeviceTest do
       assert Enum.map(parts, &byte_size/1) == [@block, @block]
       assert_received {:fetched, 0, _}
       assert_received {:fetched, 1, _}
+    end
+
+    # The ref core hands back has to be one the data plane can use as-is —
+    # a hash to dial and locations to dial it at.
+    test "hands the data plane a ref it can dial", %{device: device} do
+      write_extents([0])
+
+      {:ok, stream} = Device.read_stream(device, 0, @block)
+      assert [bytes] = Enum.to_list(stream)
+      assert byte_size(bytes) == @block
+
+      assert_received {:fetched, 0, _opts}
     end
 
     test "tags its fetches with the export, so one device is separable", %{device: device} do
@@ -196,6 +213,7 @@ defmodule NeonFS.Block.DeviceTest do
           read_start: span_start - extent_start,
           read_length: span_end - span_start,
           target: if(written?(index), do: {:chunk, extent_hash(index)}, else: :hole),
+          hash: if(written?(index), do: extent_hash(index)),
           locations: [%{node: node(), drive_id: "default", tier: :hot}],
           compression: :none,
           encrypted: false

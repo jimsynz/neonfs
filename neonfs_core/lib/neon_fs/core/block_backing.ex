@@ -157,6 +157,7 @@ defmodule NeonFS.Core.BlockBacking do
           read_start: non_neg_integer(),
           read_length: pos_integer(),
           target: BlockIndex.target(),
+          hash: binary() | nil,
           locations: [NeonFS.Core.ChunkMeta.location()],
           compression: atom(),
           encrypted: boolean()
@@ -342,7 +343,9 @@ defmodule NeonFS.Core.BlockBacking do
 
   An extent with no entry is reported as a hole rather than omitted: the
   caller has to emit its zeroes, and it cannot tell an unwritten extent
-  from one this call forgot.
+  from one this call forgot. A hole's `hash` and `locations` are empty for
+  the same reason — there is nothing to fetch, and the caller has to be able
+  to see that without interpreting the target.
 
   Each entry also carries the `target` it resolved, which is what a
   read-modify-write passes back as `:expect` so its commit can refuse a
@@ -647,25 +650,29 @@ defmodule NeonFS.Core.BlockBacking do
   # than fetching anything. A missing chunk record is not a hole — it is a
   # map naming data the index cannot place, and inventing zeroes for it
   # would hand the guest a silently wrong read.
-  defp chunk_facts(:hole, _volume_record),
-    do: %{locations: [], compression: :none, encrypted: false}
+  defp chunk_facts(:hole, _volume_record), do: no_chunk()
 
   defp chunk_facts({:chunk, hash}, volume_record) do
     case ChunkIndex.get(volume_record.id, hash) do
       {:ok, meta} ->
         %{
+          hash: hash,
           locations: meta.locations,
           compression: meta.compression,
           encrypted: not is_nil(meta.crypto)
         }
 
       {:error, :not_found} ->
-        %{locations: [], compression: :none, encrypted: false}
+        %{no_chunk() | hash: hash}
     end
   end
 
-  defp chunk_facts({:stripe, _id, _member}, _volume_record),
-    do: %{locations: [], compression: :none, encrypted: false}
+  defp chunk_facts({:stripe, _id, _member}, _volume_record), do: no_chunk()
+
+  # The `hash` is what the caller dials the data plane with, so it is a field
+  # of the ref rather than something to be dug out of the target — a hole has
+  # none, and neither does a stripe member until erasure reaches this path.
+  defp no_chunk, do: %{hash: nil, locations: [], compression: :none, encrypted: false}
 
   defp reconcile(_volume_record, [], _opts, _write_id), do: {:ok, []}
 
