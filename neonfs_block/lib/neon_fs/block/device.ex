@@ -403,18 +403,18 @@ defmodule NeonFS.Block.Device do
 
   # ─── Retry, telemetry and plumbing ─────────────────────────────────────
 
-  # A write that exhausted core's retry budget against a contended span has
-  # lost nothing, so every frontend wants it retried rather than failed —
-  # which is why the retry lives here and not in one of them. NBD has no
-  # "retry this" status to hand back, and `ublk`'s `-EAGAIN` means something
-  # else again; the *reply* is the frontend's problem, the retrying is not.
+  # A write that lost a race has lost nothing, so every frontend wants it
+  # retried rather than failed — which is why the retry lives here and not
+  # in one of them. NBD has no "retry this" status to hand back, and
+  # `ublk`'s `-EAGAIN` means something else again; the *reply* is the
+  # frontend's problem, the retrying is not.
   #
   # Past the budget the error is returned unchanged, for the frontend to
   # render however its protocol can.
   defp retrying_stale(command, fun, attempt \\ 0) do
     case fun.() do
-      {:error, :stale_chunks} = error ->
-        if attempt < stale_retries() do
+      {:error, reason} = error ->
+        if attempt < stale_retries() and contended?(reason) do
           :telemetry.execute(
             [:neonfs, :block, :stale_write_retry],
             %{attempt: attempt + 1},
@@ -431,6 +431,17 @@ defmodule NeonFS.Block.Device do
         result
     end
   end
+
+  # Two ways a write loses a race it should simply run again. `:stale_chunks`
+  # is an extent that moved under this write's read. A compare-and-swap that
+  # ran out of attempts is the metadata layer giving up on a burst — a device
+  # write publishes a chunk record and an extent map against one volume, so a
+  # queue of them collides with itself. Neither is a reason to hand a guest an
+  # IO error.
+  defp contended?(:stale_chunks), do: true
+  defp contended?({:cas_retries_exhausted, _}), do: true
+  defp contended?({_stage, {:cas_retries_exhausted, _}}), do: true
+  defp contended?(_reason), do: false
 
   defp stale_retries, do: Application.get_env(:neonfs_block, :stale_write_retries, 3)
 

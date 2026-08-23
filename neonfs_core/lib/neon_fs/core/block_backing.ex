@@ -122,14 +122,6 @@ defmodule NeonFS.Core.BlockBacking do
   # request.
   @max_request_bytes 32 * 1024 * 1024
 
-  # How many times a write redoes itself against contention it lost — an
-  # extent that changed under its read, or a metadata compare-and-swap that
-  # ran out of attempts of its own. Small on purpose: the losers of a
-  # genuinely contended extent are serialised by the retry, and a device is
-  # single-attach, so sustained contention is a queue depth rather than a
-  # crowd.
-  @contended_retries 3
-
   @type device :: %{
           volume: String.t(),
           id: binary(),
@@ -414,110 +406,6 @@ defmodule NeonFS.Core.BlockBacking do
   end
 
   @doc """
-  Writes `data` at `offset`, rewriting only the extents it overlaps.
-
-  The device cannot grow, so a write past the end is refused rather than
-  extending it. Each overlapped extent is placed as a chunk and the whole
-  set published in one commit, so a write spanning several extents costs
-  one metadata round.
-
-  `opts` accepts `:epoch` — the epoch the caller attached under. A write
-  whose epoch is behind the device's current one is refused with
-  `{:error, {:fenced, current}}`: the caller has been preempted and must
-  tear its end down rather than retry.
-
-  A sub-extent write is a read-modify-write of the whole extent, so the
-  commit is a compare-and-swap against what the read saw. A write that
-  loses that race redoes itself, and one that keeps losing answers
-  `{:error, :stale_chunks}` — a request to retry, not a failure, which is
-  why the frontend renders it as the protocol's "try again".
-
-  Returns the chunk-layer cost of the write alongside the acknowledgement:
-  `chunk_bytes` is what the chunk layer rewrote to store `byte_size(data)`
-  guest bytes, so their ratio is the write amplification of this request.
-  """
-  @spec write(String.t(), String.t(), non_neg_integer(), binary(), keyword()) ::
-          {:ok, write_cost()} | {:error, term()}
-  def write(volume, path, offset, data, opts \\ []) do
-    start_time = System.monotonic_time()
-    guest_bytes = byte_size(data)
-
-    with :ok <- validate_request(offset, guest_bytes),
-         {:ok, volume_record} <- Core.get_volume(volume),
-         {:ok, device} <- device_info(volume, path),
-         :ok <- validate_range(device, offset, guest_bytes),
-         {:ok, full_cost} <-
-           publish(device, volume_record, opts, &written_extents(&1, offset, data)) do
-      cost = Map.take(full_cost, [:chunk_bytes, :chunks_rewritten])
-
-      :telemetry.execute(
-        [:neonfs, :block, :write],
-        Map.merge(cost, %{
-          guest_bytes: guest_bytes,
-          duration: System.monotonic_time() - start_time
-        }),
-        %{volume: volume, path: path, offset: offset}
-      )
-
-      {:ok, cost}
-    end
-  end
-
-  @doc """
-  Zero-fills `length` bytes at `offset` — the device's WRITE ZEROES.
-
-  One metadata commit for the whole range, however long: an extent the
-  range covers end to end is punched rather than rewritten, and only the
-  extents it clips cost a read-modify-write. A clipped extent that ends up
-  entirely zeroes is punched too. A full-device TRIM is therefore one
-  commit and no stored bytes.
-
-  Returns that cost as its two halves: `chunk_bytes` is what the chunk
-  layer wrote for the clipped extents it had to keep, and `chunks_replaced`
-  counts the extents that were punched and cost nothing beyond their
-  metadata entry.
-
-  Takes the same `:epoch` as `write/5`, and the same compare-and-swap on
-  the extents it clips.
-  """
-  @spec write_zeroes(String.t(), String.t(), non_neg_integer(), pos_integer(), keyword()) ::
-          {:ok, zero_fill_cost()} | {:error, term()}
-  def write_zeroes(volume, path, offset, length, opts \\ []) do
-    start_time = System.monotonic_time()
-
-    with :ok <- validate_alignment(offset, length),
-         {:ok, volume_record} <- Core.get_volume(volume),
-         {:ok, device} <- device_info(volume, path),
-         :ok <- validate_range(device, offset, length),
-         {:ok, cost} <-
-           publish(device, volume_record, opts, &zeroed_extents(&1, offset, length)) do
-      :telemetry.execute(
-        [:neonfs, :block, :write_zeroes],
-        Map.merge(cost, %{
-          guest_bytes: length,
-          duration: System.monotonic_time() - start_time
-        }),
-        %{volume: volume, path: path, offset: offset}
-      )
-
-      {:ok, cost}
-    end
-  end
-
-  @doc """
-  Discards `length` bytes at `offset`.
-
-  Identical to `write_zeroes/5`: an extent the range covers is dropped from
-  the map, which is exactly what a discard asks for, and the bytes read
-  back as zeroes afterwards.
-  """
-  @spec discard(String.t(), String.t(), non_neg_integer(), pos_integer(), keyword()) ::
-          {:ok, zero_fill_cost()} | {:error, term()}
-  def discard(volume, path, offset, length, opts \\ []) do
-    write_zeroes(volume, path, offset, length, opts)
-  end
-
-  @doc """
   Durability barrier for the device — the guest's flush and FUA.
 
   Returns once every chunk the extent map names has the volume's
@@ -687,6 +575,26 @@ defmodule NeonFS.Core.BlockBacking do
     )
   end
 
+  defp abort(error, write_id) do
+    WriteOperation.abort_chunks(write_id)
+    error
+  end
+
+  # Placement charges the volume; the sweep that reclaims an extent's
+  # replaced chunk is what discharges it, exactly as for a file's chunks.
+  # Without the charge the sweep's decrement is the only movement there is,
+  # and the counter walks down to its zero clamp.
+  #
+  # A charge that does not land is dropped rather than failed: the write it
+  # describes is already durable, and refusing it after the fact to keep a
+  # gauge honest trades data for reporting.
+  defp charge_usage(_volume_id, physical_size: 0, chunk_count: 0), do: :ok
+
+  defp charge_usage(volume_id, deltas) do
+    _ = VolumeRegistry.adjust_stats(volume_id, deltas)
+    :ok
+  end
+
   # An index outside the device is a caller bug, and publishing it would put
   # an extent in the map that no read can ever reach — the device's size is
   # what bounds every read.
@@ -773,209 +681,6 @@ defmodule NeonFS.Core.BlockBacking do
 
   defp extent_width(%{size: size, chunk_bytes: chunk_bytes}, index),
     do: min(chunk_bytes, size - index * chunk_bytes)
-
-  # ─── Writes ────────────────────────────────────────────────────────────
-
-  # Both mutating paths are the same transaction: build each extent's new
-  # contents one at a time, place the ones that need a chunk, then publish
-  # the map and the chunks together. `build` yields, per extent, the new
-  # target and the target its read saw where it read one; everything else —
-  # placement, the commit's fencing and compare-and-swap, and reclaiming the
-  # chunks of a commit that failed — is shared.
-  #
-  # A commit refused because an extent this write read has since changed is
-  # retried from the read, here rather than only at the frontend: the
-  # arithmetic and the placement are both local to this node, and a caller
-  # on another one would pay a round trip to redo them.
-  defp publish(device, volume_record, opts, build, attempt \\ 0) do
-    case attempt_publish(device, volume_record, opts, build) do
-      {:error, reason} = error ->
-        if attempt < @contended_retries and contended?(reason) do
-          publish(device, volume_record, opts, build, attempt + 1)
-        else
-          error
-        end
-
-      result ->
-        result
-    end
-  end
-
-  # Two ways a write loses a race it should simply run again. `:stale_chunks`
-  # is an extent that moved under this write's read. A compare-and-swap that
-  # ran out of attempts is the metadata layer giving up on a burst — a device
-  # write places a chunk and commits a map, which is two root updates against
-  # one volume, so a queue of them collides with itself. Neither is a reason
-  # to hand a guest an IO error.
-  defp contended?(:stale_chunks), do: true
-  defp contended?({:cas_retries_exhausted, _}), do: true
-  defp contended?({_stage, {:cas_retries_exhausted, _}}), do: true
-  defp contended?(_reason), do: false
-
-  defp attempt_publish(device, volume_record, opts, build) do
-    write_id = WriteOperation.generate_write_id()
-
-    with {:ok, {planned, observed}} <- build.(device),
-         {:ok, {extents, hashes, cost}} <- place(volume_record, write_id, planned),
-         {:ok, _roots} <- commit_extents(device, extents, write_id, hashes, observed, opts) do
-      charge_usage(volume_record.id,
-        physical_size: cost.stored_bytes,
-        chunk_count: length(hashes)
-      )
-
-      {:ok, Map.delete(cost, :stored_bytes)}
-    else
-      {:error, _reason} = error -> abort(error, write_id)
-    end
-  end
-
-  # Placement charges the volume; the sweep that reclaims an extent's
-  # replaced chunk is what discharges it, exactly as for a file's chunks.
-  # Without the charge the sweep's decrement is the only movement there is,
-  # and the counter walks down to its zero clamp.
-  #
-  # A charge that does not land is dropped rather than failed: the write it
-  # describes is already durable, and refusing it after the fact to keep a
-  # gauge honest trades data for reporting.
-  defp charge_usage(_volume_id, physical_size: 0, chunk_count: 0), do: :ok
-
-  defp charge_usage(volume_id, deltas) do
-    _ = VolumeRegistry.adjust_stats(volume_id, deltas)
-    :ok
-  end
-
-  defp commit_extents(device, extents, write_id, hashes, observed, opts) do
-    BlockIndex.commit(
-      device.volume,
-      extents,
-      opts
-      |> Keyword.take([:epoch])
-      |> Keyword.put(:device_path, device.path)
-      |> Keyword.put(:chunk_commit, {write_id, hashes})
-      |> Keyword.put(:expect, observed)
-    )
-  end
-
-  defp abort(error, write_id) do
-    WriteOperation.abort_chunks(write_id)
-    error
-  end
-
-  @empty_cost %{chunk_bytes: 0, chunks_rewritten: 0, chunks_replaced: 0, stored_bytes: 0}
-
-  defp place(volume_record, write_id, planned) do
-    Enum.reduce_while(planned, {:ok, {[], [], @empty_cost}}, fn
-      {index, :hole}, {:ok, {extents, hashes, cost}} ->
-        {:cont,
-         {:ok,
-          {[{index, :hole} | extents], hashes,
-           %{cost | chunks_replaced: cost.chunks_replaced + 1}}}}
-
-      {index, bytes}, {:ok, {extents, hashes, cost}} ->
-        case WriteOperation.place_chunk(bytes, volume_record, write_id) do
-          {:ok, placement} ->
-            {:cont,
-             {:ok,
-              {[{index, {:chunk, placement.hash}} | extents], [placement.hash | hashes],
-               %{
-                 cost
-                 | chunk_bytes: cost.chunk_bytes + byte_size(bytes),
-                   chunks_rewritten: cost.chunks_rewritten + 1,
-                   stored_bytes: cost.stored_bytes + placement.stored_size
-               }}}}
-
-          {:error, _reason} = error ->
-            {:halt, error}
-        end
-    end)
-    |> case do
-      {:ok, {extents, hashes, cost}} -> {:ok, {Enum.reverse(extents), hashes, cost}}
-      {:error, _reason} = error -> error
-    end
-  end
-
-  # A write never punches: a guest writing zeroes is asking for those bytes
-  # to be there, and `write_zeroes/5` is the call that says otherwise.
-  defp written_extents(device, offset, data) do
-    device
-    |> extent_spans(offset, byte_size(data))
-    |> plan(fn {_index, _within, count} = span, taken ->
-      with {:ok, bytes, read} <- splice(device, span, binary_part(data, taken, count)) do
-        {:ok, bytes, read, taken + count}
-      end
-    end)
-  end
-
-  defp zeroed_extents(device, offset, length) do
-    device
-    |> extent_spans(offset, length)
-    |> plan(&zeroed_extent(device, &1, &2))
-  end
-
-  defp zeroed_extent(device, {index, _within, count} = span, taken) do
-    if count == extent_width(device, index) do
-      {:ok, :hole, :covered, taken}
-    else
-      zero_clipped(device, span, count, taken)
-    end
-  end
-
-  # An extent the range only clips is read back, zeroed in place and written
-  # again — unless that leaves it empty, in which case it is punched like the
-  # ones the range covered outright.
-  defp zero_clipped(device, span, count, taken) do
-    with {:ok, bytes, read} <- splice(device, span, zeroes(count)) do
-      {:ok, punch_if_empty(bytes), read, taken + count}
-    end
-  end
-
-  # Walks the spans in order, carrying how many of the caller's bytes have
-  # been consumed, and stops at the first extent that cannot be read.
-  # Returns the plan alongside the targets it read — what the commit's
-  # compare-and-swap is against, so an extent overwritten end to end
-  # contributes nothing and does not make disjoint writers collide.
-  defp plan(spans, build) do
-    spans
-    |> Enum.reduce_while({:ok, {[], [], 0}}, fn {index, _within, _count} = span,
-                                                {:ok, {acc, observed, taken}} ->
-      case build.(span, taken) do
-        {:ok, target, :covered, consumed} ->
-          {:cont, {:ok, {[{index, target} | acc], observed, consumed}}}
-
-        {:ok, target, {:read, was}, consumed} ->
-          {:cont, {:ok, {[{index, target} | acc], [{index, was} | observed], consumed}}}
-
-        {:error, _reason} = error ->
-          {:halt, error}
-      end
-    end)
-    |> case do
-      {:ok, {planned, observed, _taken}} -> {:ok, {Enum.reverse(planned), observed}}
-      {:error, _reason} = error -> error
-    end
-  end
-
-  defp punch_if_empty(bytes) do
-    if bytes == zeroes(byte_size(bytes)), do: :hole, else: bytes
-  end
-
-  # Read-modify-write of one extent, answering with the target it read so
-  # the commit can refuse a snapshot that has since moved. A span covering
-  # the extent end to end needs no read at all, which is what keeps a
-  # sequential write from paying for the bytes it is about to overwrite.
-  defp splice(device, {index, within, count}, slice) do
-    if count == extent_width(device, index) do
-      {:ok, slice, :covered}
-    else
-      with {:ok, target} <- BlockIndex.get(device.volume, index),
-           {:ok, existing} <- target_bytes(device, index, target) do
-        <<head::binary-size(^within), _replaced::binary-size(^count), tail::binary>> =
-          existing
-
-        {:ok, <<head::binary, slice::binary, tail::binary>>, {:read, target}}
-      end
-    end
-  end
 
   # ─── Validation ────────────────────────────────────────────────────────
 

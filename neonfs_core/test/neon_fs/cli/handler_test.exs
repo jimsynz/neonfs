@@ -895,8 +895,8 @@ defmodule NeonFS.CLI.HandlerTest do
       assert found.chunk_count == 0
       assert found.physical_size == 0
 
-      {:ok, _cost} =
-        BlockBacking.write(
+      {:ok, _hash} =
+        write_block_extent(
           name,
           BlockBacking.device_path(),
           0,
