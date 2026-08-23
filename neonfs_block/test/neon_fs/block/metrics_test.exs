@@ -30,20 +30,11 @@ defmodule NeonFS.Block.MetricsTest do
       assert [:neonfs, :block, :command, :bytes] in names
     end
 
-    test "a write exports chunk bytes, so amplification is a query not a gauge" do
+    test "both directions export chunk bytes, so amplification is a query not a gauge" do
       names = Enum.map(Telemetry.metrics(), & &1.name)
 
       assert [:neonfs, :block, :command, :chunk_bytes] in names
-    end
-
-    # The extent map is resolved on core, so this node asks for a byte range
-    # and is handed bytes: there is nothing of the chunk layer here to count,
-    # and a series computed from the request's own length would report an
-    # upper bound as a measurement.
-    test "there is no read counterpart, because this node cannot measure one" do
-      names = Enum.map(Telemetry.metrics(), & &1.name)
-
-      refute [:neonfs, :block, :read, :chunk_bytes] in names
+      assert [:neonfs, :block, :read, :chunk_bytes] in names
     end
 
     # A zero-fill's cost is mostly metadata, so its amplification ratio
@@ -80,6 +71,18 @@ defmodule NeonFS.Block.MetricsTest do
       assert metric.keep.(%{command: :write_zeroes})
       refute metric.keep.(%{command: :write})
       refute metric.keep.(%{command: :read})
+    end
+
+    # The chunk_fetched event is emitted for every ChunkReader caller on the
+    # node, and an omnibus release runs FUSE and S3 beside the block target.
+    # Only the block target's reads carry an export, and a metric tagged
+    # `:export` would drop the rest with a logged error rather than ignore
+    # them.
+    test "read chunk bytes are kept only for the fetches Device tagged" do
+      metric = metric_named([:neonfs, :block, :read, :chunk_bytes])
+
+      assert metric.keep.(%{volume: "vol", export: "vol:/dev.img"})
+      refute metric.keep.(%{volume: "vol"})
     end
 
     test "the definitions are accepted by the Prometheus reporter" do

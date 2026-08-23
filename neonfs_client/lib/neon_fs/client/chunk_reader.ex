@@ -148,6 +148,23 @@ defmodule NeonFS.Client.ChunkReader do
           telemetry_metadata: map()
         ]
 
+  # A chunk reference as core describes it. Only the two keys each function
+  # actually reads are required: the map a caller holds carries whatever else
+  # the call that produced it saw fit to include — a file's read window, a
+  # block extent's index and width — and narrowing to exactly these two would
+  # make every such caller's map the wrong type.
+  @type chunk_ref :: %{
+          required(:hash) => binary(),
+          required(:locations) => [map()],
+          optional(atom()) => any()
+        }
+
+  @type codec_ref :: %{
+          required(:compression) => atom(),
+          required(:encrypted) => boolean(),
+          optional(atom()) => any()
+        }
+
   @type stream_result ::
           {:ok, %{stream: Enumerable.t(), file_size: non_neg_integer()}}
           | {:error, term()}
@@ -190,6 +207,40 @@ defmodule NeonFS.Client.ChunkReader do
   def read_file_by_id(volume_name, file_id, opts \\ []) do
     do_read(volume_name, {:id, file_id}, opts)
   end
+
+  @doc """
+  Fetches one whole chunk over the data plane, by hash and the locations
+  that claim to hold it.
+
+  For a caller that resolved its own chunk references and wants the bytes —
+  a block device, whose extents each *are* a chunk and whose map core
+  resolves for it. Locations are tried in order, preferring one on this
+  node, and the bytes are verified against the hash before being accepted,
+  so a corrupt replica fails over rather than being handed back.
+
+  The whole chunk comes across, because the data plane addresses chunks by
+  hash and a hash is only checkable against the whole thing. Slicing is the
+  caller's job.
+
+  A chunk that is compressed or encrypted **cannot** be served this way:
+  its stored bytes do not hash to its id and only core holds the key, so
+  those must go back through a core call. `chunk_readable?/1` is the test.
+  """
+  @spec fetch_chunk(String.t(), chunk_ref(), read_opts()) :: {:ok, binary()} | {:error, term()}
+  def fetch_chunk(volume_name, ref, opts \\ []) do
+    fetch_chunk_bytes(fetch_ctx(volume_name, opts), ref)
+  end
+
+  @doc """
+  Whether a chunk reference can be served by `fetch_chunk/3` at all.
+
+  A compressed or encrypted chunk is stored as bytes that do not hash to
+  its id, and decoding them needs the volume's key — so the data plane
+  cannot serve it and the caller has to ask core. Answering here rather
+  than at each callsite keeps the two halves of that rule together.
+  """
+  @spec chunk_readable?(codec_ref()) :: boolean()
+  def chunk_readable?(ref), do: not needs_server_processing?(ref)
 
   defp do_read(volume_name, target, opts) do
     refs_opts = Keyword.take(opts, [:offset, :length, :uid, :gids])

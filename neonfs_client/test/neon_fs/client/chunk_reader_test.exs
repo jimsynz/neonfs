@@ -41,6 +41,88 @@ defmodule NeonFS.Client.ChunkReaderTest do
     }
   end
 
+  # The primitive a caller that resolved its own references uses — a block
+  # device, whose extents each are a chunk and whose map core resolves.
+  describe "fetch_chunk/3" do
+    test "hands back the whole chunk, verified against its hash" do
+      content = :binary.copy(<<0x42>>, 64)
+
+      expect(Router, :data_call, fn :node1@host, :get_chunk, args, _opts ->
+        assert args[:hash] == content_hash(content)
+        {:ok, content}
+      end)
+
+      assert {:ok, ^content} =
+               ChunkReader.fetch_chunk(
+                 "vol",
+                 ref(
+                   content: content,
+                   original_size: 64,
+                   chunk_offset: 0,
+                   read_start: 0,
+                   read_length: 64
+                 )
+               )
+    end
+
+    # Slicing is the caller's job precisely because the hash is only
+    # checkable against the whole thing.
+    test "fails over to the next location when a replica's bytes do not hash" do
+      content = :binary.copy(<<0x43>>, 32)
+
+      locations = [
+        %{node: :bad@host, drive_id: "d1", tier: :hot},
+        %{node: :good@host, drive_id: "d1", tier: :hot}
+      ]
+
+      stub(Router, :data_call, fn
+        :bad@host, :get_chunk, _args, _opts -> {:ok, :binary.copy(<<0>>, 32)}
+        :good@host, :get_chunk, _args, _opts -> {:ok, content}
+      end)
+
+      assert {:ok, ^content} =
+               ChunkReader.fetch_chunk(
+                 "vol",
+                 ref(
+                   content: content,
+                   original_size: 32,
+                   chunk_offset: 0,
+                   read_start: 0,
+                   read_length: 32,
+                   locations: locations
+                 )
+               )
+    end
+
+    test "a chunk with no location to try is an error, not empty bytes" do
+      assert {:error, :no_available_locations} =
+               ChunkReader.fetch_chunk(
+                 "vol",
+                 ref(
+                   seed: 1,
+                   original_size: 8,
+                   chunk_offset: 0,
+                   read_start: 0,
+                   read_length: 8,
+                   locations: []
+                 )
+               )
+    end
+  end
+
+  describe "chunk_readable?/1" do
+    test "a plain chunk is servable by the data plane" do
+      assert ChunkReader.chunk_readable?(%{compression: :none, encrypted: false})
+    end
+
+    # Neither hashes to its id as stored, and only core holds the key, so a
+    # caller has to route these back through core rather than the data plane.
+    test "a compressed or encrypted chunk is not" do
+      refute ChunkReader.chunk_readable?(%{compression: :zstd, encrypted: false})
+      refute ChunkReader.chunk_readable?(%{compression: :none, encrypted: true})
+    end
+  end
+
   describe "read_file/3 — happy path" do
     test "assembles bytes from a single chunk over the data plane" do
       bytes = "hello, neonfs data plane!"

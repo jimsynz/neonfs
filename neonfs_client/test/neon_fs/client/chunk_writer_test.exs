@@ -44,6 +44,82 @@ defmodule NeonFS.Client.ChunkWriterTest do
     stub(Discovery, :get_core_nodes, fn -> nodes end)
   end
 
+  # An extent *is* a chunk, so the boundaries are the caller's and running
+  # any chunker over them would put them somewhere else.
+  describe "write_chunks/3" do
+    test "writes each binary as exactly one chunk, in the order given" do
+      volume = volume_fixture()
+      stub_volume_lookup(volume)
+      stub_discovery([@target_node])
+
+      first = :binary.copy(<<0x11>>, 300)
+      second = :binary.copy(<<0x22>>, 100)
+
+      stub(Router, :data_call, fn @target_node, :put_chunk, _args, _opts -> :ok end)
+
+      assert {:ok, [a, b]} =
+               ChunkWriter.write_chunks("test-vol", [first, second], drive_id: @drive_id)
+
+      assert a.size == 300
+      assert b.size == 100
+      assert a.hash == :crypto.hash(:sha256, first)
+      assert b.hash == :crypto.hash(:sha256, second)
+    end
+
+    # 300 bytes is not a chunk boundary any strategy would pick, which is the
+    # point: two extents of unequal size stay two chunks rather than being
+    # re-cut into something the extent map cannot address.
+    test "does not re-cut the binaries it is given" do
+      volume = volume_fixture()
+      stub_volume_lookup(volume)
+      stub_discovery([@target_node])
+
+      test_pid = self()
+
+      stub(Router, :data_call, fn @target_node, :put_chunk, args, _opts ->
+        send(test_pid, {:put, byte_size(args[:data])})
+        :ok
+      end)
+
+      assert {:ok, refs} =
+               ChunkWriter.write_chunks("test-vol", [
+                 :binary.copy(<<1>>, 300),
+                 :binary.copy(<<2>>, 300)
+               ])
+
+      assert length(refs) == 2
+      assert_received {:put, 300}
+      assert_received {:put, 300}
+    end
+
+    test "aborts what it already wrote when a later chunk cannot be placed" do
+      volume = volume_fixture()
+      stub_volume_lookup(volume)
+      stub_discovery([@target_node])
+      test_pid = self()
+
+      stub(Router, :data_call, fn
+        @target_node, :put_chunk, args, _opts ->
+          if byte_size(args[:data]) == 1, do: {:error, :boom}, else: :ok
+      end)
+
+      assert {:error, {:put_chunk_failed, :boom}} =
+               ChunkWriter.write_chunks("test-vol", [<<0::64>>, <<7>>],
+                 abort_fn: fn _location, hash -> send(test_pid, {:aborted, hash}) end
+               )
+
+      assert_received {:aborted, _hash}
+    end
+
+    test "an empty list writes nothing and answers with no refs" do
+      volume = volume_fixture()
+      stub_volume_lookup(volume)
+      stub_discovery([@target_node])
+
+      assert {:ok, []} = ChunkWriter.write_chunks("test-vol", [])
+    end
+  end
+
   describe "write_file_stream/4 — happy path" do
     test "writes a single chunk and returns an ordered ref list" do
       volume = volume_fixture()

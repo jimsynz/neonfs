@@ -19,7 +19,7 @@ defmodule NeonFS.Block.LiveServerTest do
   alias NeonFS.Error.PermissionDenied
 
   @block 4096
-  @chunk 131_072
+  @chunk 4 * @block
   @size 16 * @block
   @export "vol:/dev.img"
 
@@ -37,15 +37,17 @@ defmodule NeonFS.Block.LiveServerTest do
   setup do
     test = self()
 
-    stub_core(fn _module, function, _args ->
+    stub_core(fn _module, function, args ->
       case function do
         :open_device -> open_device_reply()
         :flush -> hold_flush(test)
-        :write -> write_reply()
-        :write_zeroes -> write_zeroes_reply()
+        :read_refs -> read_refs_reply(args)
+        :commit_written -> commit_reply()
         _other -> :ok
       end
     end)
+
+    stub_data_plane()
 
     Application.put_env(:neonfs_block, :read_stream_fn, fn _device, opts ->
       send(test, {:read_opts, opts})
@@ -65,6 +67,8 @@ defmodule NeonFS.Block.LiveServerTest do
       Application.delete_env(:neonfs_block, :core_call_fn)
       Application.delete_env(:neonfs_block, :read_stream_fn)
       Application.delete_env(:neonfs_block, :coordinator_call_fn)
+      Application.delete_env(:neonfs_block, :write_chunks_fn)
+      Application.delete_env(:neonfs_block, :fetch_chunk_fn)
     end)
 
     start_supervised!(DeviceRegistry)
@@ -175,8 +179,13 @@ defmodule NeonFS.Block.LiveServerTest do
       payload = :binary.copy(<<0xEF>>, @block)
       :ok = :gen_tcp.send(socket, request(@write, 1, @block, @block) <> payload)
 
-      assert_receive {:core_call, :write, ["vol", "/dev.img", 4096, ^payload, [epoch: 0]]},
-                     2_000
+      # The bytes went over the data plane; what reaches core is the map,
+      # naming the extent the write landed in and the target its read saw.
+      assert_receive {:core_call, :commit_written, ["vol", "/dev.img", [{0, hash}], opts]}, 2_000
+
+      assert is_binary(hash)
+      assert Keyword.fetch!(opts, :epoch) == 0
+      assert Keyword.fetch!(opts, :expect) == [{0, :hole}]
 
       assert {:ok, <<@simple_reply_magic::32, 0::32, 1::64>>} = :gen_tcp.recv(socket, 16, 2_000)
     end
@@ -192,7 +201,7 @@ defmodule NeonFS.Block.LiveServerTest do
       assert_receive {[:neonfs, :block, :command], ^ref, measurements, %{command: :write}}, 2_000
 
       # Both halves of the ratio on one event: the guest asked for a block,
-      # the chunk layer moved a whole chunk to store it.
+      # the chunk layer moved a whole extent to store it.
       assert measurements.bytes == @block
       assert measurements.chunk_bytes == @chunk
 
@@ -212,11 +221,11 @@ defmodule NeonFS.Block.LiveServerTest do
                      2_000
 
       # The guest bytes and the chunk-layer bytes are unrelated for a
-      # zero-fill, and neither describes it alone — what it cost is the
-      # entries it replaced.
+      # zero-fill, and neither describes it alone — a whole-device TRIM
+      # writes nothing at all and costs the entries it dropped.
       assert measurements.bytes == @size
-      assert measurements.chunk_bytes == @chunk
-      assert measurements.chunks_replaced == 3
+      assert measurements.chunk_bytes == 0
+      assert measurements.chunks_replaced == div(@size, @chunk)
 
       :telemetry.detach(ref)
     end
@@ -247,10 +256,12 @@ defmodule NeonFS.Block.LiveServerTest do
       <<head::binary-size(100), tail::binary>> = request(@write, 7, 0, @block) <> payload
 
       :ok = :gen_tcp.send(socket, head)
-      refute_receive {:core_call, :write, _args}, 200
+      refute_receive {:core_call, :commit_written, _args}, 200
 
       :ok = :gen_tcp.send(socket, tail)
-      assert_receive {:core_call, :write, ["vol", "/dev.img", 0, ^payload, [epoch: 0]]}, 2_000
+
+      assert_receive {:core_call, :commit_written, ["vol", "/dev.img", [{0, _hash}], _opts]},
+                     2_000
     end
 
     test "a flush is not acknowledged before the backing flush returns", %{port: port} do
@@ -279,18 +290,17 @@ defmodule NeonFS.Block.LiveServerTest do
       socket = connect(port)
       {:ok, _export} = handshake(socket, @export)
 
+      # Neither range covers an extent end to end, so both are read-modify
+      # -written rather than punched — the map still moves, and both commands
+      # arrive at the same place.
       :ok = :gen_tcp.send(socket, request(@trim, 3, @block, 2 * @block))
 
-      assert_receive {:core_call, :write_zeroes, ["vol", "/dev.img", 4096, 8192, [epoch: 0]]},
-                     2_000
-
+      assert_receive {:core_call, :commit_written, ["vol", "/dev.img", [{0, _}], _opts]}, 2_000
       assert {:ok, <<_magic::32, 0::32, 3::64>>} = :gen_tcp.recv(socket, 16, 2_000)
 
       :ok = :gen_tcp.send(socket, request(@write_zeroes, 4, 0, @block))
 
-      assert_receive {:core_call, :write_zeroes, ["vol", "/dev.img", 0, 4096, [epoch: 0]]},
-                     2_000
-
+      assert_receive {:core_call, :commit_written, ["vol", "/dev.img", [{0, _}], _opts]}, 2_000
       assert {:ok, <<_magic::32, 0::32, 4::64>>} = :gen_tcp.recv(socket, 16, 2_000)
     end
 
@@ -333,14 +343,20 @@ defmodule NeonFS.Block.LiveServerTest do
       socket = connect(port)
       {:ok, _export} = handshake(socket, @export)
 
-      stub_core(fn _module, :write, _args ->
-        case Agent.get_and_update(attempts, &{&1, &1 + 1}) do
-          n when n < 2 ->
-            send(test, {:stale, n})
-            {:error, :stale_chunks}
+      stub_core(fn _module, function, args ->
+        case function do
+          :commit_written ->
+            case Agent.get_and_update(attempts, &{&1, &1 + 1}) do
+              n when n < 2 ->
+                send(test, {:stale, n})
+                {:error, :stale_chunks}
 
-          _settled ->
-            write_reply()
+              _settled ->
+                commit_reply()
+            end
+
+          other ->
+            default_reply(other, args)
         end
       end)
 
@@ -372,7 +388,11 @@ defmodule NeonFS.Block.LiveServerTest do
       socket = connect(port)
       {:ok, _export} = handshake(socket, @export)
 
-      stub_core(fn _module, :write, _args -> {:error, :stale_chunks} end)
+      stub_core(fn _module, function, args ->
+        if function == :commit_written,
+          do: {:error, :stale_chunks},
+          else: default_reply(function, args)
+      end)
 
       :ok = :gen_tcp.send(socket, request(@write, 9, 0, @block) <> :binary.copy(<<3>>, @block))
 
@@ -434,24 +454,65 @@ defmodule NeonFS.Block.LiveServerTest do
 
   defp record(test, function, args) do
     send(test, {:core_call, function, args})
-
-    case function do
-      :open_device -> open_device_reply()
-      :write -> write_reply()
-      :write_zeroes -> write_zeroes_reply()
-      _other -> :ok
-    end
+    default_reply(function, args)
   end
 
-  # A 4 KiB guest write costs a whole chunk rewrite; `BlockBacking.write/5`
-  # does that arithmetic on core and returns it, because the chunk geometry
-  # is not known here.
-  defp write_reply, do: {:ok, %{chunk_bytes: @chunk, chunks_rewritten: 1}}
+  defp default_reply(:open_device, _args), do: open_device_reply()
+  defp default_reply(:read_refs, args), do: read_refs_reply(args)
+  defp default_reply(:commit_written, _args), do: commit_reply()
+  defp default_reply(_other, _args), do: :ok
 
-  # A zero-fill's two costs are unrelated numbers: the one chunk it clipped
-  # was rewritten, and the chunks it covered were replaced by hash.
-  defp write_zeroes_reply,
-    do: {:ok, %{chunk_bytes: @chunk, chunks_rewritten: 1, chunks_replaced: 3}}
+  # The device's extents, as core would describe them for a range: every one
+  # a hole, which is what a device nothing has written to looks like and what
+  # keeps the stub from having to model stored chunks.
+  defp read_refs_reply([_volume, _path, offset, length]) do
+    first = div(offset, @chunk)
+    last = div(offset + length - 1, @chunk)
+
+    extents =
+      Enum.map(first..last, fn index ->
+        extent_start = index * @chunk
+        span_start = max(offset, extent_start)
+        span_end = min(offset + length, extent_start + @chunk)
+
+        %{
+          index: index,
+          width: min(@chunk, @size - extent_start),
+          read_start: span_start - extent_start,
+          read_length: span_end - span_start,
+          target: :hole,
+          hash: nil,
+          locations: [],
+          compression: :none,
+          encrypted: false
+        }
+      end)
+
+    {:ok, %{chunk_bytes: @chunk, size: @size, extents: extents}}
+  end
+
+  defp commit_reply, do: {:ok, %{chunks_published: 0}}
+
+  # The data plane, as far as this test needs one: a write answers with a ref
+  # per chunk it was handed, and a fetch answers with the bytes an extent's
+  # chunk would hold.
+  defp stub_data_plane do
+    Application.put_env(:neonfs_block, :write_chunks_fn, fn _volume, chunks ->
+      {:ok,
+       Enum.map(chunks, fn data ->
+         %{
+           hash: :crypto.hash(:sha256, data),
+           locations: [%{node: node(), drive_id: "default", tier: :hot}],
+           size: byte_size(data),
+           codec: %{compression: :none, crypto: nil, original_size: byte_size(data)}
+         }
+       end)}
+    end)
+
+    Application.put_env(:neonfs_block, :fetch_chunk_fn, fn _volume, ref, _opts ->
+      {:ok, :binary.copy(<<0xC7>>, ref.width)}
+    end)
+  end
 
   defp open_device_reply do
     {:ok,

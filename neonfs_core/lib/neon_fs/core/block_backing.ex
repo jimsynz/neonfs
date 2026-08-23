@@ -93,6 +93,8 @@ defmodule NeonFS.Core.BlockBacking do
     BlockAttachment,
     BlockEpoch,
     BlockIndex,
+    ChunkIndex,
+    ChunkReconciler,
     Replication,
     VolumeRegistry,
     WriteOperation
@@ -147,6 +149,18 @@ defmodule NeonFS.Core.BlockBacking do
           logical_block_bytes: pos_integer(),
           physical_block_bytes: pos_integer(),
           epoch: non_neg_integer()
+        }
+
+  @type extent_ref :: %{
+          index: non_neg_integer(),
+          width: pos_integer(),
+          read_start: non_neg_integer(),
+          read_length: pos_integer(),
+          target: BlockIndex.target(),
+          hash: binary() | nil,
+          locations: [NeonFS.Core.ChunkMeta.location()],
+          compression: atom(),
+          encrypted: boolean()
         }
 
   @type write_cost :: %{chunk_bytes: non_neg_integer(), chunks_rewritten: non_neg_integer()}
@@ -316,6 +330,88 @@ defmodule NeonFS.Core.BlockBacking do
          {:ok, device} <- device_info(volume, path),
          :ok <- validate_range(device, offset, length) do
       {:ok, Stream.map(extent_spans(device, offset, length), &read_span!(device, &1))}
+    end
+  end
+
+  @doc """
+  What an interface node needs to read `length` bytes at `offset` itself.
+
+  One entry per extent the range touches, in order, carrying the chunk the
+  extent resolves to and where that chunk can be fetched from — so the
+  caller pulls the bytes over the data plane rather than having core read
+  them and ship them back over distribution.
+
+  An extent with no entry is reported as a hole rather than omitted: the
+  caller has to emit its zeroes, and it cannot tell an unwritten extent
+  from one this call forgot. A hole's `hash` and `locations` are empty for
+  the same reason — there is nothing to fetch, and the caller has to be able
+  to see that without interpreting the target.
+
+  Each entry also carries the `target` it resolved, which is what a
+  read-modify-write passes back as `:expect` so its commit can refuse a
+  snapshot that has since moved.
+  """
+  @spec read_refs(String.t(), String.t(), non_neg_integer(), pos_integer()) ::
+          {:ok, %{chunk_bytes: pos_integer(), size: non_neg_integer(), extents: [extent_ref()]}}
+          | {:error, term()}
+  def read_refs(volume, path, offset, length) do
+    with :ok <- validate_request(offset, length),
+         {:ok, device} <- device_info(volume, path),
+         :ok <- validate_range(device, offset, length),
+         {:ok, volume_record} <- Core.get_volume(volume),
+         {:ok, extents} <- resolve_refs(volume_record, device, offset, length) do
+      {:ok, %{chunk_bytes: device.chunk_bytes, size: device.size, extents: extents}}
+    end
+  end
+
+  @doc """
+  Publishes extents whose chunks an interface node has already written.
+
+  The inverse half of `write/5`: the caller placed the bytes itself through
+  `NeonFS.Client.ChunkWriter` and reports where it put them, so this call
+  only has to verify the claim and publish the map.
+
+  Verification is `NeonFS.Core.ChunkReconciler.reconcile/5`, shared with the
+  file commit — it asks each reported location whether it really holds the
+  chunk, because the writer's report is the very thing in doubt when a chunk
+  is missing. A map published over a chunk that is not there has no correct
+  answer to give a read.
+
+  `extents` is `[{extent_index, :hole | chunk_hash}]`. `opts` takes
+  `:locations` and `:chunk_codecs` keyed by hash (both from
+  `ChunkWriter.chunk_refs_to_commit_opts/1`), plus the `:epoch` and
+  `:expect` that `write/5` takes.
+  """
+  @spec commit_written(String.t(), String.t(), [{non_neg_integer(), :hole | binary()}], keyword()) ::
+          {:ok, %{chunks_published: non_neg_integer()}} | {:error, term()}
+  def commit_written(volume, path, extents, opts \\ []) do
+    start_time = System.monotonic_time()
+    hashes = for {_index, target} <- extents, is_binary(target), do: target
+    write_id = WriteOperation.generate_write_id()
+
+    with {:ok, volume_record} <- Core.get_volume(volume),
+         {:ok, device} <- device_info(volume, path),
+         :ok <- validate_extent_indices(device, extents),
+         {:ok, metas} <- reconcile(volume_record, hashes, opts, write_id),
+         {:ok, _roots} <- publish_written(device, extents, write_id, hashes, opts) do
+      charge_usage(volume_record.id,
+        physical_size: stored_bytes(metas),
+        chunk_count: length(hashes)
+      )
+
+      :telemetry.execute(
+        [:neonfs, :block, :commit_written],
+        %{
+          extents: length(extents),
+          chunks: length(hashes),
+          duration: System.monotonic_time() - start_time
+        },
+        %{volume: volume, path: path}
+      )
+
+      {:ok, %{chunks_published: length(hashes)}}
+    else
+      {:error, _reason} = error -> abort(error, write_id)
     end
   end
 
@@ -517,6 +613,109 @@ defmodule NeonFS.Core.BlockBacking do
 
   defp extent_count(%BlockDevice{size_bytes: size, chunk_bytes: chunk_bytes}),
     do: ceil_div(size, chunk_bytes)
+
+  # ─── The data-plane boundary ───────────────────────────────────────────
+
+  defp resolve_refs(volume_record, device, offset, length) do
+    device
+    |> extent_spans(offset, length)
+    |> Enum.reduce_while({:ok, []}, fn span, {:ok, acc} ->
+      case extent_ref(volume_record, device, span) do
+        {:ok, ref} -> {:cont, {:ok, [ref | acc]}}
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, refs} -> {:ok, Enum.reverse(refs)}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp extent_ref(volume_record, device, {index, within, count}) do
+    with {:ok, target} <- BlockIndex.get(device.volume, index) do
+      {:ok,
+       target
+       |> chunk_facts(volume_record)
+       |> Map.merge(%{
+         index: index,
+         width: extent_width(device, index),
+         read_start: within,
+         read_length: count,
+         target: target
+       })}
+    end
+  end
+
+  # A hole has no chunk to describe, and the caller emits its zeroes rather
+  # than fetching anything. A missing chunk record is not a hole — it is a
+  # map naming data the index cannot place, and inventing zeroes for it
+  # would hand the guest a silently wrong read.
+  defp chunk_facts(:hole, _volume_record), do: no_chunk()
+
+  defp chunk_facts({:chunk, hash}, volume_record) do
+    case ChunkIndex.get(volume_record.id, hash) do
+      {:ok, meta} ->
+        %{
+          hash: hash,
+          locations: meta.locations,
+          compression: meta.compression,
+          encrypted: not is_nil(meta.crypto)
+        }
+
+      {:error, :not_found} ->
+        %{no_chunk() | hash: hash}
+    end
+  end
+
+  defp chunk_facts({:stripe, _id, _member}, _volume_record), do: no_chunk()
+
+  # The `hash` is what the caller dials the data plane with, so it is a field
+  # of the ref rather than something to be dug out of the target — a hole has
+  # none, and neither does a stripe member until erasure reaches this path.
+  defp no_chunk, do: %{hash: nil, locations: [], compression: :none, encrypted: false}
+
+  defp reconcile(_volume_record, [], _opts, _write_id), do: {:ok, []}
+
+  defp reconcile(volume_record, hashes, opts, write_id) do
+    ChunkReconciler.reconcile(
+      volume_record.id,
+      hashes,
+      Keyword.get(opts, :locations, %{}),
+      Keyword.get(opts, :chunk_codecs, %{}),
+      write_id
+    )
+  end
+
+  defp publish_written(device, extents, write_id, hashes, opts) do
+    BlockIndex.commit(
+      device.volume,
+      Enum.map(extents, fn
+        {index, :hole} -> {index, :hole}
+        {index, hash} -> {index, {:chunk, hash}}
+      end),
+      opts
+      |> Keyword.take([:epoch, :expect])
+      |> Keyword.put(:device_path, device.path)
+      |> Keyword.put(:chunk_commit, {write_id, hashes})
+    )
+  end
+
+  # An index outside the device is a caller bug, and publishing it would put
+  # an extent in the map that no read can ever reach — the device's size is
+  # what bounds every read.
+  defp validate_extent_indices(device, extents) do
+    last = ceil_div(device.size, device.chunk_bytes) - 1
+
+    case Enum.find(extents, fn {index, _target} -> index < 0 or index > last end) do
+      nil -> :ok
+      {index, _target} -> {:error, {:extent_out_of_range, index, last}}
+    end
+  end
+
+  # The reconciler probed each location for the chunk's real on-disk size, so
+  # what it hands back is what the volume is charged — the writer's report of
+  # its own codec is not evidence of how many bytes landed.
+  defp stored_bytes(metas), do: Enum.reduce(metas, 0, &(&1.stored_size + &2))
 
   # ─── Reads ─────────────────────────────────────────────────────────────
 
