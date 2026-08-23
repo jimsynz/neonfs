@@ -7,9 +7,9 @@ defmodule NeonFS.Block.Device do
 
   ## Export names
 
-  An export names a backing file as `<volume>:<path>` — `blockvol:/dev.img`.
-  A volume name cannot contain a colon, so the split is unambiguous, and the
-  path keeps its leading slash exactly as it appears in the volume.
+  An export names a device as `<volume>:<path>` — `blockvol:/dev.img`. A
+  volume name cannot contain a colon, so the split is unambiguous, and the
+  path keeps its leading slash exactly as the device records it.
 
   A bare `<volume>` names that volume's own device, at the cluster-wide
   constant `NeonFS.Core.BlockAttachment.default_device_path/0` that core
@@ -18,11 +18,23 @@ defmodule NeonFS.Block.Device do
 
   ## Reads stream
 
-  A read never materialises its range. `NeonFS.Client.ChunkReader` yields one
-  chunk at a time and each is written to the socket as it arrives, so a client
-  asking for the largest request the export advertises still costs one chunk
-  of memory here. The reply header carries no length — the client already knows
-  it from its own request — so the payload can follow lazily.
+  A read never materialises its range: it is cut into extent-sized pieces
+  here and each is fetched with its own call, so a client asking for the
+  largest request the export advertises still costs one extent of memory.
+  The reply header carries no length — the client already knows it from its
+  own request — so the payload can follow lazily.
+
+  Those pieces cross Erlang distribution rather than the data plane, which
+  they did not while a device was a file: an extent is addressed by the map
+  on core, and resolving it to chunk references this node could fetch
+  itself is the next slice of the block work.
+
+  ## Writes carry the attachment's epoch
+
+  `open/1` reads the device's fencing epoch and every write is stamped with
+  it. A later attacher preempting this one bumps the epoch, so these writes
+  start failing with `{:fenced, current}` — the signal to tear the device
+  down rather than retry.
 
   ## Flush is a promise
 
@@ -40,16 +52,14 @@ defmodule NeonFS.Block.Device do
   `bytes` is what the guest asked for; `chunk_bytes` is what the chunk
   layer moved to serve it, so their ratio is the request's amplification.
   A write gets its `chunk_bytes` from `BlockBacking.write/5`'s reply,
-  because the arithmetic depends on the chunk geometry, which lives on
-  core. A read's equivalent cannot come from here at all — only
-  `NeonFS.Client.ChunkReader` knows which chunks a range read fetched —
-  so it arrives as that module's `chunk_fetched` events, tagged with this
-  export through `:telemetry_metadata`. `NeonFS.Block.Telemetry` exports
-  both.
+  because the arithmetic depends on the extent geometry, which lives on
+  core. A read has no counterpart: the extent map is resolved on core, so
+  this node asks for a byte range and is handed bytes, with nothing of
+  the chunk layer visible to count.
 
   A zero-fill answers with both numbers because neither describes it
-  alone: it rewrites only the chunks it clips, and replaces the ones it
-  covers by hash for the price of a metadata entry each. Reported as
+  alone: it rewrites only the extents it clips, and drops the ones it
+  covers for the price of a metadata entry each. Reported as
   `chunk_bytes` alone a full-device TRIM looks free; `chunks_replaced` is
   what it actually cost.
   """
@@ -57,7 +67,6 @@ defmodule NeonFS.Block.Device do
   @behaviour NeonFS.Block.Frontend
 
   alias NeonFS.Client
-  alias NeonFS.Client.ChunkReader
   alias NeonFS.Core.BlockAttachment
 
   @backing NeonFS.Core.BlockBacking
@@ -66,8 +75,10 @@ defmodule NeonFS.Block.Device do
           export: String.t(),
           volume: String.t(),
           path: String.t(),
-          file_id: binary(),
+          id: binary(),
           size: non_neg_integer(),
+          chunk_bytes: pos_integer(),
+          epoch: non_neg_integer(),
           logical_block_size: pos_integer(),
           physical_block_size: pos_integer(),
           read_only: boolean()
@@ -76,8 +87,8 @@ defmodule NeonFS.Block.Device do
   @doc """
   Resolves an export name into a device handle.
 
-  Fails rather than inventing a device: the backing file has to exist, which
-  is `create_device/4`'s job and not something an attach should do implicitly.
+  Fails rather than inventing a device: the device has to exist, which is
+  `create_device/4`'s job and not something an attach should do implicitly.
   """
   @spec open(String.t()) :: {:ok, t()} | {:error, term()}
   def open(export) when is_binary(export) do
@@ -88,8 +99,10 @@ defmodule NeonFS.Block.Device do
          export: export,
          volume: volume,
          path: path,
-         file_id: info.file_id,
+         id: info.id,
          size: info.size,
+         chunk_bytes: info.chunk_bytes,
+         epoch: info.epoch,
          logical_block_size: info.logical_block_bytes,
          physical_block_size: info.physical_block_bytes,
          read_only: false
@@ -111,31 +124,63 @@ defmodule NeonFS.Block.Device do
   end
 
   @doc """
-  Streams `length` bytes at `offset`, one element per chunk.
+  Streams `length` bytes at `offset`, one element per extent.
 
-  Returns the stream rather than the bytes so the caller can write each chunk
-  to the socket as it arrives.
+  Returns the stream rather than the bytes so the caller can write each piece
+  to the socket as it arrives. The pieces are cut to the device's extents so
+  that each call answers from one extent, which is what bounds the memory a
+  whole-device read costs.
   """
   @spec read_stream(t(), non_neg_integer(), pos_integer()) ::
           {:ok, Enumerable.t()} | {:error, term()}
   def read_stream(device, offset, length) do
-    case read_call(device, offset, length) do
-      {:ok, %{stream: stream}} -> {:ok, stream}
-      {:error, _reason} = error -> error
+    case Application.get_env(:neonfs_block, :read_stream_fn) do
+      nil -> extent_stream(device, offset, length)
+      fun when is_function(fun, 2) -> stream_from(fun.(device, read_opts(device, offset, length)))
     end
   end
 
-  defp read_call(device, offset, length) do
-    opts = [
-      offset: offset,
-      length: length,
-      telemetry_metadata: %{export: device.export}
-    ]
+  # The first piece is fetched eagerly so the failures a caller can be told
+  # about — a range past the end of the device, an unreachable core, a
+  # device that has gone — still come back as an error status. Past that
+  # point the reply header has gone out and NBD has no status left to send,
+  # so a failure can only end the connection.
+  defp extent_stream(device, offset, length) do
+    [first | rest] = extent_spans(device, offset, length)
 
-    case Application.get_env(:neonfs_block, :read_stream_fn) do
-      nil -> ChunkReader.read_file_stream_by_id(device.volume, device.file_id, opts)
-      fun when is_function(fun, 2) -> fun.(device, opts)
+    with {:ok, head} <- read_span(device, first) do
+      {:ok, Stream.concat([head], Stream.map(rest, &read_span!(device, &1)))}
     end
+  end
+
+  defp read_opts(device, offset, length) do
+    [offset: offset, length: length, telemetry_metadata: %{export: device.export}]
+  end
+
+  defp stream_from({:ok, %{stream: stream}}), do: {:ok, stream}
+  defp stream_from({:error, _reason} = error), do: error
+
+  defp read_span(device, {offset, length}) do
+    core_call(:read, [device.volume, device.path, offset, length])
+  end
+
+  defp read_span!(device, span) do
+    case read_span(device, span) do
+      {:ok, data} -> data
+      {:error, reason} -> raise "block device read failed: #{inspect(reason)}"
+    end
+  end
+
+  defp extent_spans(%{chunk_bytes: chunk_bytes}, offset, length) do
+    first = div(offset, chunk_bytes)
+    last = div(offset + length - 1, chunk_bytes)
+
+    Enum.map(first..last, fn index ->
+      extent_start = index * chunk_bytes
+      span_start = max(offset, extent_start)
+      span_end = min(offset + length, extent_start + chunk_bytes)
+      {span_start, span_end - span_start}
+    end)
   end
 
   @doc """
@@ -145,7 +190,7 @@ defmodule NeonFS.Block.Device do
   def write(device, offset, data) do
     retrying_stale(:write, fn ->
       measure(device, :write, byte_size(data), fn ->
-        core_call(:write, [device.volume, device.file_id, offset, data])
+        core_call(:write, [device.volume, device.path, offset, data, epoch_opts(device)])
       end)
     end)
   end
@@ -156,7 +201,7 @@ defmodule NeonFS.Block.Device do
   @spec flush(t()) :: :ok | {:error, term()}
   def flush(device) do
     measure(device, :flush, 0, fn ->
-      core_call(:flush, [device.volume, device.file_id])
+      core_call(:flush, [device.volume, device.path])
     end)
   end
 
@@ -167,7 +212,13 @@ defmodule NeonFS.Block.Device do
   def write_zeroes(device, offset, length) do
     retrying_stale(:write_zeroes, fn ->
       measure(device, :write_zeroes, length, fn ->
-        core_call(:write_zeroes, [device.volume, device.file_id, offset, length])
+        core_call(:write_zeroes, [
+          device.volume,
+          device.path,
+          offset,
+          length,
+          epoch_opts(device)
+        ])
       end)
     end)
   end
@@ -200,6 +251,8 @@ defmodule NeonFS.Block.Device do
         result
     end
   end
+
+  defp epoch_opts(device), do: [epoch: device.epoch]
 
   defp stale_retries, do: Application.get_env(:neonfs_block, :stale_write_retries, 3)
 

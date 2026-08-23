@@ -739,10 +739,10 @@ defmodule NeonFS.CSI.NodeServer do
 
   # A bare export name resolves to the volume's own device, which is the
   # form the block target answers and the one that does not require this
-  # node to know the backing file's path.
+  # node to know the device's path.
   #
   # `-b 4096` is not decoration: nbd-client defaults to 512-byte blocks
-  # whatever the server advertises, and the backing store refuses a
+  # whatever the server advertises, and the device store refuses a
   # request that is not 4 KiB-aligned.
   defp default_block_attach(volume_id) do
     with {:ok, {host, port}} <- block_endpoint(),

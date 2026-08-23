@@ -26,7 +26,9 @@ defmodule NeonFS.Block.SupervisorTest do
         :open_device ->
           {:ok,
            %{
-             file_id: "file",
+             id: "device",
+             chunk_bytes: 4096,
+             epoch: 0,
              size: 65_536,
              logical_block_bytes: 4096,
              physical_block_bytes: 4096

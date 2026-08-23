@@ -10,7 +10,6 @@ defmodule NeonFS.Core.VolumeRegistry do
   require Logger
 
   alias NeonFS.Cluster.State, as: ClusterState
-  alias NeonFS.Core.BlockBacking
   alias NeonFS.Core.ChunkIndex
   alias NeonFS.Core.DriveRegistry
   alias NeonFS.Core.FileIndex
@@ -523,7 +522,6 @@ defmodule NeonFS.Core.VolumeRegistry do
   defp do_delete_volume(id) do
     with {:ok, volume} <- get(id),
          :ok <- check_not_system_volume(volume),
-         :ok <- BlockBacking.delete_volume_device(volume),
          :ok <- check_volume_empty(volume),
          :ok <- delete_volume_persisted(id, volume) do
       deprovision_bootstrap_entry(id)

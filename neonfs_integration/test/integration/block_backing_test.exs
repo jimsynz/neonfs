@@ -1,6 +1,6 @@
 defmodule NeonFS.Integration.BlockBackingTest do
   @moduledoc """
-  Crash consistency for the file-backed block device store.
+  Crash consistency for the extent-map block device store.
 
   A block device makes two promises a filesystem does not have to make as
   loudly: an acknowledged flush must survive the loss of the node that
@@ -27,6 +27,7 @@ defmodule NeonFS.Integration.BlockBackingTest do
   @moduletag :integration
 
   @volume "block-backing"
+  @device "/dev.img"
   @volume_opts %{
     durability: %{type: :replicate, factor: 2, min_copies: 2},
     compression: %{algorithm: :none, level: 0, min_size: 0}
@@ -44,7 +45,7 @@ defmodule NeonFS.Integration.BlockBackingTest do
   test "a flushed write survives the restart of the node that took it, with no stale sector",
        %{cluster: cluster} do
     {:ok, device} =
-      block_rpc(cluster, :node1, :create_device, [@volume, "/dev.img", @device_chunks * @chunk])
+      block_rpc(cluster, :node1, :create_device, [@volume, @device, @device_chunks * @chunk])
 
     stale = :binary.copy(<<0xA1>>, @block)
     fresh = :binary.copy(<<0xB2>>, @block)
@@ -54,62 +55,63 @@ defmodule NeonFS.Integration.BlockBackingTest do
     untouched_at = 5 * @chunk
 
     {:ok, _} =
-      block_rpc(cluster, :node1, :write, [@volume, device.file_id, overwritten_at, stale])
+      block_rpc(cluster, :node1, :write, [@volume, device.path, overwritten_at, stale])
 
     {:ok, _} =
-      block_rpc(cluster, :node1, :write, [@volume, device.file_id, untouched_at, untouched])
+      block_rpc(cluster, :node1, :write, [@volume, device.path, untouched_at, untouched])
 
-    :ok = block_rpc(cluster, :node1, :flush, [@volume, device.file_id])
+    :ok = block_rpc(cluster, :node1, :flush, [@volume, device.path])
 
     {:ok, _} =
-      block_rpc(cluster, :node1, :write, [@volume, device.file_id, overwritten_at, fresh])
+      block_rpc(cluster, :node1, :write, [@volume, device.path, overwritten_at, fresh])
 
-    :ok = block_rpc(cluster, :node1, :flush, [@volume, device.file_id])
+    :ok = block_rpc(cluster, :node1, :flush, [@volume, device.path])
 
     {:ok, cluster} = PeerCluster.restart_node(cluster, :node1)
     stabilise_after_restart(cluster)
 
     assert {:ok, ^fresh} =
-             block_rpc(cluster, :node2, :read, [@volume, device.file_id, overwritten_at, @block])
+             block_rpc(cluster, :node2, :read, [@volume, device.path, overwritten_at, @block])
 
     assert {:ok, ^untouched} =
-             block_rpc(cluster, :node2, :read, [@volume, device.file_id, untouched_at, @block])
+             block_rpc(cluster, :node2, :read, [@volume, device.path, untouched_at, @block])
 
     assert {:ok, zeroes} =
-             block_rpc(cluster, :node2, :read, [@volume, device.file_id, 7 * @chunk, @block])
+             block_rpc(cluster, :node2, :read, [@volume, device.path, 7 * @chunk, @block])
 
     assert zeroes == :binary.copy(<<0>>, @block)
 
-    {:ok, info} = block_rpc(cluster, :node2, :device_info, [@volume, device.file_id])
+    {:ok, info} = block_rpc(cluster, :node2, :device_info, [@volume, device.path])
     assert info.size == @device_chunks * @chunk
+    assert info.id == device.id
   end
 
   test "zeroing a range is durable and does not resurrect the bytes it replaced",
        %{cluster: cluster} do
     {:ok, device} =
-      block_rpc(cluster, :node1, :create_device, [@volume, "/zeroed.img", @device_chunks * @chunk])
+      block_rpc(cluster, :node1, :create_device, [@volume, @device, @device_chunks * @chunk])
 
     payload = :binary.copy(<<0xD4>>, 2 * @chunk)
 
-    {:ok, _} = block_rpc(cluster, :node1, :write, [@volume, device.file_id, 0, payload])
-    :ok = block_rpc(cluster, :node1, :flush, [@volume, device.file_id])
+    {:ok, _} = block_rpc(cluster, :node1, :write, [@volume, device.path, 0, payload])
+    :ok = block_rpc(cluster, :node1, :flush, [@volume, device.path])
 
     # The cost rides back on the reply, which is why it is returned rather
     # than only emitted: node1's telemetry is invisible to an exporter on
     # the interface node that asked for the zero-fill.
-    assert {:ok, %{chunks_replaced: 1, chunks_rewritten: 0}} =
-             block_rpc(cluster, :node1, :write_zeroes, [@volume, device.file_id, 0, @chunk])
+    assert {:ok, %{chunks_replaced: 1, chunks_rewritten: 0, chunk_bytes: 0}} =
+             block_rpc(cluster, :node1, :write_zeroes, [@volume, device.path, 0, @chunk])
 
-    :ok = block_rpc(cluster, :node1, :flush, [@volume, device.file_id])
+    :ok = block_rpc(cluster, :node1, :flush, [@volume, device.path])
 
     {:ok, cluster} = PeerCluster.restart_node(cluster, :node1)
     stabilise_after_restart(cluster)
 
-    assert {:ok, zeroed} = block_rpc(cluster, :node2, :read, [@volume, device.file_id, 0, @block])
+    assert {:ok, zeroed} = block_rpc(cluster, :node2, :read, [@volume, device.path, 0, @block])
     assert zeroed == :binary.copy(<<0>>, @block)
 
     assert {:ok, kept} =
-             block_rpc(cluster, :node2, :read, [@volume, device.file_id, @chunk, @block])
+             block_rpc(cluster, :node2, :read, [@volume, device.path, @chunk, @block])
 
     assert kept == :binary.copy(<<0xD4>>, @block)
   end

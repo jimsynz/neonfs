@@ -15,6 +15,16 @@ defmodule NeonFS.Core.VolumeCommitter do
   The workers are stateless: a commit is a single
   `MetadataWriter.apply_batch/3`.
 
+  ## The worker is the volume's serialisation point
+
+  Because every commit for a volume routes through one process, it is also
+  the only place a caller's read-modify-write can be checked against what
+  the volume currently holds. A `:precondition` in `writer_opts` runs there,
+  immediately before the batch: a caller that read a value, computed a new
+  one from it and arrived after someone else published a different one is
+  refused rather than overwriting them. Checking before the call instead
+  would leave exactly the window the check exists to close.
+
   ## A commit that outruns its deadline is an error, not an exit
 
   `commit/3` answers a call timeout with a `class: :unavailable` error
@@ -72,6 +82,10 @@ defmodule NeonFS.Core.VolumeCommitter do
   @doc """
   Commit `mutations` on `volume_id`'s worker as one atomic publication.
   Returns `%{shard => root_chunk_hash}` for the shards touched, or an error.
+
+  `writer_opts` may carry a `:precondition` — a zero-arity function run on
+  the worker just before the batch. Anything other than `:ok` from it is
+  returned instead of committing.
   """
   @spec commit(binary(), [MetadataWriter.mutation()], keyword()) ::
           {:ok, %{optional(non_neg_integer()) => binary()}} | MetadataWriter.write_error()
@@ -95,6 +109,14 @@ defmodule NeonFS.Core.VolumeCommitter do
 
   @impl true
   def handle_call({:commit, volume_id, mutations, writer_opts}, _from, state) do
-    {:reply, MetadataWriter.apply_batch(volume_id, mutations, writer_opts), state}
+    {precondition, writer_opts} = Keyword.pop(writer_opts, :precondition)
+
+    case check(precondition) do
+      :ok -> {:reply, MetadataWriter.apply_batch(volume_id, mutations, writer_opts), state}
+      {:error, _reason} = error -> {:reply, error, state}
+    end
   end
+
+  defp check(nil), do: :ok
+  defp check(precondition) when is_function(precondition, 0), do: precondition.()
 end

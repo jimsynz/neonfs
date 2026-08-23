@@ -16,7 +16,15 @@ defmodule NeonFS.Block.DeviceRegistryTest do
     Application.put_env(:neonfs_block, :core_call_fn, fn _module, function, args ->
       send(test, {:core_call, function, args})
 
-      {:ok, %{file_id: "file", size: 4096, logical_block_bytes: 512, physical_block_bytes: 512}}
+      {:ok,
+       %{
+         id: "device",
+         size: 4096,
+         chunk_bytes: 4096,
+         epoch: 0,
+         logical_block_bytes: 512,
+         physical_block_bytes: 512
+       }}
     end)
 
     on_exit(fn -> Application.delete_env(:neonfs_block, :core_call_fn) end)

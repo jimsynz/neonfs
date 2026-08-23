@@ -186,18 +186,82 @@ defmodule NeonFS.Core.BlockIndex do
   preempted and must tear its end down rather than retry. Without `:epoch`
   the commit is unfenced, which is what a caller that does not hold a device
   — GC, repair, provisioning — wants.
+
+  ## Publishing the chunks
+
+  Pass `:chunk_commit` as `{write_id, hashes}` to publish the chunks the
+  extents name in the same batch that publishes the map. The chunk metadata
+  flips to `:committed` inside this commit's shard-CAS, and `write_id`'s
+  references are released once it is durable — so there is no window in
+  which a published extent points at a chunk that still looks uncommitted,
+  which is the state `WriteOperation.abort_chunks/1` sweeps.
+
+  A caller that omits it has published a map naming chunks nothing else
+  holds a reference to. That is only correct for a caller whose chunks were
+  already committed by someone else.
+
+  ## Publishing what you read
+
+  A sub-extent write is a read-modify-write of a whole extent, so two of
+  them against one extent each compute their result from the same starting
+  point and the later commit silently discards the earlier one's bytes.
+  Pass `:expect` as `[{extent_index, target}]` — the targets the caller's
+  read saw — and the commit becomes a compare-and-swap: a caller whose
+  snapshot went stale is refused with `{:error, :stale_chunks}` and must
+  redo its read rather than overwrite someone else's write.
+
+  Only the extents the caller actually read need naming. One it overwrites
+  end to end owes nothing to what was there before, so ordering between two
+  such writers is arbitrary rather than lossy — which matters, because the
+  check costs a read per named extent and it is paid on the volume's
+  committer, where nothing else for that volume can proceed meanwhile.
   """
   @spec commit(String.t(), [extent()], keyword()) ::
           {:ok, %{optional(non_neg_integer()) => binary()}} | {:error, term()}
   def commit(volume_name, extents, opts \\ [])
       when is_binary(volume_name) and is_list(extents) do
     committer = Keyword.get(opts, :volume_committer, VolumeCommitter)
+    {write_id, hashes} = Keyword.get(opts, :chunk_commit, {nil, []})
 
     with {:ok, volume} <- resolve_volume(volume_name),
-         :ok <- check_epoch(volume, opts) do
-      committer.commit(volume.id, mutations(extents), writer_opts(opts))
+         :ok <- check_epoch(volume, opts),
+         mutations = mutations(extents) ++ ChunkIndex.commit_mutations(volume.id, hashes),
+         {:ok, roots} <- committer.commit(volume.id, mutations, commit_opts(volume, opts)) do
+      finalize_chunk_commit(write_id, hashes)
+      {:ok, roots}
     end
   end
+
+  # A caller that read nothing has nothing to compare, and installing a check
+  # that cannot fail would put a closure through the committer for every
+  # whole-extent write.
+  defp commit_opts(volume, opts) do
+    case Keyword.get(opts, :expect, []) do
+      [] ->
+        writer_opts(opts)
+
+      expected ->
+        Keyword.put(writer_opts(opts), :precondition, unchanged?(volume, expected, opts))
+    end
+  end
+
+  # Runs on the volume's committer, so what it reads cannot change between
+  # the check and the batch it guards.
+  defp unchanged?(volume, expected, opts) do
+    fn -> Enum.reduce_while(expected, :ok, &still_holds(volume, opts, &1, &2)) end
+  end
+
+  defp still_holds(volume, opts, {extent_index, target}, :ok) do
+    case do_get(volume.id, extent_index, opts) do
+      {:ok, ^target} -> {:cont, :ok}
+      {:ok, _other} -> {:halt, {:error, :stale_chunks}}
+      {:error, _reason} = error -> {:halt, error}
+    end
+  end
+
+  defp finalize_chunk_commit(nil, _hashes), do: :ok
+  defp finalize_chunk_commit(_write_id, []), do: :ok
+  defp finalize_chunk_commit(write_id, hashes), do: ChunkIndex.finalize_commit(write_id, hashes)
 
   # The check is a consensus read on the commit path, so it is paid once per
   # *batch* rather than per guest write — the same property that makes the
@@ -242,13 +306,32 @@ defmodule NeonFS.Core.BlockIndex do
       when is_binary(volume_name) and is_integer(extent_index) do
     with {:ok, volume} <- resolve_volume(volume_name),
          {:ok, target} <- do_get(volume.id, extent_index, opts) do
-      case target do
-        :hole -> {:ok, <<0::size(BlockBacking.chunk_bytes_for(volume))-unit(8)>>}
-        {:chunk, hash} -> fetch_chunk(volume.id, hash, opts)
-        {:stripe, _stripe_id, _member} -> {:error, :erasure_extent_unsupported}
-      end
+      do_read_target(volume, target, opts)
     end
   end
+
+  @doc """
+  The bytes of a target already resolved by `get/3`.
+
+  For a caller that needed the target for its own reasons — a
+  read-modify-write, which has to name what it read so its commit can
+  compare against it — this is `read_extent/3` without the second lookup of
+  the entry it is already holding.
+  """
+  @spec read_target(String.t(), target(), keyword()) :: {:ok, binary()} | {:error, term()}
+  def read_target(volume_name, target, opts \\ []) when is_binary(volume_name) do
+    with {:ok, volume} <- resolve_volume(volume_name) do
+      do_read_target(volume, target, opts)
+    end
+  end
+
+  defp do_read_target(volume, :hole, _opts),
+    do: {:ok, <<0::size(BlockBacking.chunk_bytes_for(volume))-unit(8)>>}
+
+  defp do_read_target(volume, {:chunk, hash}, opts), do: fetch_chunk(volume.id, hash, opts)
+
+  defp do_read_target(_volume, {:stripe, _stripe_id, _member}, _opts),
+    do: {:error, :erasure_extent_unsupported}
 
   @doc """
   The volume's device header, or `:not_found` where it has none.
@@ -353,7 +436,9 @@ defmodule NeonFS.Core.BlockIndex do
     :chunk_reader,
     :epoch_checker,
     :epoch,
-    :device_path
+    :device_path,
+    :chunk_commit,
+    :expect
   ]
 
   defp writer_opts(opts), do: Keyword.drop(opts, @injection_opts)

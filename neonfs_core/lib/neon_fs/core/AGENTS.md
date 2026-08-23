@@ -82,9 +82,10 @@ cluster-wide truth queries. For cluster-wide reads use the canonical
   `original_size` to find positions. So a chunk cannot be dropped from
   the middle of a file — that shifts every chunk after it — and a hole
   can only be a tail: `FileIndex.truncate/3` growing a file writes
-  `size:` alone and the read path zero-fills past the last chunk.
-  `BlockBacking` leans on both, which is why its discard zero-fills
-  rather than punching.
+  `size:` alone and the read path zero-fills past the last chunk. This
+  is why a block device is **not** a file: `BlockIndex` keys each extent
+  by its own index, so an extent can be dropped and a discard punches
+  rather than zero-filling.
 - Ra `consistent_query` goes via the leader; `local_query` reads the
   local replica synchronously (`RaSupervisor.local_query/2`). The
   per-volume `MetadataReader` uses `consistent_query` for the

@@ -58,7 +58,7 @@ defmodule NeonFS.Block.DeviceRegistry do
   end
 
   @doc """
-  Attaches `holder` to `export`, resolving the backing file on first use.
+  Attaches `holder` to `export`, resolving the device on first use.
 
   Returns the shared device handle. A second attach of an already-attached
   export does not re-resolve it, nor re-claim it.

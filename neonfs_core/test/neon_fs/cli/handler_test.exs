@@ -644,33 +644,6 @@ defmodule NeonFS.CLI.HandlerTest do
       assert volume.type == :fs
     end
 
-    test "creates a block volume from the string type the CLI sends" do
-      # Alone among these, this one provisions a device, so it needs the
-      # storage stack behind it rather than the registry alone.
-      start_drive_registry()
-      start_blob_store()
-      start_chunk_index()
-      start_file_index()
-      start_stripe_index()
-      ensure_chunk_access_tracker()
-
-      vol_name = "blk-vol-#{:rand.uniform(999_999)}"
-
-      assert {:ok, volume} =
-               Handler.create_volume(vol_name, %{"type" => "block", "max_size" => 1024 * 1024})
-
-      assert volume.type == :block
-      assert volume.max_size == 1024 * 1024
-      assert volume.compression.algorithm == :none
-
-      assert {:ok, stored} = VolumeRegistry.get_by_name(vol_name)
-      assert stored.type == :block
-
-      assert {:ok, device} = BlockBacking.open_device(vol_name, BlockBacking.device_path())
-
-      assert device.size == 1024 * 1024
-    end
-
     test "refuses a block volume with no size" do
       vol_name = "blk-nosize-#{:rand.uniform(999_999)}"
 
@@ -748,20 +721,48 @@ defmodule NeonFS.CLI.HandlerTest do
     end
   end
 
+  # A device is an extent map in the volume's metadata tree, so provisioning
+  # one needs a cluster behind it rather than the registry alone.
+  describe "create_volume/2 for a block volume" do
+    setup %{tmp_dir: tmp_dir} do
+      {:ok, _cluster_id} = start_provisioned_cluster(tmp_dir)
+
+      on_exit(fn ->
+        stop_ra()
+        cleanup_test_dirs()
+      end)
+
+      :ok
+    end
+
+    test "creates a block volume from the string type the CLI sends" do
+      vol_name = "blk-vol-#{:rand.uniform(999_999)}"
+
+      assert {:ok, volume} =
+               Handler.create_volume(vol_name, %{"type" => "block", "max_size" => 1024 * 1024})
+
+      assert volume.type == :block
+      assert volume.max_size == 1024 * 1024
+      assert volume.compression.algorithm == :none
+
+      assert {:ok, stored} = VolumeRegistry.get_by_name(vol_name)
+      assert stored.type == :block
+
+      assert {:ok, device} = BlockBacking.open_device(vol_name, BlockBacking.device_path())
+
+      assert device.size == 1024 * 1024
+    end
+  end
+
   describe "create_volume/2 block chunk size" do
     setup %{tmp_dir: tmp_dir} do
-      configure_test_dirs(tmp_dir)
-      ensure_cluster_state()
-      stop_ra()
-      start_drive_registry()
-      start_blob_store()
-      start_chunk_index()
-      start_file_index()
-      start_stripe_index()
-      start_volume_registry()
-      ensure_chunk_access_tracker()
+      {:ok, _cluster_id} = start_provisioned_cluster(tmp_dir)
 
-      on_exit(fn -> cleanup_test_dirs() end)
+      on_exit(fn ->
+        stop_ra()
+        cleanup_test_dirs()
+      end)
+
       :ok
     end
 
@@ -860,25 +861,20 @@ defmodule NeonFS.CLI.HandlerTest do
 
   describe "get_volume/1 for a block volume" do
     setup %{tmp_dir: tmp_dir} do
-      configure_test_dirs(tmp_dir)
-      ensure_cluster_state()
-      stop_ra()
-      start_drive_registry()
-      start_blob_store()
-      start_chunk_index()
-      start_file_index()
-      start_stripe_index()
-      start_volume_registry()
-      ensure_chunk_access_tracker()
+      {:ok, _cluster_id} = start_provisioned_cluster(tmp_dir)
 
-      on_exit(fn -> cleanup_test_dirs() end)
+      on_exit(fn ->
+        stop_ra()
+        cleanup_test_dirs()
+      end)
+
       :ok
     end
 
     # The CLI suppresses these counters for a block volume, which is exactly
     # what would hide a stats-accounting bug in the provisioning path, so the
     # daemon keeps reporting them and this test keeps watching them.
-    test "counts the provisioned device and fills the volume to its quota" do
+    test "reserves the volume's quota and charges nothing until the device is written" do
       size = 4 * BlockBacking.chunk_bytes()
       name = "block-stats-#{:rand.uniform(999_999)}"
 
@@ -888,11 +884,28 @@ defmodule NeonFS.CLI.HandlerTest do
       assert {:ok, found} = Handler.get_volume(name)
       assert found.type == :block
       assert found.max_size == size
+
+      # The device's address space is reserved whether or not it has been
+      # written to — it is the volume, and nothing else can occupy it.
       assert found.logical_size == size
-      assert found.file_count == 1
-      # The device's chunks are all zeroes, so they dedup to one blob.
-      assert found.chunk_count == 1
-      assert found.physical_size == BlockBacking.chunk_bytes()
+
+      # It holds no files at all, and an extent nothing has written is a
+      # hole rather than a stored chunk of zeroes.
+      assert found.file_count == 0
+      assert found.chunk_count == 0
+      assert found.physical_size == 0
+
+      {:ok, _cost} =
+        BlockBacking.write(
+          name,
+          BlockBacking.device_path(),
+          0,
+          :binary.copy(<<0xAB>>, BlockBacking.chunk_bytes())
+        )
+
+      assert {:ok, written} = Handler.get_volume(name)
+      assert written.chunk_count == 1
+      assert written.physical_size == BlockBacking.chunk_bytes()
     end
   end
 

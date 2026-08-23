@@ -11,9 +11,18 @@ defmodule NeonFS.Core.BlockIndexTest do
 
   defmodule StubCommitter do
     @moduledoc false
+
+    # Runs the precondition the way the real worker does, so a test of the
+    # compare-and-swap is a test of the contract rather than of the stub.
     def commit(volume_id, mutations, opts) do
-      send(self(), {:committed, volume_id, mutations, opts})
-      {:ok, %{0 => "root"}}
+      case Keyword.get(opts, :precondition, fn -> :ok end).() do
+        :ok ->
+          send(self(), {:committed, volume_id, mutations, opts})
+          {:ok, %{0 => "root"}}
+
+        {:error, _reason} = error ->
+          error
+      end
     end
   end
 
@@ -264,12 +273,75 @@ defmodule NeonFS.Core.BlockIndexTest do
     end
   end
 
+  # A sub-extent write reads a whole extent, splices its bytes in and writes
+  # the extent back, so two of them against one extent both start from the
+  # same value and the later commit discards the earlier one's bytes.
+  describe "commit/3 compare-and-swap" do
+    test "a commit whose expectation still holds is published" do
+      register_volume()
+      Process.put({:entry, :block_index, BlockExtent.key(4)}, BlockExtent.encode({:chunk, @hash}))
+
+      assert {:ok, _roots} =
+               BlockIndex.commit(
+                 @volume_name,
+                 [{4, {:chunk, @hash}}],
+                 opts() ++ [expect: [{4, {:chunk, @hash}}]]
+               )
+
+      assert_received {:committed, @volume_id, _mutations, _opts}
+    end
+
+    test "a commit whose extent moved under it is refused, and nothing is published" do
+      register_volume()
+      moved = :crypto.hash(:sha256, "someone-else")
+      Process.put({:entry, :block_index, BlockExtent.key(4)}, BlockExtent.encode({:chunk, moved}))
+
+      assert {:error, :stale_chunks} =
+               BlockIndex.commit(
+                 @volume_name,
+                 [{4, {:chunk, @hash}}],
+                 opts() ++ [expect: [{4, {:chunk, @hash}}]]
+               )
+
+      refute_received {:committed, @volume_id, _mutations, _opts}
+    end
+
+    # An extent a caller read as a hole and someone else has since filled is
+    # the same race, and the absent entry must not read as "unchanged".
+    test "an expectation of a hole is refused once the extent exists" do
+      register_volume()
+      Process.put({:entry, :block_index, BlockExtent.key(4)}, BlockExtent.encode({:chunk, @hash}))
+
+      assert {:error, :stale_chunks} =
+               BlockIndex.commit(
+                 @volume_name,
+                 [{4, {:chunk, @hash}}],
+                 opts() ++ [expect: [{4, :hole}]]
+               )
+    end
+
+    test "an extent the caller never read is not compared, so disjoint writers do not collide" do
+      register_volume()
+
+      assert {:ok, _roots} =
+               BlockIndex.commit(@volume_name, [{4, {:chunk, @hash}}], opts() ++ [expect: []])
+
+      assert_received {:committed, @volume_id, _mutations, opts}
+      refute Keyword.has_key?(opts, :precondition)
+    end
+  end
+
   describe "device header" do
     test "round-trips through put_device/3 and get_device/2" do
       register_volume()
 
       device =
-        BlockDevice.new(id: "dev-1", size_bytes: 8 * 1024 * 1024, chunk_bytes: 131_072)
+        BlockDevice.new(
+          id: "dev-1",
+          path: "/dev.img",
+          size_bytes: 8 * 1024 * 1024,
+          chunk_bytes: 131_072
+        )
 
       assert {:ok, %{0 => "root"}} = BlockIndex.put_device(@volume_name, device, opts())
       assert_receive {:committed, @volume_id, [{:put, :block_index, key, encoded}], _opts}
@@ -306,7 +378,7 @@ defmodule NeonFS.Core.BlockIndexTest do
       register_volume()
 
       device =
-        BlockDevice.new(id: "dev-1", size_bytes: 1024, chunk_bytes: 131_072)
+        BlockDevice.new(id: "dev-1", path: "/dev.img", size_bytes: 1024, chunk_bytes: 131_072)
 
       Process.put(:range, [
         {BlockDevice.key(), BlockDevice.encode(device)},
@@ -323,7 +395,7 @@ defmodule NeonFS.Core.BlockIndexTest do
       register_volume()
 
       device =
-        BlockDevice.new(id: "dev-1", size_bytes: 1024, chunk_bytes: 131_072)
+        BlockDevice.new(id: "dev-1", path: "/dev.img", size_bytes: 1024, chunk_bytes: 131_072)
 
       Process.put(:range, [
         {BlockDevice.key(), BlockDevice.encode(device)},

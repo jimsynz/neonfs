@@ -1,14 +1,13 @@
 defmodule NeonFS.Core.BlockBackingBenchTest do
   @moduledoc """
-  Opt-in write-amplification and metadata-commit harness for the
-  file-backed block device store.
+  Opt-in write-amplification and metadata-commit harness for the block
+  device store.
 
-  This is the evidence base for sizing the extent-map backend that
-  replaces this path: it reports, per guest write size, the bytes the
-  chunk layer actually rewrote and the rate at which the metadata layer
-  accepted the commits. A guest write costs a whole chunk rewrite plus one
-  metadata commit, so the numbers here bound what a file-backed device can
-  do before the extent map exists.
+  It reports, per guest write size, the bytes the chunk layer actually
+  rewrote and the rate at which the metadata layer accepted the commits.
+  A guest write costs a whole extent rewrite plus one metadata commit, so
+  the numbers here are what a coalescing window has to improve on — and
+  what the file-backed spike's figures are compared against.
 
   Single node, one drive, no cluster — the metadata-commit ceiling
   measured here is the local path's, and a peer cluster's quorum commit is
@@ -23,7 +22,7 @@ defmodule NeonFS.Core.BlockBackingBenchTest do
   use ExUnit.Case, async: false
   use NeonFS.TestCase
 
-  alias NeonFS.Core.{BlockBacking, VolumeRegistry}
+  alias NeonFS.Core.{BlockBacking, BlockIndex}
 
   @moduletag :benchmark
   @moduletag :tmp_dir
@@ -35,25 +34,21 @@ defmodule NeonFS.Core.BlockBackingBenchTest do
   @device_bytes 64 * @chunk
   @writes_per_size 200
 
-  # A write rewrites the whole `FileMeta.chunks` list, so the metadata cost
-  # per write grows with the device — the scaling table measures how fast.
+  # An extent is its own key, so the metadata cost per write should not grow
+  # with the device the way rewriting a whole chunk list did — the scaling
+  # table is what says whether it does.
   @scaling_device_sizes [64 * @chunk, 512 * @chunk, 4096 * @chunk]
 
   setup %{tmp_dir: tmp_dir} do
-    configure_test_dirs(tmp_dir)
-    stop_ra()
-    start_drive_registry()
-    start_blob_store()
-    start_chunk_index()
-    start_file_index()
-    start_stripe_index()
-    start_volume_registry()
-    ensure_chunk_access_tracker()
+    {:ok, _cluster_id} = start_provisioned_cluster(tmp_dir)
 
-    on_exit(fn -> cleanup_test_dirs() end)
+    on_exit(fn ->
+      stop_ra()
+      cleanup_test_dirs()
+    end)
 
     volume_name = "block-bench-#{:rand.uniform(999_999)}"
-    {:ok, _volume} = VolumeRegistry.create(volume_name, [])
+    {:ok, _volume} = create_provisioned_volume(volume_name)
 
     {:ok, volume_name: volume_name}
   end
@@ -86,12 +81,11 @@ defmodule NeonFS.Core.BlockBackingBenchTest do
     {:ok, device} = BlockBacking.create_device(volume_name, "/bench-create.img", @device_bytes)
     elapsed = System.monotonic_time() - started
 
-    {:ok, meta} = NeonFS.Core.get_file_meta_by_id(volume_name, device.file_id)
+    {:ok, extents} = BlockIndex.range(volume_name, 0, div(@device_bytes, device.chunk_bytes) - 1)
 
     %{
       size: @device_bytes,
-      chunk_count: length(meta.chunks),
-      distinct_chunks: meta.chunks |> Enum.uniq() |> length(),
+      extent_count: length(extents),
       ms: System.convert_time_unit(elapsed, :native, :millisecond)
     }
   end
@@ -100,10 +94,10 @@ defmodule NeonFS.Core.BlockBackingBenchTest do
     align = Keyword.get(opts, :align, @block)
     device_bytes = Keyword.get(opts, :device_bytes, @device_bytes)
 
-    path =
-      "/bench-#{write_bytes}-#{align}-#{device_bytes}-#{System.unique_integer([:positive])}.img"
-
-    {:ok, device} = BlockBacking.create_device(volume_name, path, device_bytes)
+    # A volume holds one device, so each row measures against its own.
+    volume = "#{volume_name}-#{System.unique_integer([:positive])}"
+    {:ok, _record} = create_provisioned_volume(volume)
+    {:ok, device} = BlockBacking.create_device(volume, "/bench.img", device_bytes)
 
     handler = "block-bench-#{System.unique_integer([:positive])}"
     test_pid = self()
@@ -123,7 +117,7 @@ defmodule NeonFS.Core.BlockBackingBenchTest do
     started = System.monotonic_time()
 
     for offset <- offsets do
-      {:ok, _cost} = BlockBacking.write(volume_name, device.file_id, offset, payload)
+      {:ok, _cost} = BlockBacking.write(volume, device.path, offset, payload)
     end
 
     elapsed = System.monotonic_time() - started
@@ -169,7 +163,7 @@ defmodule NeonFS.Core.BlockBackingBenchTest do
 
     == block backing: device creation ==
     size=#{div(creation.size, 1_048_576)} MiB \
-    chunks=#{creation.chunk_count} distinct_blobs=#{creation.distinct_chunks} \
+    extents_written=#{creation.extent_count} \
     elapsed=#{creation.ms} ms
 
     == block backing: random-write amplification (#{@writes_per_size} writes each) ==
@@ -190,7 +184,7 @@ defmodule NeonFS.Core.BlockBackingBenchTest do
     IO.puts("""
 
     == block backing: 4 KiB random writes vs device size (#{@writes_per_size} writes each) ==
-    device size   chunk entries   commits/s   guest MiB/s\
+    device size   extents         commits/s   guest MiB/s\
     """)
 
     for row <- scaling do
