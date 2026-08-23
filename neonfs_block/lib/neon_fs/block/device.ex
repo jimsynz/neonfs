@@ -1,9 +1,26 @@
 defmodule NeonFS.Block.Device do
   @moduledoc """
-  Maps NBD transmission commands onto `NeonFS.Core.BlockBacking`.
+  Maps NBD transmission commands onto a NeonFS block device.
 
   One module between the wire and the cluster, so the connection handler
   deals in protocol terms and this deals in storage terms.
+
+  ## No device byte crosses Erlang distribution
+
+  This node resolves the device's extents through core and moves their
+  bytes itself, over the TLS data plane: `NeonFS.Client.ChunkReader` to
+  pull an extent's chunk, `NeonFS.Client.ChunkWriter` to place a rewritten
+  one. What crosses distribution is the map — `read_refs` on the way in and
+  a batched commit on the way out — which is bounded by how many extents a
+  request touches rather than by its bytes.
+
+  Two things stay on core because they cannot be done here. A **compressed
+  or encrypted** chunk's stored bytes do not hash to its id and decoding
+  them needs the volume's key, so those extents are read through a core
+  call; `ChunkReader.chunk_readable?/1` is the test. And the **commit**
+  verifies this node's claim about where it put the chunks before it
+  publishes anything, because a writer's report is the very thing in doubt
+  when a chunk turns out to be missing.
 
   ## Export names
 
@@ -18,23 +35,33 @@ defmodule NeonFS.Block.Device do
 
   ## Reads stream
 
-  A read never materialises its range: it is cut into extent-sized pieces
-  here and each is fetched with its own call, so a client asking for the
-  largest request the export advertises still costs one extent of memory.
-  The reply header carries no length — the client already knows it from its
-  own request — so the payload can follow lazily.
+  A read never materialises its range: it is answered one extent at a time
+  and each piece is written to the socket as it arrives, so a client asking
+  for the largest request the export advertises still costs one extent of
+  memory. The reply header carries no length — the client already knows it
+  from its own request — so the payload can follow lazily.
 
-  Those pieces cross Erlang distribution rather than the data plane, which
-  they did not while a device was a file: an extent is addressed by the map
-  on core, and resolving it to chunk references this node could fetch
-  itself is the next slice of the block work.
+  An extent nothing has written is a hole, and its zeroes are synthesised
+  here rather than fetched: there is nothing to fetch.
+
+  ## Writes read what they modify
+
+  A write narrower than an extent is a read-modify-write of that whole
+  extent, done on this node — pull the extent, splice the guest's bytes in,
+  place the result as a new chunk. An extent the write covers end to end is
+  not read at all.
+
+  The commit names what those reads saw, so two writes into one extent
+  cannot silently discard each other. A write that loses that race redoes
+  itself; one that keeps losing answers `:stale_chunks`, which this module
+  retries before the frontend ever sees it.
 
   ## Writes carry the attachment's epoch
 
-  `open/1` reads the device's fencing epoch and every write is stamped with
-  it. A later attacher preempting this one bumps the epoch, so these writes
-  start failing with `{:fenced, current}` — the signal to tear the device
-  down rather than retry.
+  `open/1` reads the device's fencing epoch and every commit is stamped
+  with it. A later attacher preempting this one bumps the epoch, so these
+  writes start failing with `{:fenced, current}` — the signal to tear the
+  device down rather than retry.
 
   ## Flush is a promise
 
@@ -51,11 +78,11 @@ defmodule NeonFS.Block.Device do
 
   `bytes` is what the guest asked for; `chunk_bytes` is what the chunk
   layer moved to serve it, so their ratio is the request's amplification.
-  A write gets its `chunk_bytes` from `BlockBacking.write/5`'s reply,
-  because the arithmetic depends on the extent geometry, which lives on
-  core. A read has no counterpart: the extent map is resolved on core, so
-  this node asks for a byte range and is handed bytes, with nothing of
-  the chunk layer visible to count.
+  Both directions are measurable on this node now that both move their own
+  bytes: a write knows the extents it rewrote, and a read's fetches arrive
+  as `NeonFS.Client.ChunkReader`'s `chunk_fetched` events, tagged with this
+  export through `:telemetry_metadata`. `NeonFS.Block.Telemetry` exports
+  both.
 
   A zero-fill answers with both numbers because neither describes it
   alone: it rewrites only the extents it clips, and drops the ones it
@@ -67,6 +94,7 @@ defmodule NeonFS.Block.Device do
   @behaviour NeonFS.Block.Frontend
 
   alias NeonFS.Client
+  alias NeonFS.Client.{ChunkReader, ChunkWriter}
   alias NeonFS.Core.BlockAttachment
 
   @backing NeonFS.Core.BlockBacking
@@ -127,9 +155,7 @@ defmodule NeonFS.Block.Device do
   Streams `length` bytes at `offset`, one element per extent.
 
   Returns the stream rather than the bytes so the caller can write each piece
-  to the socket as it arrives. The pieces are cut to the device's extents so
-  that each call answers from one extent, which is what bounds the memory a
-  whole-device read costs.
+  to the socket as it arrives.
   """
   @spec read_stream(t(), non_neg_integer(), pos_integer()) ::
           {:ok, Enumerable.t()} | {:error, term()}
@@ -140,59 +166,24 @@ defmodule NeonFS.Block.Device do
     end
   end
 
-  # The first piece is fetched eagerly so the failures a caller can be told
-  # about — a range past the end of the device, an unreachable core, a
-  # device that has gone — still come back as an error status. Past that
-  # point the reply header has gone out and NBD has no status left to send,
-  # so a failure can only end the connection.
-  defp extent_stream(device, offset, length) do
-    [first | rest] = extent_spans(device, offset, length)
-
-    with {:ok, head} <- read_span(device, first) do
-      {:ok, Stream.concat([head], Stream.map(rest, &read_span!(device, &1)))}
-    end
-  end
-
-  defp read_opts(device, offset, length) do
-    [offset: offset, length: length, telemetry_metadata: %{export: device.export}]
-  end
-
-  defp stream_from({:ok, %{stream: stream}}), do: {:ok, stream}
-  defp stream_from({:error, _reason} = error), do: error
-
-  defp read_span(device, {offset, length}) do
-    core_call(:read, [device.volume, device.path, offset, length])
-  end
-
-  defp read_span!(device, span) do
-    case read_span(device, span) do
-      {:ok, data} -> data
-      {:error, reason} -> raise "block device read failed: #{inspect(reason)}"
-    end
-  end
-
-  defp extent_spans(%{chunk_bytes: chunk_bytes}, offset, length) do
-    first = div(offset, chunk_bytes)
-    last = div(offset + length - 1, chunk_bytes)
-
-    Enum.map(first..last, fn index ->
-      extent_start = index * chunk_bytes
-      span_start = max(offset, extent_start)
-      span_end = min(offset + length, extent_start + chunk_bytes)
-      {span_start, span_end - span_start}
-    end)
-  end
-
   @doc """
   Writes `data` at `offset`.
   """
   @spec write(t(), non_neg_integer(), binary()) :: :ok | {:error, term()}
   def write(device, offset, data) do
     retrying_stale(:write, fn ->
-      measure(device, :write, byte_size(data), fn ->
-        core_call(:write, [device.volume, device.path, offset, data, epoch_opts(device)])
-      end)
+      measure(device, :write, byte_size(data), fn -> do_write(device, offset, data) end)
     end)
+  end
+
+  # A write reports only what it rewrote. It never punches, so a
+  # `chunks_replaced` of zero on the same series would read as "this write
+  # replaced nothing" rather than "this write cannot".
+  defp do_write(device, offset, data) do
+    with {:ok, cost} <-
+           publish(device, offset, byte_size(data), &spliced_extent(device, &1, data, offset)) do
+      {:ok, Map.take(cost, [:chunk_bytes, :chunks_rewritten])}
+    end
   end
 
   @doc """
@@ -212,16 +203,205 @@ defmodule NeonFS.Block.Device do
   def write_zeroes(device, offset, length) do
     retrying_stale(:write_zeroes, fn ->
       measure(device, :write_zeroes, length, fn ->
-        core_call(:write_zeroes, [
-          device.volume,
-          device.path,
-          offset,
-          length,
-          epoch_opts(device)
-        ])
+        publish(device, offset, length, &zeroed_extent(device, &1))
       end)
     end)
   end
+
+  @doc """
+  Emits the telemetry for a read, whose bytes are counted by the caller as it
+  drains the stream rather than here.
+  """
+  @spec measure_read(t(), non_neg_integer(), integer(), :ok | :error) :: :ok
+  def measure_read(device, bytes, start_time, status) do
+    emit(device, :read, bytes, %{}, start_time, status)
+  end
+
+  # ─── Reads ─────────────────────────────────────────────────────────────
+
+  # The first piece is fetched eagerly so the failures a caller can be told
+  # about — a range past the end of the device, an unreachable core, a
+  # device that has gone — still come back as an error status. Past that
+  # point the reply header has gone out and NBD has no status left to send,
+  # so a failure can only end the connection.
+  defp extent_stream(device, offset, length) do
+    with {:ok, %{extents: [first | rest]}} <- read_refs(device, offset, length),
+         {:ok, head} <- ref_bytes(device, first) do
+      {:ok, Stream.concat([head], Stream.map(rest, &ref_bytes!(device, &1)))}
+    end
+  end
+
+  defp read_refs(device, offset, length) do
+    core_call(:read_refs, [device.volume, device.path, offset, length])
+  end
+
+  defp ref_bytes(_device, %{target: :hole} = ref), do: {:ok, zeroes(ref.read_length)}
+
+  defp ref_bytes(device, ref) do
+    with {:ok, bytes} <- extent_bytes(device, ref) do
+      {:ok, binary_part(bytes, ref.read_start, ref.read_length)}
+    end
+  end
+
+  defp ref_bytes!(device, ref) do
+    case ref_bytes(device, ref) do
+      {:ok, bytes} -> bytes
+      {:error, reason} -> raise "block device read failed: #{inspect(reason)}"
+    end
+  end
+
+  # The whole extent, which is what a read-modify-write needs and what a
+  # partial read slices out of. A chunk the data plane cannot serve — the
+  # stored bytes do not hash to its id, and only core holds the key — is
+  # asked of core by byte range instead.
+  defp extent_bytes(_device, %{target: :hole} = ref), do: {:ok, zeroes(ref.width)}
+
+  defp extent_bytes(device, ref) do
+    if ChunkReader.chunk_readable?(ref) do
+      device.volume
+      |> fetch_chunk(ref, telemetry_metadata: %{export: device.export})
+      |> fit(ref)
+    else
+      core_call(:read, [device.volume, device.path, extent_offset(device, ref), ref.width])
+    end
+  end
+
+  # The last extent of a device whose size is not a whole multiple of the
+  # extent width is short, and a splice that trusted the chunk's own length
+  # over the extent's would grow the device by the difference.
+  defp fit({:ok, bytes}, ref) when byte_size(bytes) >= ref.width,
+    do: {:ok, binary_part(bytes, 0, ref.width)}
+
+  defp fit({:ok, short}, ref),
+    do: {:error, {:short_extent, ref.index, byte_size(short), ref.width}}
+
+  defp fit({:error, _reason} = error, _ref), do: error
+
+  defp extent_offset(device, ref), do: ref.index * device.chunk_bytes
+
+  # ─── Writes ────────────────────────────────────────────────────────────
+
+  # Both mutating paths are the same transaction, and it happens here rather
+  # than on core: resolve the extents the request touches, build each one's
+  # new contents (reading only the ones the request does not cover end to
+  # end), place them over the data plane, and publish the map in one call
+  # that names what those reads saw.
+  defp publish(device, offset, length, build) do
+    with {:ok, %{extents: refs}} <- read_refs(device, offset, length),
+         {:ok, planned} <- plan(refs, build),
+         {:ok, written} <- place(device, planned) do
+      commit(device, planned, written)
+    end
+  end
+
+  defp plan(refs, build) do
+    refs
+    |> Enum.reduce_while({:ok, []}, fn ref, {:ok, acc} ->
+      case build.(ref) do
+        {:ok, target} -> {:cont, {:ok, [{ref, target} | acc]}}
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, planned} -> {:ok, Enum.reverse(planned)}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  # A write never punches: a guest writing zeroes is asking for those bytes
+  # to be there, and `write_zeroes/3` is the call that says otherwise.
+  defp spliced_extent(device, ref, data, offset) do
+    taken = extent_offset(device, ref) + ref.read_start - offset
+    slice = binary_part(data, taken, ref.read_length)
+
+    if ref.read_length == ref.width, do: {:ok, slice}, else: splice(device, ref, slice)
+  end
+
+  defp zeroed_extent(device, ref) do
+    if ref.read_length == ref.width do
+      {:ok, :hole}
+    else
+      with {:ok, bytes} <- splice(device, ref, zeroes(ref.read_length)) do
+        {:ok, punch_if_empty(bytes)}
+      end
+    end
+  end
+
+  defp splice(device, ref, slice) do
+    with {:ok, existing} <- extent_bytes(device, ref) do
+      tail_start = ref.read_start + ref.read_length
+
+      {:ok,
+       <<binary_part(existing, 0, ref.read_start)::binary, slice::binary,
+         binary_part(existing, tail_start, byte_size(existing) - tail_start)::binary>>}
+    end
+  end
+
+  defp punch_if_empty(bytes) do
+    if bytes == zeroes(byte_size(bytes)), do: :hole, else: bytes
+  end
+
+  # One data-plane call for the whole request, so a write spanning several
+  # extents selects a target once. A punch places nothing.
+  defp place(device, planned) do
+    case for {_ref, bytes} <- planned, is_binary(bytes), do: bytes do
+      [] -> {:ok, []}
+      bytes -> write_chunks(device.volume, bytes)
+    end
+  end
+
+  defp commit(device, planned, written) do
+    %{locations: locations, chunk_codecs: codecs} =
+      ChunkWriter.chunk_refs_to_commit_opts(written)
+
+    hashes = Enum.map(written, & &1.hash)
+
+    core_call(:commit_written, [
+      device.volume,
+      device.path,
+      extent_targets(planned, hashes),
+      [
+        locations: locations,
+        chunk_codecs: codecs,
+        epoch: device.epoch,
+        expect: expectations(planned)
+      ]
+    ])
+    |> case do
+      {:ok, _published} -> {:ok, cost(planned, written)}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  # The writer answers in the order it was given, so zipping the hashes back
+  # onto the extents that produced them is positional — the punches keep
+  # their place and take no hash.
+  defp extent_targets(planned, hashes) do
+    {targets, []} =
+      Enum.map_reduce(planned, hashes, fn
+        {ref, :hole}, remaining -> {{ref.index, :hole}, remaining}
+        {ref, _bytes}, [hash | rest] -> {{ref.index, hash}, rest}
+      end)
+
+    targets
+  end
+
+  # Only the extents this write actually read are compared. One it overwrote
+  # end to end owes nothing to what was there before, so naming it would
+  # make disjoint writers collide for no reason.
+  defp expectations(planned) do
+    for {ref, _target} <- planned, ref.read_length != ref.width, do: {ref.index, ref.target}
+  end
+
+  defp cost(planned, written) do
+    %{
+      chunk_bytes: Enum.reduce(written, 0, &(&1.size + &2)),
+      chunks_rewritten: length(written),
+      chunks_replaced: Enum.count(planned, &match?({_ref, :hole}, &1))
+    }
+  end
+
+  # ─── Retry, telemetry and plumbing ─────────────────────────────────────
 
   # A write that exhausted core's retry budget against a contended span has
   # lost nothing, so every frontend wants it retried rather than failed —
@@ -252,20 +432,16 @@ defmodule NeonFS.Block.Device do
     end
   end
 
-  defp epoch_opts(device), do: [epoch: device.epoch]
-
   defp stale_retries, do: Application.get_env(:neonfs_block, :stale_write_retries, 3)
 
   defp stale_backoff_ms, do: Application.get_env(:neonfs_block, :stale_write_backoff_ms, 10)
 
-  @doc """
-  Emits the telemetry for a read, whose bytes are counted by the caller as it
-  drains the stream rather than here.
-  """
-  @spec measure_read(t(), non_neg_integer(), integer(), :ok | :error) :: :ok
-  def measure_read(device, bytes, start_time, status) do
-    emit(device, :read, bytes, %{}, start_time, status)
+  defp read_opts(device, offset, length) do
+    [offset: offset, length: length, telemetry_metadata: %{export: device.export}]
   end
+
+  defp stream_from({:ok, %{stream: stream}}), do: {:ok, stream}
+  defp stream_from({:error, _reason} = error), do: error
 
   defp measure(device, command, bytes, fun) do
     start_time = System.monotonic_time()
@@ -302,6 +478,8 @@ defmodule NeonFS.Block.Device do
     )
   end
 
+  defp zeroes(size), do: :binary.copy(<<0>>, size)
+
   defp split_export(export) do
     case String.split(export, ":", parts: 2) do
       [volume, path] when volume != "" and path != "" ->
@@ -315,10 +493,25 @@ defmodule NeonFS.Block.Device do
     end
   end
 
-  # Overridable so a test can drive the server without a cluster behind it —
-  # the same `:core_call_fn` seam `neonfs_webdav` uses. Ordering guarantees
-  # (a flush that must not ack early) are only assertable against a callee the
-  # test can hold open.
+  # The three seams below are overridable so a test can drive the server
+  # without a cluster behind it — the same `:core_call_fn` shape
+  # `neonfs_webdav` uses, extended to the two data-plane calls now that this
+  # node moves the bytes itself. Ordering guarantees (a flush that must not
+  # ack early) are only assertable against a callee the test can hold open.
+  defp write_chunks(volume, chunks) do
+    case Application.get_env(:neonfs_block, :write_chunks_fn) do
+      nil -> ChunkWriter.write_chunks(volume, chunks)
+      fun when is_function(fun, 2) -> fun.(volume, chunks)
+    end
+  end
+
+  defp fetch_chunk(volume, ref, opts) do
+    case Application.get_env(:neonfs_block, :fetch_chunk_fn) do
+      nil -> ChunkReader.fetch_chunk(volume, ref, opts)
+      fun when is_function(fun, 3) -> fun.(volume, ref, opts)
+    end
+  end
+
   defp core_call(function, args) do
     case Application.get_env(:neonfs_block, :core_call_fn) do
       nil -> Client.core_call(@backing, function, args)

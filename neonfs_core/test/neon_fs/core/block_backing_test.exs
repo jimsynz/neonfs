@@ -473,6 +473,218 @@ defmodule NeonFS.Core.BlockBackingTest do
     end
   end
 
+  # What an interface node needs to move the bytes itself. The refs describe
+  # the map; the bytes never cross distribution.
+  describe "read_refs/4" do
+    # A block volume stores its device uncompressed, which is what lets the
+    # caller pull an extent's chunk over the data plane and check it against
+    # its own hash. The shared volume in this file compresses, so these use
+    # their own.
+    setup do
+      name = "refs-#{:rand.uniform(999_999)}"
+
+      {:ok, volume} =
+        NeonFS.Core.create_volume(name, type: :block, max_size: 4 * @chunk)
+
+      {:ok, device} = BlockBacking.open_device(name, BlockBacking.device_path())
+      {:ok, volume: volume, volume_name: name, device: device}
+    end
+
+    test "reports an unwritten extent as a hole rather than omitting it", %{
+      volume_name: volume_name,
+      device: device
+    } do
+      assert {:ok, %{chunk_bytes: @chunk, size: size, extents: extents}} =
+               BlockBacking.read_refs(volume_name, device.path, 0, 2 * @chunk)
+
+      assert size == 4 * @chunk
+      assert [first, second] = extents
+      assert first.index == 0
+      assert first.target == :hole
+      assert first.width == @chunk
+      assert first.read_start == 0
+      assert first.read_length == @chunk
+      assert second.index == 1
+      assert second.target == :hole
+    end
+
+    test "names the chunk an extent resolves to, and where to fetch it", %{
+      volume: volume,
+      volume_name: volume_name,
+      device: device
+    } do
+      {:ok, _} =
+        BlockBacking.write(volume_name, device.path, 0, :binary.copy(<<0x2B>>, @chunk))
+
+      assert {:ok, %{extents: [ref]}} =
+               BlockBacking.read_refs(volume_name, device.path, 0, @block)
+
+      assert {:chunk, hash} = ref.target
+      assert ref.read_start == 0
+      assert ref.read_length == @block
+      assert ref.width == @chunk
+      refute ref.encrypted
+      assert ref.compression == :none
+
+      # The locations are what the caller dials, so they have to be the
+      # chunk's real ones rather than a placeholder.
+      assert {:ok, meta} = ChunkIndex.get(volume.id, hash)
+      assert ref.locations == meta.locations
+      refute ref.locations == []
+    end
+
+    test "clips the first and last extents to the range", %{
+      volume_name: volume_name,
+      device: device
+    } do
+      assert {:ok, %{extents: [first, last]}} =
+               BlockBacking.read_refs(volume_name, device.path, @chunk - @block, 2 * @block)
+
+      assert first.index == 0
+      assert first.read_start == @chunk - @block
+      assert first.read_length == @block
+      assert last.index == 1
+      assert last.read_start == 0
+      assert last.read_length == @block
+    end
+
+    test "refuses a range past the end of the device", %{
+      volume_name: volume_name,
+      device: device
+    } do
+      assert {:error, {:out_of_range, _offset, _length, _size}} =
+               BlockBacking.read_refs(volume_name, device.path, 4 * @chunk - @block, 2 * @block)
+    end
+
+    # A compressed chunk's stored bytes do not hash to its id, so the caller
+    # cannot verify what the data plane hands it and has to ask core instead.
+    # It can only know that from the ref.
+    test "says so when an extent's chunk cannot be served by the data plane" do
+      name = "refs-zstd-#{:rand.uniform(999_999)}"
+      {:ok, _volume} = create_provisioned_volume(name)
+      {:ok, device} = BlockBacking.create_device(name, "/compressed.img", 2 * @chunk)
+
+      {:ok, _} = BlockBacking.write(name, device.path, 0, :binary.copy(<<0x11>>, @chunk))
+
+      assert {:ok, %{extents: [ref]}} = BlockBacking.read_refs(name, device.path, 0, @block)
+
+      assert ref.compression == :zstd
+    end
+  end
+
+  # The inverse half of `write/5`: the caller placed the bytes and reports
+  # where, and this only has to check the claim and publish the map.
+  describe "commit_written/4" do
+    setup %{volume_name: volume_name} do
+      {:ok, device} = BlockBacking.create_device(volume_name, "/dev.img", 4 * @chunk)
+      {:ok, device: device}
+    end
+
+    test "publishes extents whose chunks are really where the writer said", %{
+      volume: volume,
+      volume_name: volume_name,
+      device: device
+    } do
+      payload = :binary.copy(<<0x3C>>, @chunk)
+      {:ok, hash} = stage_chunk(volume, payload)
+
+      assert {:ok, %{chunks_published: 1}} =
+               BlockBacking.commit_written(volume_name, device.path, [{2, hash}],
+                 locations: %{hash => [local_location()]},
+                 chunk_codecs: %{hash => %{compression: :none, crypto: nil}}
+               )
+
+      assert {:ok, ^payload} =
+               BlockBacking.read(volume_name, device.path, 2 * @chunk, @chunk)
+
+      assert {:ok, chunk_meta} = ChunkIndex.get(volume.id, hash)
+      assert chunk_meta.commit_state == :committed
+    end
+
+    # The writer's report is the very thing in doubt when a chunk is
+    # missing, so a map published on it would name data that is not there.
+    test "refuses to publish a chunk no reported location holds", %{
+      volume_name: volume_name,
+      device: device
+    } do
+      absent = :crypto.hash(:sha256, "never written")
+
+      assert {:error, {:missing_chunk, ^absent}} =
+               BlockBacking.commit_written(volume_name, device.path, [{0, absent}],
+                 locations: %{absent => [local_location()]},
+                 chunk_codecs: %{}
+               )
+
+      assert {:ok, []} = BlockIndex.range(volume_name, 0, 3)
+    end
+
+    test "punches an extent whose target is a hole", %{
+      volume: volume,
+      volume_name: volume_name,
+      device: device
+    } do
+      {:ok, hash} = stage_chunk(volume, :binary.copy(<<0x4D>>, @chunk))
+
+      {:ok, _} =
+        BlockBacking.commit_written(volume_name, device.path, [{0, hash}],
+          locations: %{hash => [local_location()]},
+          chunk_codecs: %{}
+        )
+
+      assert {:ok, [{0, _}]} = BlockIndex.range(volume_name, 0, 3)
+
+      assert {:ok, _} = BlockBacking.commit_written(volume_name, device.path, [{0, :hole}])
+      assert {:ok, []} = BlockIndex.range(volume_name, 0, 3)
+    end
+
+    test "refuses an extent index the device does not have", %{
+      volume_name: volume_name,
+      device: device
+    } do
+      assert {:error, {:extent_out_of_range, 4, 3}} =
+               BlockBacking.commit_written(volume_name, device.path, [{4, :hole}])
+    end
+
+    test "refuses a commit whose expectation has moved", %{
+      volume: volume,
+      volume_name: volume_name,
+      device: device
+    } do
+      {:ok, first} = stage_chunk(volume, :binary.copy(<<0x5E>>, @chunk))
+      {:ok, second} = stage_chunk(volume, :binary.copy(<<0x6F>>, @chunk))
+
+      {:ok, _} =
+        BlockBacking.commit_written(volume_name, device.path, [{0, first}],
+          locations: %{first => [local_location()]},
+          chunk_codecs: %{}
+        )
+
+      assert {:error, :stale_chunks} =
+               BlockBacking.commit_written(volume_name, device.path, [{0, second}],
+                 locations: %{second => [local_location()]},
+                 chunk_codecs: %{},
+                 expect: [{0, :hole}]
+               )
+    end
+
+    test "refuses a commit from a preempted holder", %{
+      volume: volume,
+      volume_name: volume_name,
+      device: device
+    } do
+      {:ok, hash} = stage_chunk(volume, :binary.copy(<<0x7A>>, @chunk))
+      {:ok, attached} = BlockBacking.open_device(volume_name, device.path)
+      {:ok, preemptor} = BlockEpoch.bump({volume.id, device.path})
+
+      assert {:error, {:fenced, ^preemptor}} =
+               BlockBacking.commit_written(volume_name, device.path, [{0, hash}],
+                 locations: %{hash => [local_location()]},
+                 chunk_codecs: %{},
+                 epoch: attached.epoch
+               )
+    end
+  end
+
   describe "flush/2" do
     test "returns once the device's chunks are durable", %{volume_name: volume_name} do
       {:ok, device} = BlockBacking.create_device(volume_name, "/dev.img", @chunk)
@@ -517,4 +729,17 @@ defmodule NeonFS.Core.BlockBackingTest do
                BlockBacking.open_device(volume_name, "/dev.img")
     end
   end
+
+  # Puts a chunk on this node's blob store the way an interface node would
+  # over the data plane, so `commit_written/4` has something real to verify.
+  defp stage_chunk(volume, data) do
+    hash = :crypto.hash(:sha256, data)
+
+    case NeonFS.Core.BlobStore.write_chunk(data, "default", "hot") do
+      {:ok, ^hash, _info} -> {:ok, hash}
+      other -> other
+    end
+  end
+
+  defp local_location, do: %{node: node(), drive_id: "default", tier: :hot}
 end

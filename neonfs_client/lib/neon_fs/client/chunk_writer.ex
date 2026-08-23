@@ -179,6 +179,35 @@ defmodule NeonFS.Client.ChunkWriter do
   end
 
   @doc """
+  Writes each binary in `chunks` as exactly one chunk, in order.
+
+  The chunker is skipped entirely: the caller has already decided where the
+  boundaries are. A block device's extents are the case this exists for —
+  an extent *is* a chunk, and running content-defined or even fixed
+  chunking over a concatenation of them would put boundaries somewhere
+  other than where the extent map expects them.
+
+  Volume lookup and target selection happen once for the whole list, and a
+  target that fails mid-list is excluded and the chunk retried elsewhere,
+  exactly as `write_file_stream/4` does. On failure every chunk already
+  written is best-effort aborted, so a partial write leaves no blobs behind
+  for GC to find later.
+
+  Takes the same options as `write_file_stream/4` apart from `:strategy`
+  and `:strategy_param`, which have nothing to select.
+  """
+  @spec write_chunks(String.t(), Enumerable.t(), write_opts()) ::
+          {:ok, [chunk_ref()]} | {:error, term()}
+  def write_chunks(volume_name, chunks, opts \\ []) do
+    Logger.metadata(component: :chunk_writer, volume_id: volume_name)
+
+    with {:ok, volume} <- fetch_volume(volume_name),
+         {:ok, target} <- select_target(volume, opts) do
+      do_write_chunks(chunks, volume, target, opts)
+    end
+  end
+
+  @doc """
   Converts the writer's chunk-ref list into the `:total_size` and
   `:locations` options expected by `NeonFS.Core.commit_chunks/4`.
 
@@ -313,6 +342,40 @@ defmodule NeonFS.Client.ChunkWriter do
          {:ok, acc} <- process_emitted(tail, volume, timeout, acc) do
       {:ok, Enum.reverse(acc.refs)}
     else
+      {:error, reason, acc} ->
+        do_abort_from_refs(acc.refs, abort_fn)
+        {:error, reason}
+    end
+  end
+
+  defp do_write_chunks(chunks, volume, target, opts) do
+    timeout = Keyword.get(opts, :timeout, @default_timeout)
+    abort_fn = Keyword.get(opts, :abort_fn, &default_abort/2)
+
+    initial = %{
+      refs: [],
+      target: target,
+      excluded: Keyword.get(opts, :exclude_nodes, [])
+    }
+
+    chunks
+    |> Enum.reduce_while({:ok, initial}, fn data, {:ok, acc} ->
+      case write_chunk_with_failover(
+             data,
+             Native.compute_hash(data),
+             byte_size(data),
+             volume,
+             timeout,
+             acc
+           ) do
+        {:ok, acc} -> {:cont, {:ok, acc}}
+        {:error, reason, acc} -> {:halt, {:error, reason, acc}}
+      end
+    end)
+    |> case do
+      {:ok, acc} ->
+        {:ok, Enum.reverse(acc.refs)}
+
       {:error, reason, acc} ->
         do_abort_from_refs(acc.refs, abort_fn)
         {:error, reason}
