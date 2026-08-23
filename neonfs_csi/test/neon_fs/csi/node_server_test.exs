@@ -253,6 +253,32 @@ defmodule NeonFS.CSI.NodeServerTest do
       assert File.dir?(staging)
     end
 
+    # `/dev/nbd0` and `/dev/ublkb0` look alike to everything above them and
+    # CSI has no response field for it, so if this is not emitted there is
+    # nothing an operator can read to tell which frontend served a volume.
+    test "reports the frontend the device came up on", %{staging_root: root} do
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [[:neonfs, :csi, :block, :staged]])
+
+      on_exit(fn -> :telemetry.detach(ref) end)
+
+      assert %NodeStageVolumeResponse{} =
+               NodeServer.node_stage_volume(
+                 %NodeStageVolumeRequest{
+                   volume_id: "vol-reported",
+                   staging_target_path: Path.join(root, "reported"),
+                   volume_capability: @block_capability,
+                   publish_context: %{"neonfs.attached_node" => "worker-a"}
+                 },
+                 nil
+               )
+
+      assert_received {[:neonfs, :csi, :block, :staged], ^ref, %{count: 1}, metadata}
+      assert metadata.volume_id == "vol-reported"
+      assert metadata.frontend == :nbd
+      assert metadata.device_path == "/dev/nbd0"
+    end
+
     test "surfaces fuse mount errors as INTERNAL", %{staging_root: root} do
       Application.put_env(:neonfs_csi, :fuse_mount_fn, fn _, _ -> {:error, :enoent} end)
 

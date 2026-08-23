@@ -55,3 +55,20 @@ case System.get_env("CSI_ENDPOINT") do
       config :neonfs_csi, socket_path: Path.absname(path)
     end
 end
+
+# Which frontend a block volume is staged over. `auto` uses ublk when a block
+# target on this very host advertises it, and NBD otherwise — which in the
+# shipped chart is always, because the node DaemonSet runs no block target.
+# Forcing `ublk` fails the stage naming what was missing rather than staging
+# over NBD and reporting ublk, since that is how a comparison of the two ends
+# up measuring one of them twice.
+case System.get_env("NEONFS_CSI_BLOCK_FRONTEND") do
+  nil ->
+    :ok
+
+  value when value in ["auto", "ublk", "nbd"] ->
+    config :neonfs_csi, block_frontend: String.to_atom(value)
+
+  other ->
+    raise "NEONFS_CSI_BLOCK_FRONTEND must be \"auto\", \"ublk\" or \"nbd\", got #{inspect(other)}"
+end

@@ -164,6 +164,15 @@ node:
   # The host must also have a loadable `nbd` kernel module. The module and
   # `/lib/modules` belong to the host and the chart cannot supply them; a node
   # without it will fail block staging at `nbd-client`, not at scheduling.
+  #
+  # NBD, not ublk, and not by preference: a ublk device is created by the
+  # kernel of the host running the block target, and this DaemonSet runs no
+  # block target — it discovers one over the cluster and dials it. So the
+  # plugin's `auto` frontend selection resolves to NBD here always. Setting
+  # `NEONFS_CSI_BLOCK_FRONTEND=ublk` in `extraEnv` does not change that; it
+  # makes block staging fail saying no local block service was found, which is
+  # the truth rather than a defect. Using ublk under Kubernetes needs a block
+  # target co-located with this plugin, which is a deployment change.
   hostDevices:
     enabled: false
     path: /dev

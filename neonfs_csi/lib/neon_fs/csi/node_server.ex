@@ -87,7 +87,9 @@ defmodule NeonFS.CSI.NodeServer do
   }
 
   alias NeonFS.Client.Discovery
-  alias NeonFS.CSI.VolumeHealth
+  alias NeonFS.CSI.{BlockFrontend, VolumeHealth}
+
+  require Logger
 
   @staged_table :csi_node_staged
   @published_table :csi_node_published
@@ -451,10 +453,40 @@ defmodule NeonFS.CSI.NodeServer do
   # staged is the device, and its path is what the publish needs.
   defp do_stage(vol_id, staging_path, :block) do
     with :ok <- File.mkdir_p(staging_path),
-         {:ok, device_path} <- block_attach_fn().(vol_id) do
+         {:ok, attachment} <- BlockFrontend.attach(vol_id, block_attach_fn()) do
+      # Which frontend a device came up on is the one thing about a block
+      # attach an operator cannot see from the outside — `/dev/nbd0` and
+      # `/dev/ublkb0` look alike to everything above them, and CSI has no
+      # response field to carry it. So it is said twice: once for a human
+      # reading the plugin's log and once for whatever is scraping.
+      Logger.info("block volume staged",
+        volume_id: vol_id,
+        frontend: attachment.frontend,
+        device_path: attachment.device_path
+      )
+
+      :telemetry.execute(
+        [:neonfs, :csi, :block, :staged],
+        %{count: 1},
+        %{
+          volume_id: vol_id,
+          frontend: attachment.frontend,
+          device_path: attachment.device_path,
+          node: attachment.node
+        }
+      )
+
       :ets.insert(
         @staged_table,
-        {vol_id, %{staging_path: staging_path, device_path: device_path, access_type: :block}}
+        {vol_id,
+         %{
+           staging_path: staging_path,
+           device_path: attachment.device_path,
+           frontend: attachment.frontend,
+           node: attachment.node,
+           volume_id: vol_id,
+           access_type: :block
+         }}
       )
 
       %NodeStageVolumeResponse{}
@@ -524,11 +556,11 @@ defmodule NeonFS.CSI.NodeServer do
 
   defp attached?(_publish_context), do: false
 
-  defp do_unstage(vol_id, %{access_type: :block, device_path: device_path}) do
+  defp do_unstage(vol_id, %{access_type: :block} = record) do
     # A device that is already gone is the state this call is asking for.
     # Failing on it wedges the volume: the kubelet retries an unstage it
     # can never satisfy.
-    case block_detach_fn().(device_path) do
+    case BlockFrontend.detach(record, block_detach_fn()) do
       :ok ->
         :ets.delete(@staged_table, vol_id)
         %NodeUnstageVolumeResponse{}

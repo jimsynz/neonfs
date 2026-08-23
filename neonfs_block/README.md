@@ -39,9 +39,34 @@ of `NeonFS.Block.Ublk.Protocol` are hand-rolled against one written layout, so
 compiling them together is what stops a change to one side reaching a host
 with ublk before anything notices.
 
-`NeonFS.Block.Ublk.Supervisor.attach/2` takes the device; a node without the
-driver refuses the attach rather than failing later, and does not advertise the
-`:ublk` capability at all.
+### Choosing one
+
+`NEONFS_BLOCK_FRONTEND` is `auto` (the default), `ublk` or `nbd`, and
+`NeonFS.Block.select/1` resolves it against what this node can actually do.
+`auto` prefers ublk and falls back; **forcing does not fall back** — it fails
+naming the check that failed, because a silent fallback is how a comparison of
+the two ends up measuring one of them twice.
+
+Availability is two checks, not one, and either can fail alone: the kernel
+driver (`/dev/ublk-control`) and the helper binary. A host with the driver and
+a release assembled without its native binary is a real state, and being told
+only "ublk unavailable" sends an operator to `modprobe` for a problem
+`modprobe` cannot fix. `NeonFS.Block.frontends/0` is what the service
+registration advertises, so what a node offers and what it will serve cannot
+disagree.
+
+The probe is cached per node — not for speed, it is two `File.exists?` calls,
+but so that every attachment on a node agrees about what that node can do.
+`NeonFS.Block.Ublk.Capability.refresh/0` is for an operator who has just
+loaded the module.
+
+### ublk is local; NBD is not
+
+The device node appears on the kernel of the host running the target, so a
+caller on another host cannot use ublk however capable this node is. That is
+why the CSI driver's own selection asks a different question — whether a block
+target is on *its* host — and why the shipped Kubernetes chart, whose node
+DaemonSet runs no block target, always resolves to NBD.
 
 ## Encryption
 

@@ -78,13 +78,11 @@ defmodule NeonFS.Block.Supervisor do
     }
   end
 
-  # A host without the ublk driver cannot serve a ublk device at all, so
-  # advertising the capability there would have a caller choose a frontend
-  # this node will then refuse. It is decided at registration because the
-  # driver does not appear and disappear under a running node.
-  defp capabilities do
-    if Ublk.Target.available?(), do: [:nbd, :ublk], else: [:nbd]
-  end
+  # A host that cannot serve ublk must not advertise it, or a caller chooses
+  # a frontend this node will then refuse. `NeonFS.Block.frontends/0` is the
+  # same probe the attach path uses, so what is advertised and what is served
+  # cannot disagree.
+  defp capabilities, do: NeonFS.Block.frontends()
 
   # A loopback bind is only reachable from the node itself, and telling a
   # peer to dial 127.0.0.1 would send it to its own machine. The configured

@@ -39,11 +39,14 @@ defmodule NeonFS.Block.Ublk.Target do
   use GenServer
 
   alias NeonFS.Block.{DeviceRegistry, Frontend, Ublk}
+  alias NeonFS.Block.Ublk.Capability
 
   require Logger
 
   @default_queues 1
   @default_queue_depth 64
+  @max_devices 16
+  @ready_timeout_ms 30_000
 
   @type opts :: [
           export: String.t(),
@@ -61,41 +64,9 @@ defmodule NeonFS.Block.Ublk.Target do
     GenServer.start_link(__MODULE__, opts, if(name, do: [name: name], else: []))
   end
 
-  @doc """
-  Where the helper binary is.
-
-  Built into `priv/` by this package's build, and overridable so a release or
-  the rig can put it elsewhere. Resolved through `:code.priv_dir/1` rather
-  than assumed, because that is the only thing that knows where an
-  application's files landed.
-  """
-  @spec helper_path() :: Path.t()
-  def helper_path do
-    case Application.get_env(:neonfs_block, :ublk_helper) do
-      path when is_binary(path) -> path
-      _unset -> Path.join([:code.priv_dir(:neonfs_block), "native", "neonfs_ublk"])
-    end
-  end
-
-  @doc """
-  Whether this host can host a ublk device at all.
-
-  The control device is what the helper needs and what a container without
-  the module loaded does not have. Answered here so an attach can be refused
-  with a reason rather than by watching a helper exit.
-
-  The path is configurable because a container may present the driver
-  somewhere other than the canonical location — and because a test needs to
-  drive both answers on a host that only offers one.
-  """
-  @spec available?() :: boolean()
-  def available?, do: File.exists?(control_path())
-
-  @doc "The ublk control device this node looks for."
-  @spec control_path() :: Path.t()
-  def control_path do
-    Application.get_env(:neonfs_block, :ublk_control_path, "/dev/ublk-control")
-  end
+  @doc "The device this target published, once the helper has it."
+  @spec device_path(GenServer.server()) :: {:ok, Path.t()} | {:error, term()}
+  def device_path(target), do: GenServer.call(target, :device_path)
 
   @impl GenServer
   def init(opts) do
@@ -103,22 +74,40 @@ defmodule NeonFS.Block.Ublk.Target do
 
     export = Keyword.fetch!(opts, :export)
 
-    with :ok <- require_ublk(),
+    with :ok <- Capability.check(),
+         {:ok, device_id} <- free_device_id(),
          {:ok, device} <- DeviceRegistry.attach(export, self()),
          {:ok, listeners} <- listen(Keyword.get(opts, :queues, @default_queues)) do
       info = Frontend.impl().export_info(device)
+      helper = spawn_helper(info, listeners, device_id, opts)
 
-      {:ok,
-       %{
-         export: export,
-         helper: spawn_helper(info, listeners, opts),
-         listeners: listeners,
-         servers: accept_queues(device, info, listeners)
-       }}
+      # Accepting comes first: the helper connects its queues before the
+      # kernel publishes the device, so a target waiting for readiness with
+      # nothing accepting would deadlock against its own helper.
+      servers = accept_queues(device, info, listeners)
+
+      case await_ready(helper, device_id) do
+        :ok ->
+          {:ok,
+           %{
+             device_id: device_id,
+             device_path: device_path_for(device_id),
+             export: export,
+             helper: helper,
+             listeners: listeners,
+             servers: servers
+           }}
+
+        {:error, reason} ->
+          {:stop, reason}
+      end
     else
       {:error, reason} -> {:stop, reason}
     end
   end
+
+  @impl GenServer
+  def handle_call(:device_path, _from, state), do: {:reply, {:ok, state.device_path}, state}
 
   # The device this process holds has been taken from it. Everything in
   # flight belongs to an epoch that is no longer current, so the device goes
@@ -181,10 +170,40 @@ defmodule NeonFS.Block.Ublk.Target do
     :ok
   end
 
-  defp require_ublk do
-    if available?(),
-      do: :ok,
-      else: {:error, {:ublk_unavailable, control_path()}}
+  # The node picks the device number rather than reading back whichever the
+  # driver allocated, so it knows the path before the helper has started —
+  # the same shape CSI's NBD attach uses to pick its own `/dev/nbdX`. Racing
+  # another attach for the same number is possible and is what the helper's
+  # own failure to create the device then reports.
+  defp free_device_id do
+    case Enum.find(0..(@max_devices - 1), &(not File.exists?(device_path_for(&1)))) do
+      nil -> {:error, {:no_free_ublk_device, @max_devices}}
+      id -> {:ok, id}
+    end
+  end
+
+  defp device_path_for(device_id), do: "/dev/ublkb#{device_id}"
+
+  # The helper announces itself only after `start_dev`, which is the one
+  # moment the device is known to exist. Waiting for the socket instead would
+  # hand out a path to nothing, because the queues connect before that.
+  defp await_ready(helper, device_id) do
+    expected = "ready #{device_id}"
+
+    receive do
+      {^helper, {:data, output}} ->
+        if String.contains?(output, expected),
+          do: :ok,
+          else: await_ready(helper, device_id)
+
+      {^helper, {:exit_status, status}} ->
+        {:error, {:ublk_helper_exited, status}}
+
+      {:EXIT, ^helper, reason} ->
+        {:error, {:ublk_helper_exited, reason}}
+    after
+      @ready_timeout_ms -> {:error, {:ublk_device_never_appeared, device_path_for(device_id)}}
+    end
   end
 
   # A listening socket per queue, named by the queue so the helper can find
@@ -200,6 +219,7 @@ defmodule NeonFS.Block.Ublk.Target do
              :binary,
              packet: :raw,
              active: false,
+             backlog: @max_devices,
              reuseaddr: true
            ]) do
         {:ok, socket} ->
@@ -214,15 +234,16 @@ defmodule NeonFS.Block.Ublk.Target do
   # The helper learns the geometry from its environment rather than over the
   # socket: it has to size the device before it accepts a single IO, so a
   # handshake would only be a second way to say what is already known here.
-  defp spawn_helper(info, listeners, opts) do
+  defp spawn_helper(info, listeners, device_id, opts) do
     %{prefix: prefix} = listeners |> Map.values() |> hd()
 
-    Port.open({:spawn_executable, helper_path()}, [
+    Port.open({:spawn_executable, Capability.helper_path()}, [
       :binary,
       :exit_status,
       :stderr_to_stdout,
       env: [
         {~c"NEONFS_UBLK_SOCKET", charlist(prefix)},
+        {~c"NEONFS_UBLK_ID", charlist(device_id)},
         {~c"NEONFS_UBLK_SIZE_BYTES", charlist(info.size)},
         {~c"NEONFS_UBLK_BLOCK_BYTES", charlist(info.logical_block_size)},
         {~c"NEONFS_UBLK_QUEUES", charlist(Keyword.get(opts, :queues, @default_queues))},

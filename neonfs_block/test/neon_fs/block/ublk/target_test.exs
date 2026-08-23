@@ -13,7 +13,7 @@ defmodule NeonFS.Block.Ublk.TargetTest do
   use ExUnit.Case, async: false
 
   alias NeonFS.Block.{DeviceRegistry, StubCore}
-  alias NeonFS.Block.Ublk.Supervisor
+  alias NeonFS.Block.Ublk.{Capability, Supervisor}
 
   @export "stub:/dev.img"
 
@@ -26,14 +26,14 @@ defmodule NeonFS.Block.Ublk.TargetTest do
       :release, _args -> :ok
     end)
 
-    # A helper that starts, holds its stdin open and connects to nothing:
-    # enough to be a live port for the target to own and to lose.
-    Application.put_env(:neonfs_block, :ublk_helper, System.find_executable("cat"))
+    Application.put_env(:neonfs_block, :ublk_helper, fake_helper())
 
     on_exit(fn ->
       for key <- [:io_core, :coordinator_call_fn, :ublk_helper, :ublk_control_path] do
         Application.delete_env(:neonfs_block, key)
       end
+
+      Capability.refresh()
 
       Application.delete_env(:neonfs_block, :stub_core_test_pid)
     end)
@@ -47,16 +47,16 @@ defmodule NeonFS.Block.Ublk.TargetTest do
 
   describe "a host without the driver" do
     test "refuses the attach, naming the path it looked for" do
-      Application.put_env(:neonfs_block, :ublk_control_path, "/dev/does-not-exist")
+      without_driver()
 
-      assert {:error, {:ublk_unavailable, "/dev/does-not-exist"}} = Supervisor.attach(@export)
+      assert {:error, {:ublk_driver_absent, "/dev/does-not-exist"}} = Supervisor.attach(@export)
       assert Supervisor.attached() == []
     end
 
     # It has to be decided before the device is opened, or a refused attach
     # leaves the cluster-wide claim taken by nothing.
     test "does not take the attachment claim" do
-      Application.put_env(:neonfs_block, :ublk_control_path, "/dev/does-not-exist")
+      without_driver()
 
       assert {:error, _reason} = Supervisor.attach(@export)
       assert DeviceRegistry.attached() == %{}
@@ -137,11 +137,35 @@ defmodule NeonFS.Block.Ublk.TargetTest do
     end
   end
 
+  defp without_driver do
+    Application.put_env(:neonfs_block, :ublk_control_path, "/dev/does-not-exist")
+    Capability.refresh()
+  end
+
   defp with_control_device do
     path = Path.join(System.tmp_dir!(), "ublk-control-#{System.unique_integer([:positive])}")
     File.write!(path, "")
     Application.put_env(:neonfs_block, :ublk_control_path, path)
+    Capability.refresh()
     on_exit(fn -> File.rm(path) end)
     {:ok, path}
+  end
+
+  # Stands in for the real helper at the only two points the target reads it:
+  # it announces the device the target asked for, then holds its stdin open so
+  # the port stays live until something closes it. It creates no device, which
+  # nothing here opens.
+  defp fake_helper do
+    path = Path.join(System.tmp_dir!(), "fake-ublk-#{System.unique_integer([:positive])}")
+
+    File.write!(path, """
+    #!/bin/sh
+    echo "neonfs_ublk: ready ${NEONFS_UBLK_ID}"
+    exec cat
+    """)
+
+    File.chmod!(path, 0o755)
+    on_exit(fn -> File.rm(path) end)
+    path
   end
 end
