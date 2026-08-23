@@ -18,7 +18,7 @@
 
 mod protocol;
 
-use std::io;
+use std::io::{self, Write};
 use std::os::unix::net::UnixStream;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -35,6 +35,7 @@ struct Config {
     socket_prefix: String,
     size_bytes: u64,
     logical_block_bytes: u32,
+    device_id: i32,
     queues: u16,
     queue_depth: u16,
 }
@@ -61,6 +62,10 @@ fn config_from_env() -> Config {
         logical_block_bytes: required("NEONFS_UBLK_BLOCK_BYTES")
             .parse()
             .expect("block size is a number"),
+        // The node picks the id so it knows `/dev/ublkbN` without being told,
+        // the way a CSI attach picks its own `/dev/nbdX`. `-1` asks the driver
+        // to allocate, which leaves the path knowable only from here.
+        device_id: optional("NEONFS_UBLK_ID", -1),
         queues: optional("NEONFS_UBLK_QUEUES", 1),
         queue_depth: optional("NEONFS_UBLK_QUEUE_DEPTH", 64),
     }
@@ -84,6 +89,7 @@ fn run(config: Config) -> Result<(), UblkError> {
 
     let control = UblkCtrlBuilder::default()
         .name("neonfs")
+        .id(config.device_id)
         .nr_queues(config.queues)
         .depth(config.queue_depth)
         .io_buf_bytes(1 << 20)
@@ -109,7 +115,17 @@ fn run(config: Config) -> Result<(), UblkError> {
         }
     };
 
-    control.run_target(describe, serve_queue, |_control| ())?;
+    // `run_target` calls this after `start_dev`, which is the only moment
+    // `/dev/ublkbN` is known to exist — the queue sockets connect before it,
+    // so a node waiting on those would hand out a path to nothing. One line,
+    // one token, no value to misparse: the node already knows the id it asked
+    // for.
+    let announce = |control: &libublk::ctrl::UblkCtrl| {
+        println!("neonfs_ublk: ready {}", control.dev_info().dev_id);
+        let _ = io::stdout().flush();
+    };
+
+    control.run_target(describe, serve_queue, announce)?;
     Ok(())
 }
 
