@@ -176,8 +176,8 @@ defmodule NeonFS.Core.BlockBacking do
 
   The size is per-volume (`NeonFS.Core.Volume.block_chunk_bytes`) and fixed for
   the volume's life. This is the value a volume created before that field
-  existed reads as, and the default a new one gets — so the baseline the
-  file-backed spike measured carries over unchanged.
+  existed reads as, and the default a new one gets — so a device's figures
+  stay comparable with the ones measured before the extent map.
   """
   @spec chunk_bytes() :: pos_integer()
   def chunk_bytes, do: @chunk_bytes
@@ -263,9 +263,7 @@ defmodule NeonFS.Core.BlockBacking do
   every write the holder makes is stamped with it, and a later attacher
   preempting this one bumps it so those writes start being refused.
 
-  Fails rather than inventing a device. A device still backed by a file
-  from before the extent map is refused by name — there is no conversion
-  path.
+  Fails rather than inventing a device.
   """
   @spec open_device(String.t(), String.t()) :: {:ok, attached_device()} | {:error, term()}
   def open_device(volume, path) do
@@ -583,19 +581,8 @@ defmodule NeonFS.Core.BlockBacking do
     case BlockIndex.get_device(volume) do
       {:ok, %BlockDevice{path: ^path} = header} -> {:ok, header}
       {:ok, %BlockDevice{path: other}} -> {:error, {:device_path_mismatch, path, other}}
-      {:error, :not_found} -> no_device(volume, path)
+      {:error, :not_found} -> {:error, {:device_not_found, volume, path}}
       {:error, _reason} = error -> error
-    end
-  end
-
-  # A device from before the extent map is a file with a chunk list, which
-  # this module can neither address nor convert. Naming that as the reason
-  # is the difference between "recreate the volume" and an unexplained
-  # missing device.
-  defp no_device(volume, path) do
-    case Core.get_file_meta(volume, path) do
-      {:ok, _meta} -> {:error, {:file_backed_device, volume, path}}
-      {:error, _reason} -> {:error, {:device_not_found, volume, path}}
     end
   end
 

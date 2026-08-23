@@ -354,30 +354,6 @@ defmodule NeonFS.Core do
   end
 
   @doc """
-  Zero-fills `length` bytes at `offset` of the file with `file_id` in a
-  single metadata commit, whatever the length.
-
-  Chunks the range covers entirely are replaced by a stored zero chunk of
-  the same size rather than rewritten, so the cost tracks the chunks whose
-  content actually changes; only the partial chunks at either end are
-  read-modify-written. The peak working set is one chunk. The range must
-  lie within the file. Replicated volumes only.
-  """
-  @spec write_zeroes_by_id(
-          String.t(),
-          binary(),
-          non_neg_integer(),
-          non_neg_integer(),
-          keyword()
-        ) :: {:ok, NeonFS.Core.FileMeta.t()} | {:error, term()}
-  def write_zeroes_by_id(volume_name, file_id, offset, length, opts \\ []) do
-    with :ok <- ensure_writable(),
-         {:ok, volume} <- resolve_volume(volume_name) do
-      WriteOperation.write_zeroes_at_by_id(volume.id, file_id, offset, length, opts)
-    end
-  end
-
-  @doc """
   Durability barrier for `path` — blocks until every chunk of the file
   has at least the volume's `min_copies` durable replicas, driving
   synchronous replication for any shortfall.
