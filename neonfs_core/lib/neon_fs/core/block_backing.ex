@@ -11,13 +11,11 @@ defmodule NeonFS.Core.BlockBacking do
   ## Geometry
 
   Devices advertise 4Kn — 4 KiB logical and physical blocks. Sub-block
-  guest writes are absorbed by the guest's page cache, so writes reaching
-  this module are block-aligned; each is read-modify-written at the extent
-  layer, making a single 4 KiB write cost a #{div(131_072, 1024)} KiB
-  extent rewrite. `write/5` reports that amplification as telemetry rather
-  than leaving it to be inferred, and returns it as well so a caller on
-  another node — which never sees this node's telemetry — can attribute
-  it to whatever it calls the device.
+  guest writes are absorbed by the guest's page cache, so writes reaching a
+  device are block-aligned; each is read-modify-written at the extent layer,
+  making a single 4 KiB write cost a #{div(131_072, 1024)} KiB extent
+  rewrite. That arithmetic — and the write itself — happens on the interface
+  node, which is where the bytes are.
 
   ## Holes
 
@@ -28,20 +26,20 @@ defmodule NeonFS.Core.BlockBacking do
   bytes, and the chunks it dropped become GC's problem.
 
   Only the extents a zero-fill *clips* are read-modify-written, and an
-  extent that is entirely zeroes once its clipped part is zeroed is
-  punched as well. `write_zeroes/5` reports those as two quantities
-  because they are not the same cost: the clipped extents cost their bytes,
-  the punched ones cost a metadata entry each and nothing else.
+  extent that is entirely zeroes once its clipped part is zeroed is punched
+  as well. Those are two costs rather than one: the clipped extents cost
+  their bytes, the punched ones cost a metadata entry each and nothing else.
 
-  ## Where placement happens
+  ## Where the bytes are
 
-  Chunks are placed **on core**, through
-  `NeonFS.Core.WriteOperation.place_chunk/4`, and the extent map commits
-  second — the ordering `NeonFS.Core.BlockIndex` documents as its crash
-  contract. That means a guest write's bytes cross Erlang distribution to
-  get here, and a read's bytes cross it going back. Moving both onto the
-  TLS data plane, with the interface node placing its own chunks, is the
-  next slice of this work.
+  Not here. An interface node places its own chunks over the TLS data plane
+  and publishes them through `commit_written/4`, so this module handles the
+  *map* — `read_refs/4` describing it, `commit_written/4` publishing it —
+  and no device byte crosses Erlang distribution in either direction.
+
+  `read/4` is the one exception, and it is a fallback: an extent whose chunk
+  is compressed or encrypted cannot be served by the data plane, because the
+  stored bytes do not hash to the chunk's id and only core holds the key.
 
   ## What the volume is charged
 
@@ -61,11 +59,11 @@ defmodule NeonFS.Core.BlockBacking do
 
   ## Durability
 
-  `write/5` returns when the volume's write acknowledgement policy is
-  satisfied, which on a `write_ack: :local` volume is before the extra
-  replicas exist. A guest flush or FUA must therefore call `flush/2`,
-  which drives replication to `min_copies` before returning — the same
-  barrier `fsync` uses.
+  A chunk is durable on the node that took it by the time it is published,
+  but on a `write_ack: :local` volume the extra replicas may not exist yet.
+  A guest flush or FUA must therefore call `flush/2`, which drives
+  replication to `min_copies` before returning — the same barrier `fsync`
+  uses.
 
   Replicated volumes only: an erasure-coded volume is refused at
   `create_device/4`, so no extent here ever names a stripe member.
@@ -74,15 +72,12 @@ defmodule NeonFS.Core.BlockBacking do
 
     * `[:neonfs, :block, :device_created]` — Measurements: `size`,
       `extent_count`, `duration`. Metadata: `volume`, `path`, `device_id`.
-    * `[:neonfs, :block, :write]` — Measurements: `guest_bytes`,
-      `chunk_bytes`, `chunks_rewritten`, `duration`. Metadata: `volume`,
-      `path`, `offset`. `chunk_bytes / guest_bytes` is the write
-      amplification of that request.
-    * `[:neonfs, :block, :write_zeroes]` — Measurements: `guest_bytes`,
-      `chunk_bytes`, `chunks_rewritten`, `chunks_replaced`, `duration`.
-      Metadata: `volume`, `path`, `offset`. Serves discard too.
+    * `[:neonfs, :block, :commit_written]` — Measurements: `extents`,
+      `chunks`, `duration`. Metadata: `volume`, `path`. One per published
+      map, however many extents it carries.
     * `[:neonfs, :block, :read]` — Measurements: `guest_bytes`,
-      `duration`. Metadata: `volume`, `path`, `offset`.
+      `duration`. Metadata: `volume`, `path`, `offset`. The fallback read
+      only; an interface node's own fetches are its to report.
     * `[:neonfs, :block, :flush]` — Measurements: `duration`. Metadata:
       `volume`, `path`, `status`.
   """
@@ -357,7 +352,7 @@ defmodule NeonFS.Core.BlockBacking do
   @doc """
   Publishes extents whose chunks an interface node has already written.
 
-  The inverse half of `write/5`: the caller placed the bytes itself through
+  The device's only write path: the caller placed the bytes itself through
   `NeonFS.Client.ChunkWriter` and reports where it put them, so this call
   only has to verify the claim and publish the map.
 
@@ -369,8 +364,10 @@ defmodule NeonFS.Core.BlockBacking do
 
   `extents` is `[{extent_index, :hole | chunk_hash}]`. `opts` takes
   `:locations` and `:chunk_codecs` keyed by hash (both from
-  `ChunkWriter.chunk_refs_to_commit_opts/1`), plus the `:epoch` and
-  `:expect` that `write/5` takes.
+  `ChunkWriter.chunk_refs_to_commit_opts/1`), plus `:epoch` — the epoch the
+  caller attached under, refused with `{:error, {:fenced, current}}` when it
+  is behind — and `:expect`, the targets a read-modify-write saw, refused
+  with `{:error, :stale_chunks}` when one has moved.
   """
   @spec commit_written(String.t(), String.t(), [{non_neg_integer(), :hole | binary()}], keyword()) ::
           {:ok, %{chunks_published: non_neg_integer()}} | {:error, term()}

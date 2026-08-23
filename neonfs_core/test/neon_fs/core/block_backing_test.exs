@@ -367,7 +367,7 @@ defmodule NeonFS.Core.BlockBackingTest do
     end
   end
 
-  # The inverse half of `write/5`: the caller placed the bytes and reports
+  # The device's only write path: the caller placed the bytes and reports
   # where, and this only has to check the claim and publish the map.
   describe "commit_written/4" do
     setup %{volume_name: volume_name} do
