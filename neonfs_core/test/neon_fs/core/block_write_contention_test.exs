@@ -114,17 +114,20 @@ defmodule NeonFS.Core.BlockWriteContentionTest do
     0..(@writers - 1)
     |> Task.async_stream(
       fn index ->
-        BlockBacking.write(
-          volume_name,
-          device.path,
-          index * @chunk,
-          :binary.copy(<<index + 1>>, @chunk)
-        )
+        {index,
+         BlockBacking.write(
+           volume_name,
+           device.path,
+           index * @chunk,
+           :binary.copy(<<index + 1>>, @chunk)
+         )}
       end,
       max_concurrency: @writers,
       timeout: 240_000
     )
-    |> Stream.run()
+    |> Enum.each(fn {:ok, {index, result}} ->
+      assert {:ok, _cost} = result, "writer #{index} did not commit: #{inspect(result)}"
+    end)
 
     assert {:ok, extents} = BlockIndex.range(volume_name, 0, @writers - 1)
 
