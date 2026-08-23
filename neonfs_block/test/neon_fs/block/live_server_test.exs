@@ -190,20 +190,43 @@ defmodule NeonFS.Block.LiveServerTest do
       assert {:ok, <<@simple_reply_magic::32, 0::32, 1::64>>} = :gen_tcp.recv(socket, 16, 2_000)
     end
 
-    test "a write's command event carries the chunk bytes core charged for it", %{port: port} do
-      ref = :telemetry_test.attach_event_handlers(self(), [[:neonfs, :block, :command]])
+    # A buffered write has moved nothing yet, so its amplification is the
+    # drain's to report — and the drain is where the coalescing shows up.
+    test "the chunk cost of writes is charged to the drain, not to each write", %{port: port} do
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:neonfs, :block, :command],
+          [:neonfs, :block, :window_drain]
+        ])
 
       socket = connect(port)
       {:ok, _export} = handshake(socket, @export)
 
-      :ok = :gen_tcp.send(socket, request(@write, 1, 0, @block) <> :binary.copy(<<0xEF>>, @block))
+      # Four writes into one extent, then a flush to land them.
+      for {cookie, offset} <- Enum.with_index(0..(3 * @block)//@block, 1) do
+        :ok =
+          :gen_tcp.send(
+            socket,
+            request(@write, cookie, offset, @block) <> :binary.copy(<<7>>, @block)
+          )
 
-      assert_receive {[:neonfs, :block, :command], ^ref, measurements, %{command: :write}}, 2_000
+        assert {:ok, <<_magic::32, 0::32, _cookie::64>>} = :gen_tcp.recv(socket, 16, 2_000)
+      end
 
-      # Both halves of the ratio on one event: the guest asked for a block,
-      # the chunk layer moved a whole extent to store it.
-      assert measurements.bytes == @block
-      assert measurements.chunk_bytes == @chunk
+      assert_receive {[:neonfs, :block, :command], ^ref, %{bytes: @block} = write_measurements,
+                      %{command: :write}},
+                     2_000
+
+      refute Map.has_key?(write_measurements, :chunk_bytes)
+
+      :ok = :gen_tcp.send(socket, request(@flush, 9, 0, 0))
+
+      assert_receive {[:neonfs, :block, :window_drain], ^ref, drain, %{reason: :flush}}, 5_000
+
+      # The whole point: four guest writes, one extent, one commit.
+      assert drain.writes == 4
+      assert drain.extents == 1
+      assert drain.chunk_bytes == @chunk
 
       :telemetry.detach(ref)
     end
@@ -333,12 +356,13 @@ defmodule NeonFS.Block.LiveServerTest do
       assert {:ok, <<_magic::32, 1::32, 7::64>>} = :gen_tcp.recv(socket, 16, 2_000)
     end
 
-    # NBD has no "retry this" status, so a contended span that core gave up
-    # on has to be retried by the only party that still owns the request.
-    test "a write that hits a contended span is retried, not failed", %{port: port} do
+    # NBD has no "retry this" status, so a contended commit that core gave up
+    # on has to be retried by the only party that still owns it — which is
+    # now the write window, since that is where the commit happens.
+    test "a contended commit is retried, not failed", %{port: port} do
       test = self()
-      ref = :telemetry_test.attach_event_handlers(self(), [[:neonfs, :block, :stale_write_retry]])
       {:ok, attempts} = Agent.start_link(fn -> 0 end)
+      ref = make_ref()
 
       socket = connect(port)
       {:ok, _export} = handshake(socket, @export)
@@ -361,15 +385,16 @@ defmodule NeonFS.Block.LiveServerTest do
       end)
 
       :ok = :gen_tcp.send(socket, request(@write, 8, 0, @block) <> :binary.copy(<<2>>, @block))
-
-      assert_receive {:stale, 0}, 2_000
-      assert_receive {:stale, 1}, 2_000
-
-      assert_receive {[:neonfs, :block, :stale_write_retry], ^ref, %{attempt: 1},
-                      %{command: :write}},
-                     2_000
-
       assert {:ok, <<_magic::32, 0::32, 8::64>>} = :gen_tcp.recv(socket, 16, 2_000)
+
+      :ok = :gen_tcp.send(socket, request(@flush, 14, 0, 0))
+
+      assert_receive {:stale, 0}, 5_000
+      assert_receive {:stale, 1}, 5_000
+
+      # The flush lands once the contention clears, which is the whole point
+      # of retrying rather than failing.
+      assert {:ok, <<_magic::32, 0::32, 14::64>>} = :gen_tcp.recv(socket, 16, 5_000)
 
       :telemetry.detach(ref)
     end
@@ -387,12 +412,17 @@ defmodule NeonFS.Block.LiveServerTest do
           else: default_reply(function, args)
       end)
 
+      # The write buffers and is acknowledged; the fence surfaces at the
+      # flush, which is where durability was promised in the first place.
       :ok = :gen_tcp.send(socket, request(@write, 12, 0, @block) <> :binary.copy(<<4>>, @block))
+      assert {:ok, <<_magic::32, 0::32, 12::64>>} = :gen_tcp.recv(socket, 16, 2_000)
+
+      :ok = :gen_tcp.send(socket, request(@flush, 13, 0, 0))
 
       # ESHUTDOWN, not EIO: the disk is not broken, this server has stopped
       # serving it — and a guest ext4 remounts read-only over EIO rather than
       # letting the attach be retaken elsewhere.
-      assert {:ok, <<_magic::32, 108::32, 12::64>>} = :gen_tcp.recv(socket, 16, 2_000)
+      assert {:ok, <<_magic::32, 108::32, 13::64>>} = :gen_tcp.recv(socket, 16, 2_000)
       assert {:error, :closed} = :gen_tcp.recv(socket, 0, 2_000)
     end
 
@@ -417,8 +447,12 @@ defmodule NeonFS.Block.LiveServerTest do
       end)
 
       :ok = :gen_tcp.send(socket, request(@write, 9, 0, @block) <> :binary.copy(<<3>>, @block))
+      assert {:ok, <<_magic::32, 0::32, 9::64>>} = :gen_tcp.recv(socket, 16, 2_000)
 
-      assert {:ok, <<_magic::32, 11::32, 9::64>>} = :gen_tcp.recv(socket, 16, 2_000)
+      # The window retries its own drain, so what reaches the guest is the
+      # flush that could not land — with EAGAIN, since nothing was lost.
+      :ok = :gen_tcp.send(socket, request(@flush, 10, 0, 0))
+      assert {:ok, <<_magic::32, 11::32, 10::64>>} = :gen_tcp.recv(socket, 16, 2_000)
     end
 
     test "a disconnect closes the connection", %{port: port} do

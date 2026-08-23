@@ -12,6 +12,7 @@ defmodule NeonFS.Block.MetricsTest do
         [:neonfs, :block, :attached],
         [:neonfs, :block, :detached],
         [:neonfs, :block, :fenced],
+        [:neonfs, :block, :window_drain],
         # Not a block event: `NeonFS.Client.ChunkReader` emits it on this
         # node for the reads `NeonFS.Block.Device` asks it to serve.
         [:neonfs, :client, :chunk_reader, :chunk_fetched]
@@ -42,7 +43,7 @@ defmodule NeonFS.Block.MetricsTest do
     test "both directions export chunk bytes, so amplification is a query not a gauge" do
       names = Enum.map(Telemetry.metrics(), & &1.name)
 
-      assert [:neonfs, :block, :command, :chunk_bytes] in names
+      assert [:neonfs, :block, :window_drain, :chunk_bytes] in names
       assert [:neonfs, :block, :read, :chunk_bytes] in names
     end
 
@@ -62,13 +63,27 @@ defmodule NeonFS.Block.MetricsTest do
       end
     end
 
-    test "chunk bytes are kept only for the commands whose events carry them" do
+    # A buffered write has moved nothing yet, so its chunk cost is the
+    # drain's. Charging it to the write would report a cost not yet paid —
+    # and would double-count it when the drain reports it too.
+    test "command chunk bytes are kept only for the zero-fill that still writes directly" do
       metric = metric_named([:neonfs, :block, :command, :chunk_bytes])
 
-      assert metric.keep.(%{command: :write})
       assert metric.keep.(%{command: :write_zeroes})
+      refute metric.keep.(%{command: :write})
       refute metric.keep.(%{command: :read})
       refute metric.keep.(%{command: :flush})
+    end
+
+    # `writes / extents` is the coalescing ratio, which is the number the
+    # window exists to raise, so both halves are exported.
+    test "the window's drain exports what it coalesced and what it cost" do
+      names = Enum.map(Telemetry.metrics(), & &1.name)
+
+      assert [:neonfs, :block, :window_drain, :writes] in names
+      assert [:neonfs, :block, :window_drain, :extents] in names
+      assert [:neonfs, :block, :window_drain, :chunk_bytes] in names
+      assert [:neonfs, :block, :window_drain, :duration] in names
     end
 
     # A write rewrites every chunk it touches, so it has nothing to replace;

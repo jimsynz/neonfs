@@ -62,7 +62,7 @@ defmodule NeonFS.Block.DeviceRegistry do
 
   use GenServer
 
-  alias NeonFS.Block.{Device, Frontend}
+  alias NeonFS.Block.{Device, Frontend, WriteWindow}
   alias NeonFS.Client.Router
   alias NeonFS.Core.BlockAttachment
   alias NeonFS.Core.NamespaceCoordinator
@@ -142,12 +142,16 @@ defmodule NeonFS.Block.DeviceRegistry do
         {:reply, {:ok, device}, note_attach(state, export, holder)}
 
       :error ->
-        with {:ok, device} <- Frontend.impl().open(export),
-             {:ok, claim_id} <- claim_device(device) do
+        with {:ok, opened} <- Frontend.impl().open(export),
+             {:ok, claim_id} <- claim_device(opened),
+             {:ok, window} <- WriteWindow.start_link(opened) do
+          device = Map.put(opened, :window, window)
+
           state =
             put_in(state.devices[export], %{
               device: device,
               claim_id: claim_id,
+              window: window,
               holders: MapSet.new()
             })
 
@@ -167,6 +171,7 @@ defmodule NeonFS.Block.DeviceRegistry do
       {:ok, %{holders: holders} = device} ->
         emit_fenced(export, current_epoch, MapSet.size(holders))
         release_claim(device)
+        stop_window(device)
         Enum.each(holders, &send(&1, {:fenced, export, current_epoch}))
         {:reply, :ok, forget_device(state, export, holders)}
 
@@ -266,6 +271,7 @@ defmodule NeonFS.Block.DeviceRegistry do
   defp release_if_last(state, export, remaining) do
     if MapSet.size(remaining) == 0 do
       release_claim(state.devices[export])
+      stop_window(state.devices[export])
       %{state | devices: Map.delete(state.devices, export)}
     else
       put_in(state.devices[export].holders, remaining)
@@ -294,6 +300,19 @@ defmodule NeonFS.Block.DeviceRegistry do
     _ = coordinator_call(:release, [claim_id])
     :ok
   end
+
+  # The window is stopped rather than left to be garbage: it holds a timer
+  # and, potentially, dirty extents. Stopping it drains nothing — a device
+  # whose last holder went without flushing has already told the guest
+  # nothing about durability — but leaving one running against a device
+  # nobody holds would let its timer commit over a device attached
+  # elsewhere.
+  defp stop_window(%{window: window}) when is_pid(window) do
+    if Process.alive?(window), do: GenServer.stop(window, :normal, 5_000)
+    :ok
+  end
+
+  defp stop_window(_device), do: :ok
 
   # A block node runs as its own interface node, so the coordinator is
   # always a hop away. Configured as a module or closure so a test can drive

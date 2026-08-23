@@ -42,7 +42,9 @@ defmodule NeonFS.Block.Device do
   from its own request — so the payload can follow lazily.
 
   An extent nothing has written is a hole, and its zeroes are synthesised
-  here rather than fetched: there is nothing to fetch.
+  here rather than fetched: there is nothing to fetch. An extent the write
+  window is still holding is answered from the window, because a read-back
+  of a write that has not landed still has to see it.
 
   ## Writes read what they modify
 
@@ -93,11 +95,18 @@ defmodule NeonFS.Block.Device do
 
   @behaviour NeonFS.Block.Frontend
 
+  alias NeonFS.Block.WriteWindow
   alias NeonFS.Client
   alias NeonFS.Client.{ChunkReader, ChunkWriter}
   alias NeonFS.Core.BlockAttachment
 
   @backing NeonFS.Core.BlockBacking
+
+  # `NeonFS.Core.BlockIndex.target/0` lives in neonfs_core, which this
+  # package does not depend on — the same dependency inversion
+  # `NeonFS.Client.ChunkWriter` documents for `ChunkMeta.compression/0`.
+  # Mirror the literal here; core is what interprets it.
+  @type extent_target :: :hole | {:chunk, binary()} | {:stripe, binary(), non_neg_integer()}
 
   @type t :: %{
           export: String.t(),
@@ -107,6 +116,7 @@ defmodule NeonFS.Block.Device do
           size: non_neg_integer(),
           chunk_bytes: pos_integer(),
           epoch: non_neg_integer(),
+          window: pid() | nil,
           logical_block_size: pos_integer(),
           physical_block_size: pos_integer(),
           read_only: boolean()
@@ -131,6 +141,7 @@ defmodule NeonFS.Block.Device do
          size: info.size,
          chunk_bytes: info.chunk_bytes,
          epoch: info.epoch,
+         window: nil,
          logical_block_size: info.logical_block_bytes,
          physical_block_size: info.physical_block_bytes,
          read_only: false
@@ -172,18 +183,10 @@ defmodule NeonFS.Block.Device do
   @spec write(t(), non_neg_integer(), binary()) :: :ok | {:error, term()}
   def write(device, offset, data) do
     retrying_stale(:write, fn ->
-      measure(device, :write, byte_size(data), fn -> do_write(device, offset, data) end)
+      measure(device, :write, byte_size(data), fn ->
+        WriteWindow.write(device.window, offset, data)
+      end)
     end)
-  end
-
-  # A write reports only what it rewrote. It never punches, so a
-  # `chunks_replaced` of zero on the same series would read as "this write
-  # replaced nothing" rather than "this write cannot".
-  defp do_write(device, offset, data) do
-    with {:ok, cost} <-
-           publish(device, offset, byte_size(data), &spliced_extent(device, &1, data, offset)) do
-      {:ok, Map.take(cost, [:chunk_bytes, :chunks_rewritten])}
-    end
   end
 
   @doc """
@@ -192,7 +195,9 @@ defmodule NeonFS.Block.Device do
   @spec flush(t()) :: :ok | {:error, term()}
   def flush(device) do
     measure(device, :flush, 0, fn ->
-      core_call(:flush, [device.volume, device.path])
+      with :ok <- WriteWindow.flush(device.window) do
+        core_call(:flush, [device.volume, device.path])
+      end
     end)
   end
 
@@ -202,10 +207,16 @@ defmodule NeonFS.Block.Device do
   @spec write_zeroes(t(), non_neg_integer(), pos_integer()) :: :ok | {:error, term()}
   def write_zeroes(device, offset, length) do
     retrying_stale(:write_zeroes, fn ->
-      measure(device, :write_zeroes, length, fn ->
-        publish(device, offset, length, &zeroed_extent(device, &1))
-      end)
+      measure(device, :write_zeroes, length, fn -> do_write_zeroes(device, offset, length) end)
     end)
+  end
+
+  # The window drains first, or a punch issued after a write would land
+  # before it and the write would come back from the dead.
+  defp do_write_zeroes(device, offset, length) do
+    with :ok <- WriteWindow.drain(device.window) do
+      publish(device, offset, length, &zeroed_extent(device, &1))
+    end
   end
 
   @doc """
@@ -235,9 +246,19 @@ defmodule NeonFS.Block.Device do
     core_call(:read_refs, [device.volume, device.path, offset, length])
   end
 
-  defp ref_bytes(_device, %{target: :hole} = ref), do: {:ok, zeroes(ref.read_length)}
-
+  # The window is consulted first, because a read-back of a write it is still
+  # holding has to see that write. A cache that does not answer reads is a
+  # correctness bug rather than a slower cache.
   defp ref_bytes(device, ref) do
+    case WriteWindow.buffered(device.window, ref.index) do
+      {:ok, buffered} -> {:ok, binary_part(buffered, ref.read_start, ref.read_length)}
+      :miss -> committed_bytes(device, ref)
+    end
+  end
+
+  defp committed_bytes(_device, %{target: :hole} = ref), do: {:ok, zeroes(ref.read_length)}
+
+  defp committed_bytes(device, ref) do
     with {:ok, bytes} <- extent_bytes(device, ref) do
       {:ok, binary_part(bytes, ref.read_start, ref.read_length)}
     end
@@ -279,6 +300,50 @@ defmodule NeonFS.Block.Device do
 
   defp extent_offset(device, ref), do: ref.index * device.chunk_bytes
 
+  @doc """
+  One extent's whole bytes and the target they came from.
+
+  What a read-modify-write needs to start from, and what its commit has to
+  name so a snapshot that moved is refused. The window takes this once per
+  extent and then splices in memory, which is where the coalescing comes
+  from.
+  """
+  @spec extent_snapshot(t(), non_neg_integer()) ::
+          {:ok, binary(), extent_target()} | {:error, term()}
+  def extent_snapshot(device, index) do
+    offset = index * device.chunk_bytes
+    width = min(device.chunk_bytes, device.size - offset)
+
+    with {:ok, %{extents: [ref]}} <- read_refs(device, offset, width),
+         {:ok, bytes} <- extent_bytes(device, ref) do
+      {:ok, bytes, ref.target}
+    end
+  end
+
+  @doc """
+  Places `extents` over the data plane and publishes them in one commit.
+
+  `extents` is `[{extent_index, bytes | :hole}]` and `expect` is
+  `[{extent_index, target}]` for the ones whose contents were read — which
+  for the window is all of them, since it read each once before buffering.
+
+  One call for the whole batch is the point: a window that drained per
+  extent would have saved the reads and none of the commits.
+  """
+  @spec publish_extents(
+          t(),
+          [{non_neg_integer(), binary() | :hole}],
+          [{non_neg_integer(), extent_target()}]
+        ) :: :ok | {:error, term()}
+  def publish_extents(device, extents, expect) do
+    planned = Enum.map(extents, fn {index, target} -> {%{index: index}, target} end)
+
+    with {:ok, written} <- place(device, planned),
+         {:ok, _cost} <- commit_planned(device, planned, written, expect) do
+      :ok
+    end
+  end
+
   # ─── Writes ────────────────────────────────────────────────────────────
 
   # Both mutating paths are the same transaction, and it happens here rather
@@ -306,15 +371,6 @@ defmodule NeonFS.Block.Device do
       {:ok, planned} -> {:ok, Enum.reverse(planned)}
       {:error, _reason} = error -> error
     end
-  end
-
-  # A write never punches: a guest writing zeroes is asking for those bytes
-  # to be there, and `write_zeroes/3` is the call that says otherwise.
-  defp spliced_extent(device, ref, data, offset) do
-    taken = extent_offset(device, ref) + ref.read_start - offset
-    slice = binary_part(data, taken, ref.read_length)
-
-    if ref.read_length == ref.width, do: {:ok, slice}, else: splice(device, ref, slice)
   end
 
   defp zeroed_extent(device, ref) do
@@ -351,6 +407,10 @@ defmodule NeonFS.Block.Device do
   end
 
   defp commit(device, planned, written) do
+    commit_planned(device, planned, written, expectations(planned))
+  end
+
+  defp commit_planned(device, planned, written, expect) do
     %{locations: locations, chunk_codecs: codecs} =
       ChunkWriter.chunk_refs_to_commit_opts(written)
 
@@ -360,12 +420,7 @@ defmodule NeonFS.Block.Device do
       device.volume,
       device.path,
       extent_targets(planned, hashes),
-      [
-        locations: locations,
-        chunk_codecs: codecs,
-        epoch: device.epoch,
-        expect: expectations(planned)
-      ]
+      [locations: locations, chunk_codecs: codecs, epoch: device.epoch, expect: expect]
     ])
     |> case do
       {:ok, _published} -> {:ok, cost(planned, written)}
