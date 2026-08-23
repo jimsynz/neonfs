@@ -9,7 +9,12 @@ LABEL org.opencontainers.image.source="https://harton.dev/project-neon/neonfs" \
       org.opencontainers.image.title="neonfs-base" \
       org.opencontainers.image.description="Base build image for NeonFS containers"
 
+# `libclang-dev` is bindgen's, not ours: `neonfs_block`'s ublk helper depends
+# on `libublk-rs-sys`, whose build script generates the ublk bindings and
+# loads `libclang` to do it. Absent, the build fails inside a transitive
+# dependency naming a library nothing in this repo mentions.
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    libclang-dev \
     libfuse3-dev \
     fuse3 \
     && rm -rf /var/lib/apt/lists/*

@@ -32,7 +32,9 @@ nothing in it to get wrong, and everything decided about an IO is decided on
 the BEAM side where it is testable everywhere.
 
 It is compiled by `neonfs_block`'s own `mix compile` (see
-`Mix.Tasks.Compile.NeonfsUblk`) even on hosts that cannot run it. Both halves
+`Mix.Tasks.Compile.NeonfsUblk`) even on hosts that cannot run it, so building
+this package needs **`libclang-dev`** — `libublk-rs-sys` generates the ublk
+bindings with bindgen, which loads `libclang` at build time. Both halves
 of `NeonFS.Block.Ublk.Protocol` are hand-rolled against one written layout, so
 compiling them together is what stops a change to one side reaching a host
 with ublk before anything notices.

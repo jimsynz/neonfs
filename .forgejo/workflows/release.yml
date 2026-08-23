@@ -199,7 +199,7 @@ jobs:
         run: |
           apt-get update
           apt-get install -y --no-install-recommends \
-            libfuse3-dev gettext-base
+            libfuse3-dev gettext-base libclang-dev
           rm -rf /var/lib/apt/lists/*
 
       - name: Install nfpm
@@ -314,7 +314,7 @@ jobs:
         run: |
           apt-get update
           apt-get install -y --no-install-recommends \
-            libfuse3-dev gettext-base
+            libfuse3-dev gettext-base libclang-dev
           rm -rf /var/lib/apt/lists/*
 
       - name: Install nfpm
