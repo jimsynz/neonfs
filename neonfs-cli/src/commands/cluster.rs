@@ -21,24 +21,55 @@ use std::time::{Duration, Instant};
 /// hosts; the common case completes in a second or two.
 const JOIN_VALIDATE_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// What a single poll of a restarting daemon found.
+///
+/// Retrying on every failure is right — the daemon's distribution is coming
+/// back and anything can fail meanwhile. Losing *which* failure by the time
+/// the deadline is reported is not: a node that never answered and a node that
+/// answered "no" are different investigations, and a deadline that names only
+/// one of them sends an operator after the wrong thing.
+enum Probe<T> {
+    /// Connected, and the node gave the answer being waited for.
+    Ready(T),
+    /// Connected, and the node said it is not there yet.
+    NotYet(String),
+    /// Never got an answer, with what went wrong.
+    Unreachable(String),
+}
+
+impl<T> Probe<T> {
+    /// What to tell the operator when the deadline passes on this outcome.
+    fn describe(&self) -> String {
+        match self {
+            Probe::Ready(_) => "ready".into(),
+            Probe::NotYet(what) => format!("the node answered but {what}"),
+            Probe::Unreachable(why) => format!("could not reach the node: {why}"),
+        }
+    }
+}
+
 /// Reconnect to the daemon (its distribution may be mid-restart) and wait until
 /// it reports a running cluster. Connection/RPC failures during the window are
 /// treated as "still restarting" and retried until `timeout`.
 async fn await_cluster_running(timeout: Duration, format: OutputFormat) -> Result<ClusterStatus> {
     let deadline = Instant::now() + timeout;
     let mut announced = false;
+    // Declared without a value: the loop assigns before it is ever read, and
+    // a placeholder would be a state this can never actually report.
+    let mut last;
 
     loop {
-        if let Some(status) = try_cluster_status().await {
-            if status.status == "running" {
-                return Ok(status);
-            }
+        last = try_cluster_status().await;
+        if let Probe::Ready(status) = last {
+            return Ok(status);
         }
 
         if Instant::now() >= deadline {
-            return Err(CliError::RpcFailed(
-                "timed out waiting for the node to come back and report a running cluster".into(),
-            ));
+            return Err(CliError::RpcFailed(format!(
+                "timed out after {}s waiting for the node to report a running cluster — {}",
+                timeout.as_secs(),
+                last.describe()
+            )));
         }
 
         if matches!(format, OutputFormat::Table) && !announced {
@@ -57,54 +88,81 @@ async fn await_cluster_running(timeout: Duration, format: OutputFormat) -> Resul
 /// confirmation.
 async fn await_state_persisted(node: &str, timeout: Duration) -> Result<()> {
     let deadline = Instant::now() + timeout;
+    let mut last;
 
     loop {
-        if try_state_exists(node).await {
+        last = try_state_exists(node).await;
+        if matches!(last, Probe::Ready(())) {
             return Ok(());
         }
 
         if Instant::now() >= deadline {
-            return Err(CliError::RpcFailed(
-                "timed out waiting for the node to come back with persisted cluster state".into(),
-            ));
+            // Naming the node, because "could not reach it" is only
+            // actionable with the address that was tried — and this ran
+            // against a node whose distribution had just restarted.
+            return Err(CliError::RpcFailed(format!(
+                "timed out after {}s waiting for {node} to report persisted cluster state — {}",
+                timeout.as_secs(),
+                last.describe()
+            )));
         }
 
         smol::Timer::after(Duration::from_secs(2)).await;
     }
 }
 
-/// One best-effort `NeonFS.Cluster.State.exists?/0` probe against a
-/// specific node. Returns `false` on any connect/RPC failure so the
-/// caller can keep polling.
-async fn try_state_exists(node: &str) -> bool {
-    let Ok(mut conn) = DaemonConnection::connect_node(node).await else {
-        return false;
+/// One `NeonFS.Cluster.State.exists?/0` probe against a specific node.
+///
+/// Every outcome is kept apart. This previously answered `false` for a failed
+/// connect as well as for a node that denied having state, and the caller
+/// reported the latter — so a join that had in fact written `cluster.json`,
+/// been issued cluster-signed credentials and registered its service was
+/// reported as "no persisted cluster state", sending the operator to look for
+/// a file that was already there.
+async fn try_state_exists(node: &str) -> Probe<()> {
+    let mut conn = match DaemonConnection::connect_node(node).await {
+        Ok(conn) => conn,
+        Err(error) => return Probe::Unreachable(error.to_string()),
     };
 
     match conn
         .call("Elixir.NeonFS.Cluster.State", "exists?", vec![])
         .await
     {
-        Ok(Term::Atom(atom)) => atom.name == "true",
-        _ => false,
+        Ok(Term::Atom(atom)) if atom.name == "true" => Probe::Ready(()),
+        Ok(Term::Atom(atom)) if atom.name == "false" => {
+            Probe::NotYet("it reports no persisted cluster state".into())
+        }
+        Ok(other) => Probe::NotYet(format!("answered unexpectedly: {other:?}")),
+        Err(error) => Probe::Unreachable(error.to_string()),
     }
 }
 
 /// One best-effort `cluster status` probe. Returns `None` on any
 /// connect/RPC/parse failure so the caller can keep polling.
-async fn try_cluster_status() -> Option<ClusterStatus> {
-    let mut conn = DaemonConnection::connect().await.ok()?;
-    let result = conn
+async fn try_cluster_status() -> Probe<ClusterStatus> {
+    let mut conn = match DaemonConnection::connect().await {
+        Ok(conn) => conn,
+        Err(error) => return Probe::Unreachable(error.to_string()),
+    };
+
+    let result = match conn
         .call("Elixir.NeonFS.CLI.Handler", "cluster_status", vec![])
         .await
-        .ok()?;
+    {
+        Ok(result) => result,
+        Err(error) => return Probe::Unreachable(error.to_string()),
+    };
 
-    if extract_error(&result).is_some() {
-        return None;
+    if let Some(error) = extract_error(&result) {
+        return Probe::NotYet(format!("reported an error: {error}"));
     }
 
-    let data = unwrap_ok_tuple(result).ok()?;
-    ClusterStatus::from_term(data).ok()
+    match unwrap_ok_tuple(result).and_then(ClusterStatus::from_term) {
+        Ok(status) if status.status == "running" => Probe::Ready(status),
+        Ok(status) => Probe::NotYet(format!("its cluster status is '{}'", status.status)),
+        Err(error) => Probe::NotYet(format!("sent a reply this CLI could not read: {error}")),
+    }
 }
 
 /// Cluster management subcommands
@@ -2211,6 +2269,50 @@ fn print_field(map: &std::collections::HashMap<String, Term>, key: &str, label: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The failure this exists to prevent: a join that had written
+    // `cluster.json`, been issued cluster-signed credentials and registered
+    // its service was reported as "no persisted cluster state", because a
+    // failed connect and a node denying state were the same `false`. The
+    // deadline message is the only place an operator sees this, so the three
+    // outcomes have to read differently there.
+    #[test]
+    fn test_probe_describes_unreachable_and_denial_differently() {
+        let unreachable: Probe<()> = Probe::Unreachable("connection refused".into());
+        let denial: Probe<()> = Probe::NotYet("it reports no persisted cluster state".into());
+
+        let unreachable = unreachable.describe();
+        let denial = denial.describe();
+
+        assert!(unreachable.contains("could not reach"), "{unreachable}");
+        assert!(unreachable.contains("connection refused"), "{unreachable}");
+
+        assert!(denial.contains("answered but"), "{denial}");
+        assert!(denial.contains("no persisted cluster state"), "{denial}");
+
+        // The distinction is the point: an operator reading one must not be
+        // sent after the other.
+        assert_ne!(unreachable, denial);
+        assert!(!unreachable.contains("answered"), "{unreachable}");
+        assert!(!denial.contains("could not reach"), "{denial}");
+    }
+
+    #[test]
+    fn test_probe_ready_describes_itself() {
+        assert_eq!(Probe::Ready(()).describe(), "ready");
+    }
+
+    // A node that answers with a status other than "running" is not
+    // unreachable, and saying which status it gave is what tells an operator
+    // whether to keep waiting or go looking.
+    #[test]
+    fn test_probe_not_yet_carries_the_status_it_saw() {
+        let probe: Probe<()> = Probe::NotYet("its cluster status is 'forming'".into());
+        let described = probe.describe();
+
+        assert!(described.contains("forming"), "{described}");
+        assert!(!described.contains("could not reach"), "{described}");
+    }
 
     // The daemon seeds `_system`'s replication factor from the drive count
     // when the operator says nothing, so "omitted" and "given as 1" must not
