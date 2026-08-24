@@ -3,6 +3,7 @@
 pub mod acl;
 pub mod audit;
 pub mod backup;
+pub mod block;
 pub mod ca_bootstrap;
 pub mod cluster;
 pub mod credential;
