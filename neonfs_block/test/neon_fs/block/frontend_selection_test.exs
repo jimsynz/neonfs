@@ -80,19 +80,22 @@ defmodule NeonFS.Block.FrontendSelectionTest do
     # The rig found this: `/dev/ublk-control` is `crw------- root root` and the
     # daemon is not root, so an existence check reported ublk available on a
     # node where every attach then failed with EACCES deep inside the helper.
-    test "a control device this process cannot open is not availability" do
-      unopenable =
-        Path.join(System.tmp_dir!(), "ublk-locked-#{System.unique_integer([:positive])}")
-
-      File.write!(unopenable, "")
-      File.chmod!(unopenable, 0o000)
-      on_exit(fn -> File.rm(unopenable) end)
+    #
+    # A directory rather than a mode-000 file, because the property under test
+    # is "exists but will not open" and CI runs as root — which opens a
+    # mode-000 file happily and would make this assert nothing there. `EISDIR`
+    # is a type check rather than a permission one, so it holds for every uid.
+    # The EACCES *message* is tested where it is built, in the CLI handler.
+    test "a path that exists but will not open is not availability" do
+      unopenable = Path.join(System.tmp_dir!(), "ublk-dir-#{System.unique_integer([:positive])}")
+      File.mkdir_p!(unopenable)
+      on_exit(fn -> File.rmdir(unopenable) end)
 
       Application.put_env(:neonfs_block, :ublk_control_path, unopenable)
       Application.put_env(:neonfs_block, :ublk_helper, System.find_executable("sh"))
       Capability.refresh()
 
-      assert {:error, {:ublk_control_inaccessible, ^unopenable, :eacces}} = Capability.check()
+      assert {:error, {:ublk_control_inaccessible, ^unopenable, :eisdir}} = Capability.check()
       assert NeonFS.Block.frontends() == [:nbd]
     end
 
