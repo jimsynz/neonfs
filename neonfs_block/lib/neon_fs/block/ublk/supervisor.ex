@@ -10,12 +10,16 @@ defmodule NeonFS.Block.Ublk.Supervisor do
 
   ## `:temporary` children
 
-  A target that stops has lost its device — the helper died, a queue died, or
-  the cluster fenced the attachment — and in none of those cases does
-  restarting it get the guest's `/dev/ublkbN` back. Restarting would take a
-  new attachment claim and publish a device at a new path while the guest
-  holds the old one, which is worse than the failure. Re-attaching is the
-  caller's decision, made with the reason in hand.
+  A target now survives its helper dying — `USER_RECOVERY` lets it resume the
+  quiesced device in place — so a target that *stops* has failed at something
+  recovery could not fix: the cluster fenced the attachment, or the helper
+  failed so often it exhausted the recovery budget.
+
+  Neither is helped by restarting the target. A fresh target creates a fresh
+  device at a fresh `/dev/ublkbN` while the guest holds the old path, and takes
+  a new attachment claim to do it — so the restart would publish something
+  nothing is using and hide the reason the old one went. Re-attaching is the
+  caller's decision, made with that reason in hand.
   """
 
   use DynamicSupervisor

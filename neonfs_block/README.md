@@ -60,6 +60,37 @@ but so that every attachment on a node agrees about what that node can do.
 `NeonFS.Block.Ublk.Capability.refresh/0` is for an operator who has just
 loaded the module.
 
+### A dead helper is recovered, not fatal
+
+ublk devices are created with `UBLK_F_USER_RECOVERY | REISSUE`, so a helper
+that dies leaves the kernel holding the device **quiesced** rather than taking
+it away: IO is held, `/dev/ublkbN` stays put, and `NeonFS.Block.Ublk.Target`
+starts a replacement against the same device and resumes it. The path not
+changing is the point — a guest holding it across the restart is what recovery
+is for, and a target that instead published a new device at a new path would
+be no use to it.
+
+`REISSUE` decides what happens to requests the dead helper had fetched but not
+completed: without it the driver fails them, with it the replacement is given
+them again. Failing them is what recovery exists to avoid, since a guest
+filesystem that gets `EIO` on a journal write typically remounts read-only
+whether or not the device came back. The double-write it risks is safe here and
+not by luck — a re-issued request is by definition one the driver never
+completed, so the guest was never told it finished and has issued nothing
+depending on it, and applying it twice converges: chunk writes are
+content-addressed, and a sub-extent write commits under a compare-and-swap that
+re-reads if the first attempt did land.
+
+Recovery is bounded — five attempts in a minute. A helper that dies once is a
+crash; one that dies five times cannot serve this device, and retrying forever
+would hold its attachment claim against something nothing can use. On
+exhaustion the device goes. A **fence** is never recovered: another node owns
+the device, and resuming would be the one outcome fencing prevents.
+
+`[:neonfs, :block, :ublk, :recovery_started | :recovery_completed |
+:recovery_exhausted]` are the events to alert on. A device recovering
+repeatedly is a device about to be dropped.
+
 ### ublk is local; NBD is not
 
 The device node appears on the kernel of the host running the target, so a

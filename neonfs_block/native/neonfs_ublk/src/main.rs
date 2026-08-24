@@ -24,7 +24,10 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use libublk::io::{BufDescList, UblkDev, UblkIOCtx, UblkQueue};
-use libublk::{ctrl::UblkCtrlBuilder, BufDesc, UblkError, UblkFlags, UblkIORes};
+use libublk::{
+    ctrl::{UblkCtrl, UblkCtrlBuilder},
+    BufDesc, UblkError, UblkFlags, UblkIORes,
+};
 
 use protocol::{
     read_frame, write_frame, Reply, Request, OP_DISCARD, OP_FLUSH, OP_READ, OP_WRITE,
@@ -36,6 +39,7 @@ struct Config {
     size_bytes: u64,
     logical_block_bytes: u32,
     device_id: i32,
+    recover: bool,
     queues: u16,
     queue_depth: u16,
 }
@@ -66,6 +70,9 @@ fn config_from_env() -> Config {
         // the way a CSI attach picks its own `/dev/nbdX`. `-1` asks the driver
         // to allocate, which leaves the path knowable only from here.
         device_id: optional("NEONFS_UBLK_ID", -1),
+        // Set by the node when it is restarting a helper against a device
+        // the kernel is holding quiesced, rather than creating a new one.
+        recover: std::env::var("NEONFS_UBLK_RECOVER").is_ok(),
         queues: optional("NEONFS_UBLK_QUEUES", 1),
         queue_depth: optional("NEONFS_UBLK_QUEUE_DEPTH", 64),
     }
@@ -87,13 +94,61 @@ fn run(config: Config) -> Result<(), UblkError> {
     let size_bytes = config.size_bytes;
     let socket_prefix = Arc::new(config.socket_prefix);
 
+    // Recovery is a different conversation with the driver, not a different
+    // target: the device already exists and is quiesced, so this asks the
+    // driver to reopen it rather than to make one. `START_USER_RECOVERY`
+    // first, then a control handle flagged `RECOVER_DEV` — after which
+    // `start_dev` sees the quiesced state and ends the recovery instead of
+    // starting a device.
+    if config.recover {
+        if config.device_id < 0 {
+            eprintln!("neonfs_ublk: recovery needs NEONFS_UBLK_ID");
+            return Err(UblkError::OtherError(-libc::EINVAL));
+        }
+
+        UblkCtrl::new_simple(config.device_id)?.start_user_recover()?;
+    }
+
     let control = UblkCtrlBuilder::default()
         .name("neonfs")
         .id(config.device_id)
         .nr_queues(config.queues)
         .depth(config.queue_depth)
         .io_buf_bytes(1 << 20)
-        .dev_flags(UblkFlags::UBLK_DEV_F_ADD_DEV)
+        // `USER_RECOVERY` makes the driver quiesce this device when this
+        // process dies, instead of failing every IO and taking it away.
+        //
+        // `REISSUE` decides what happens to the requests the dead process
+        // had fetched but not completed: without it the driver fails them,
+        // with it the new process is given them again. Failing them is what
+        // recovery exists to avoid — a guest filesystem that gets EIO on a
+        // journal write typically remounts read-only, which is the outcome
+        // whether or not the device came back.
+        //
+        // The double-write REISSUE risks is safe here, and not by luck.
+        // A re-issued request is by definition one the driver never
+        // completed, so the guest was never told it finished and has issued
+        // nothing that depends on it. Applying it twice converges: chunk
+        // writes are content-addressed, so the same bytes produce the same
+        // chunk, and a sub-extent write commits under a compare-and-swap
+        // (`BlockIndex.commit/3`'s `:expect`) that re-reads and re-applies
+        // if the first attempt did land. There is no ordering to violate and
+        // no state to double-count.
+        //
+        // `UBLK_F_QUIESCE` is deliberately absent. It buys a *planned*
+        // quiesce for an upgrade, which nothing asks for yet, and these
+        // flags are fixed when the device is created — so adding it later
+        // means recreating devices. That is the right trade in a project
+        // that keeps no on-disk compatibility anyway.
+        .ctrl_flags(
+            (libublk::sys::UBLK_F_USER_RECOVERY | libublk::sys::UBLK_F_USER_RECOVERY_REISSUE)
+                as u64,
+        )
+        .dev_flags(if config.recover {
+            UblkFlags::UBLK_DEV_F_RECOVER_DEV
+        } else {
+            UblkFlags::UBLK_DEV_F_ADD_DEV
+        })
         .build()?;
 
     let describe = move |device: &mut UblkDev| {
@@ -108,9 +163,10 @@ fn run(config: Config) -> Result<(), UblkError> {
 
         match serve(queue_id, device, &prefix) {
             Ok(()) => {}
-            // A queue whose socket has gone cannot answer, and holding the
-            // device open while stalling is the failure mode this project
-            // designs out. Reporting it lets the node tear the device down.
+            // A queue whose socket has gone cannot answer. Reporting it
+            // lets the node act: since `USER_RECOVERY`, that means restarting
+            // this process against the quiesced device rather than taking
+            // the device away.
             Err(error) => eprintln!("neonfs_ublk: queue {queue_id} stopped: {error}"),
         }
     };
