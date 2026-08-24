@@ -29,7 +29,18 @@ sidecars:
     image: registry.k8s.io/sig-storage/csi-attacher:v4.9.0
     pullPolicy: IfNotPresent
     extraArgs: []
+  # Off, because this driver does not implement expansion. `csi-resizer`
+  # probes the driver at startup and, finding neither controller nor node
+  # resize, exits fatally:
+  #
+  #   F main.go:217] CSI driver does not support resize nor modify
+  #
+  # It then crash-loops, and because a pod is Ready only when every container
+  # is, the controller never becomes Ready — so the shipped chart could not
+  # reach a healthy state at all. Enable this alongside `EXPAND_VOLUME` in
+  # `ControllerGetCapabilities`, not before.
   resizer:
+    enabled: false
     image: registry.k8s.io/sig-storage/csi-resizer:v2.2.1
     pullPolicy: IfNotPresent
     extraArgs: []
@@ -211,7 +222,10 @@ storageClass:
   isDefault: false
   reclaimPolicy: Delete
   volumeBindingMode: Immediate
-  allowVolumeExpansion: true
+  # False because it is: the driver advertises no `EXPAND_VOLUME` capability
+  # and `ControllerExpandVolume` is unimplemented. Claiming it here only moves
+  # the failure to whoever edits a PVC.
+  allowVolumeExpansion: false
   parameters:
     replication_factor: "3"
     tier: hot

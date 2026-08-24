@@ -88,6 +88,7 @@ spec:
           volumeMounts:
             - name: socket-dir
               mountPath: {{ dir .Values.controller.socketPath }}
+        {{- if .Values.sidecars.resizer.enabled }}
         - name: csi-resizer
           image: {{ .Values.sidecars.resizer.image }}
           imagePullPolicy: {{ .Values.sidecars.resizer.pullPolicy }}
@@ -104,6 +105,7 @@ spec:
           volumeMounts:
             - name: socket-dir
               mountPath: {{ dir .Values.controller.socketPath }}
+        {{- end }}
         - name: liveness-probe
           image: {{ .Values.sidecars.livenessProbe.image }}
           imagePullPolicy: {{ .Values.sidecars.livenessProbe.pullPolicy }}
