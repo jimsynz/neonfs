@@ -25,15 +25,31 @@ defmodule NeonFS.Block.Ublk.Target do
   an operator can get wrong, and that tearing a device down has to reap every
   socket and process rather than one.
 
-  ## Losing anything is losing the device
+  ## A dead helper is recovered, not fatal
 
-  A dead helper, a dead queue server or a fence all stop this process, which
-  drops the ublk device. The kernel then sees a device that went away rather
-  than one that silently stalls, and a guest filesystem will very likely
-  remount read-only — which is harsh but honest, and preferable to the wedge
-  it replaces. Restarting the helper in place was rejected: without
-  `UBLK_F_USER_RECOVERY` a fresh device gets a fresh `/dev/ublkbN`, so
-  anything holding the old path errors regardless.
+  The device is created with `UBLK_F_USER_RECOVERY`, so a helper that dies
+  leaves the kernel holding the device *quiesced* rather than taking it away:
+  IO is held, `/dev/ublkbN` stays where it is, and a new helper can resume it
+  in place. That is what this process does — kill the orphaned queue servers,
+  spawn a helper in recovery mode against the same device id, accept its
+  sockets, wait for it to say the device is back.
+
+  It matters that the path does not change. Restarting a helper without
+  `USER_RECOVERY` would create a *fresh* device at a fresh `/dev/ublkbN`,
+  which is no use to a guest holding the old one — so before the flag, taking
+  the device down was the honest answer.
+
+  ### Bounded, and not for every failure
+
+  Recovery is bounded by `@recovery_attempts` within `@recovery_window_ms`. A
+  helper that dies once is a crash; one that dies five times in a minute is a
+  helper that cannot serve this device, and retrying it forever would hold the
+  attachment claim against a device nothing can use. On exhaustion the device
+  goes, which is the behaviour that preceded this.
+
+  A **fence** is never recovered. Being fenced means another node owns the
+  device now, and every IO in flight belongs to an epoch that is no longer
+  current — resuming would be the one outcome fencing exists to prevent.
   """
 
   use GenServer
@@ -47,6 +63,8 @@ defmodule NeonFS.Block.Ublk.Target do
   @default_queue_depth 64
   @max_devices 16
   @ready_timeout_ms 30_000
+  @recovery_attempts 5
+  @recovery_window_ms 60_000
 
   @type opts :: [
           export: String.t(),
@@ -94,7 +112,11 @@ defmodule NeonFS.Block.Ublk.Target do
              device_path: device_path_for(device_id),
              export: export,
              helper: helper,
+             info: info,
+             device: device,
+             opts: opts,
              listeners: listeners,
+             recoveries: [],
              servers: servers
            }}
 
@@ -123,31 +145,23 @@ defmodule NeonFS.Block.Ublk.Target do
   end
 
   def handle_info({:EXIT, port, reason}, %{helper: port} = state) do
-    Logger.error("ublk helper exited; the device goes with it",
-      export: state.export,
-      reason: inspect(reason)
-    )
-
-    {:stop, {:helper_exited, reason}, state}
+    recover(state, {:helper_exited, reason})
   end
 
-  # A queue server that stops has lost its socket, and a device missing one
-  # queue answers some IO and stalls the rest.
+  # A queue server that stops has lost its socket, which is what a dead
+  # helper looks like from this side — and whichever of the two is noticed
+  # first, the answer is the same. A device serving some queues and stalling
+  # the rest is the state neither of them may be left in.
   def handle_info({:EXIT, pid, reason}, state) do
     if pid in state.servers do
-      Logger.error("ublk queue server stopped; the device goes with it",
-        export: state.export,
-        reason: inspect(reason)
-      )
-
-      {:stop, {:queue_stopped, reason}, state}
+      recover(state, {:queue_stopped, reason})
     else
       {:noreply, state}
     end
   end
 
   def handle_info({port, {:exit_status, status}}, %{helper: port} = state) do
-    {:stop, {:helper_exited, {:exit_status, status}}, state}
+    recover(state, {:helper_exited, {:exit_status, status}})
   end
 
   # The helper's stdout and stderr, which is where its own diagnostics go.
@@ -168,6 +182,85 @@ defmodule NeonFS.Block.Ublk.Target do
     end)
 
     :ok
+  end
+
+  # Whichever symptom arrived, the helper is gone: reap what is left of it,
+  # start another against the quiesced device, and resume. A budget stops a
+  # helper that cannot serve this device from holding its attachment claim
+  # forever.
+  defp recover(state, cause) do
+    recoveries = recent(state.recoveries)
+
+    if length(recoveries) >= @recovery_attempts do
+      Logger.error("ublk helper failed too often; the device goes with it",
+        export: state.export,
+        cause: inspect(cause),
+        attempts: length(recoveries)
+      )
+
+      emit(:recovery_exhausted, state, %{attempts: length(recoveries)})
+      {:stop, {:ublk_recovery_exhausted, cause}, state}
+    else
+      Logger.warning("ublk helper gone; recovering the device in place",
+        export: state.export,
+        cause: inspect(cause),
+        device_path: state.device_path
+      )
+
+      emit(:recovery_started, state, %{attempt: length(recoveries) + 1})
+      restart_helper(%{state | recoveries: [now() | recoveries]}, cause)
+    end
+  end
+
+  # The same geometry and the same attach options as the first helper, from
+  # state rather than re-derived: a recovering helper is reopening a device
+  # the driver already describes, so the two must not disagree about it.
+  defp restart_helper(state, cause) do
+    reap(state)
+
+    helper = spawn_helper(state.info, state.listeners, state.device_id, state.opts, recover: true)
+    servers = accept_queues(state.device, state.info, state.listeners)
+
+    case await_ready(helper, state.device_id) do
+      :ok ->
+        Logger.info("ublk device recovered", export: state.export, device_path: state.device_path)
+        emit(:recovery_completed, state, %{})
+        {:noreply, %{state | helper: helper, servers: servers}}
+
+      {:error, reason} ->
+        # The replacement could not take the device either. That is another
+        # failure against the budget rather than a distinct outcome, so it
+        # goes back through the same door.
+        recover(%{state | helper: helper, servers: servers}, {:recovery_failed, reason, cause})
+    end
+  end
+
+  # The old helper's sockets are dead and its queue servers are blocked on
+  # them. Nothing here waits for them to notice.
+  defp reap(state) do
+    Enum.each(state.servers, &Process.exit(&1, :kill))
+    if is_port(state.helper), do: safely_close(state.helper)
+  end
+
+  defp safely_close(port) do
+    Port.close(port)
+  rescue
+    ArgumentError -> :ok
+  end
+
+  defp recent(recoveries) do
+    cutoff = now() - @recovery_window_ms
+    Enum.filter(recoveries, &(&1 > cutoff))
+  end
+
+  defp now, do: System.monotonic_time(:millisecond)
+
+  defp emit(event, state, measurements) do
+    :telemetry.execute(
+      [:neonfs, :block, :ublk, event],
+      Map.put(measurements, :count, 1),
+      %{export: state.export, device_path: state.device_path}
+    )
   end
 
   # The node picks the device number rather than reading back whichever the
@@ -208,11 +301,24 @@ defmodule NeonFS.Block.Ublk.Target do
 
   # A listening socket per queue, named by the queue so the helper can find
   # each one from the prefix it was given rather than being told N paths.
+  #
+  # The OS pid is in the name as well as a unique integer, because the
+  # integer restarts with the VM: without it a node that crashed would find
+  # its own dead sockets at the paths it wants and fail every attach with
+  # `:eaddrinuse` until someone cleaned `/tmp` by hand. With it, a file at
+  # one of these paths belongs either to this VM — which has not used that
+  # integer before — or to a process that no longer exists, so removing it
+  # cannot take a live listener from anyone.
   defp listen(queues) do
-    prefix = Path.join(System.tmp_dir!(), "neonfs-ublk-#{System.unique_integer([:positive])}")
+    prefix =
+      Path.join(
+        System.tmp_dir!(),
+        "neonfs-ublk-#{System.pid()}-#{System.unique_integer([:positive])}"
+      )
 
     Enum.reduce_while(0..(queues - 1), {:ok, %{}}, fn queue, {:ok, acc} ->
       path = "#{prefix}.#{queue}"
+      File.rm(path)
 
       case :gen_tcp.listen(0, [
              {:ifaddr, {:local, path}},
@@ -234,23 +340,33 @@ defmodule NeonFS.Block.Ublk.Target do
   # The helper learns the geometry from its environment rather than over the
   # socket: it has to size the device before it accepts a single IO, so a
   # handshake would only be a second way to say what is already known here.
-  defp spawn_helper(info, listeners, device_id, opts) do
+  defp spawn_helper(info, listeners, device_id, opts, mode \\ []) do
     %{prefix: prefix} = listeners |> Map.values() |> hd()
 
     Port.open({:spawn_executable, Capability.helper_path()}, [
       :binary,
       :exit_status,
       :stderr_to_stdout,
-      env: [
-        {~c"NEONFS_UBLK_SOCKET", charlist(prefix)},
-        {~c"NEONFS_UBLK_ID", charlist(device_id)},
-        {~c"NEONFS_UBLK_SIZE_BYTES", charlist(info.size)},
-        {~c"NEONFS_UBLK_BLOCK_BYTES", charlist(info.logical_block_size)},
-        {~c"NEONFS_UBLK_QUEUES", charlist(Keyword.get(opts, :queues, @default_queues))},
-        {~c"NEONFS_UBLK_QUEUE_DEPTH",
-         charlist(Keyword.get(opts, :queue_depth, @default_queue_depth))}
-      ]
+      env:
+        recovery_env(mode) ++
+          [
+            {~c"NEONFS_UBLK_SOCKET", charlist(prefix)},
+            {~c"NEONFS_UBLK_ID", charlist(device_id)},
+            {~c"NEONFS_UBLK_SIZE_BYTES", charlist(info.size)},
+            {~c"NEONFS_UBLK_BLOCK_BYTES", charlist(info.logical_block_size)},
+            {~c"NEONFS_UBLK_QUEUES", charlist(Keyword.get(opts, :queues, @default_queues))},
+            {~c"NEONFS_UBLK_QUEUE_DEPTH",
+             charlist(Keyword.get(opts, :queue_depth, @default_queue_depth))}
+          ]
     ])
+  end
+
+  # Present or absent, never a value: the helper reads it with `is_ok`, so a
+  # `false` would enable recovery on a fresh device and fail at the driver.
+  defp recovery_env(mode) do
+    if Keyword.get(mode, :recover, false),
+      do: [{~c"NEONFS_UBLK_RECOVER", ~c"1"}],
+      else: []
   end
 
   defp charlist(value), do: value |> to_string() |> String.to_charlist()
