@@ -43,6 +43,13 @@ mark() {
 
 classify() {
   case "$1" in
+    # Generated from clap's `--help` and verified by the `neonfs-cli` job, so
+    # a hand-edit is a build result that changed. Inert would mean the one
+    # edit the check exists to catch — someone "fixing" the file by hand —
+    # is the one it never sees, which is how `deploy/charts/*` came to sit
+    # two sidecars behind its templates.
+    docs/cli-reference.md) mark cli ;;
+
     # Inert: nothing in CI consumes these.
     *.md) ;;
     docs/* | test-rig/* | containers/* | compose.yml | \
