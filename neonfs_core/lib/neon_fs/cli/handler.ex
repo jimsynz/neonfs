@@ -17,6 +17,7 @@ defmodule NeonFS.CLI.Handler do
   """
 
   alias NeonFS.CLI.Handler.ACL, as: ACLHandler
+  alias NeonFS.CLI.Handler.BlockRouting, as: BlockRoutingHandler
   alias NeonFS.CLI.Handler.CA, as: CAHandler
   alias NeonFS.CLI.Handler.Cluster, as: ClusterHandler
   alias NeonFS.CLI.Handler.ClusterRecovery, as: ClusterRecoveryHandler
@@ -433,6 +434,36 @@ defmodule NeonFS.CLI.Handler do
   """
   @spec mount(String.t(), String.t(), map()) :: {:ok, map()} | {:error, term()}
   defdelegate mount(volume_name, mount_point, options), to: MountRoutingHandler
+
+  @doc """
+  Attaches a volume as a block device on a block node.
+
+  `export` is `<volume>` or `<volume>:<path>`; `frontend` is `"auto"`,
+  `"ublk"` or `"nbd"`. A ublk attach creates the device on the node that
+  serves it; NBD is attached by the client, so that case reports where to
+  dial instead of attaching.
+  """
+  @spec block_attach(String.t(), String.t()) :: {:ok, map()} | {:error, term()}
+  defdelegate block_attach(export, frontend), to: BlockRoutingHandler, as: :attach
+
+  @doc """
+  Detaches the ublk device serving an export, wherever the cluster has one.
+  """
+  @spec block_detach(String.t()) :: {:ok, map()} | {:error, term()}
+  defdelegate block_detach(export), to: BlockRoutingHandler, as: :detach
+
+  @doc """
+  Lists every block device the cluster has attached, by node and frontend.
+  """
+  @spec list_block_devices() :: {:ok, [map()]} | {:error, term()}
+  defdelegate list_block_devices(), to: BlockRoutingHandler, as: :list_devices
+
+  @doc """
+  Reports which frontends each block node can serve, and why not when it
+  cannot serve ublk.
+  """
+  @spec block_frontends() :: {:ok, [map()]} | {:error, term()}
+  defdelegate block_frontends(), to: BlockRoutingHandler, as: :frontends
 
   @doc """
   Unmounts a filesystem by mount ID or path.

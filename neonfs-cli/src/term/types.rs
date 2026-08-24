@@ -1320,6 +1320,200 @@ impl JobInfo {
 mod tests {
     use super::*;
 
+    fn atom(name: &str) -> Term {
+        Term::Atom(Atom {
+            name: name.to_string(),
+        })
+    }
+
+    fn bin(value: &str) -> Term {
+        Term::Binary(Binary {
+            bytes: value.as_bytes().to_vec(),
+        })
+    }
+
+    fn map(pairs: Vec<(&str, Term)>) -> Term {
+        Term::Map(eetf::Map {
+            map: pairs.into_iter().map(|(k, v)| (atom(k), v)).collect(),
+        })
+    }
+
+    // Elixir sends atom keys and atom values for things like `:ublk`, so
+    // these are built the way the handler actually builds them rather than
+    // with binaries throughout.
+    #[test]
+    fn test_block_attachment_ublk_carries_a_device_path() {
+        let attachment = BlockAttachment::from_term(map(vec![
+            ("export", bin("vol:/dev.img")),
+            ("frontend", atom("ublk")),
+            ("node", atom("neonfs_block@worker-a")),
+            ("device_path", bin("/dev/ublkb0")),
+        ]))
+        .unwrap();
+
+        assert_eq!(attachment.frontend, "ublk");
+        assert_eq!(attachment.node, "neonfs_block@worker-a");
+        assert_eq!(attachment.device_path.as_deref(), Some("/dev/ublkb0"));
+        assert!(attachment.endpoint.is_none());
+    }
+
+    // The NBD case attached nothing, so the absence of a device path is the
+    // signal the printer keys on — mistaking it for a device would send an
+    // operator looking for something that is not there.
+    #[test]
+    fn test_block_attachment_nbd_carries_an_endpoint_and_no_device() {
+        let attachment = BlockAttachment::from_term(map(vec![
+            ("export", bin("vol")),
+            ("frontend", atom("nbd")),
+            ("node", atom("neonfs_block@worker-a")),
+            ("attached", atom("false")),
+            (
+                "endpoint",
+                map(vec![
+                    ("host", bin("10.0.0.4")),
+                    ("port", Term::FixInteger(FixInteger { value: 10809 })),
+                ]),
+            ),
+            (
+                "reason",
+                bin("{:ublk_driver_absent, \"/dev/ublk-control\"}"),
+            ),
+        ]))
+        .unwrap();
+
+        assert!(attachment.device_path.is_none());
+        let endpoint = attachment.endpoint.unwrap();
+        assert_eq!(endpoint.host, "10.0.0.4");
+        assert_eq!(endpoint.port, 10809);
+        assert!(attachment.reason.unwrap().contains("ublk_driver_absent"));
+    }
+
+    // Elixir writes an absent value either way depending on how the map was
+    // built, and both mean "nothing to say".
+    #[test]
+    fn test_block_attachment_treats_nil_as_absent() {
+        let attachment = BlockAttachment::from_term(map(vec![
+            ("export", bin("vol")),
+            ("frontend", atom("nbd")),
+            ("node", atom("n@h")),
+            ("reason", atom("nil")),
+        ]))
+        .unwrap();
+
+        assert!(attachment.reason.is_none());
+        assert!(attachment.device_path.is_none());
+    }
+
+    #[test]
+    fn test_block_attachment_requires_the_fields_it_prints() {
+        let missing_node = BlockAttachment::from_term(map(vec![
+            ("export", bin("vol")),
+            ("frontend", atom("ublk")),
+        ]));
+
+        assert!(missing_node.is_err());
+    }
+
+    #[test]
+    fn test_block_device_info_holders_only_for_nbd() {
+        let ublk = BlockDeviceInfo::from_term(map(vec![
+            ("node", atom("n@h")),
+            ("export", bin("vol")),
+            ("frontend", atom("ublk")),
+        ]))
+        .unwrap();
+
+        assert!(ublk.holders.is_none());
+
+        let nbd = BlockDeviceInfo::from_term(map(vec![
+            ("node", atom("n@h")),
+            ("export", bin("vol")),
+            ("frontend", atom("nbd")),
+            ("holders", Term::FixInteger(FixInteger { value: 2 })),
+        ]))
+        .unwrap();
+
+        assert_eq!(nbd.holders, Some(2));
+    }
+
+    #[test]
+    fn test_block_detach_result_reports_each_node() {
+        let result = BlockDetachResult::from_term(map(vec![
+            ("export", bin("vol")),
+            (
+                "detached",
+                Term::List(eetf::List {
+                    elements: vec![
+                        map(vec![
+                            ("node", atom("a@h")),
+                            ("frontend", atom("ublk")),
+                            ("detached", atom("true")),
+                        ]),
+                        map(vec![
+                            ("node", atom("b@h")),
+                            ("frontend", atom("ublk")),
+                            ("detached", atom("false")),
+                            ("reason", bin(":not_attached")),
+                        ]),
+                    ],
+                }),
+            ),
+        ]))
+        .unwrap();
+
+        assert_eq!(result.detached.len(), 2);
+        assert!(result.detached[0].detached || result.detached[1].detached);
+        let failed = result
+            .detached
+            .iter()
+            .find(|entry| !entry.detached)
+            .unwrap();
+        assert_eq!(failed.reason.as_deref(), Some(":not_attached"));
+    }
+
+    #[test]
+    fn test_block_detach_result_with_nothing_attached() {
+        let result = BlockDetachResult::from_term(map(vec![("export", bin("vol"))])).unwrap();
+
+        assert!(result.detached.is_empty());
+    }
+
+    #[test]
+    fn test_block_node_frontends_names_the_failed_check() {
+        let node = BlockNodeFrontends::from_term(map(vec![
+            ("node", atom("n@h")),
+            (
+                "frontends",
+                Term::List(eetf::List {
+                    elements: vec![atom("nbd")],
+                }),
+            ),
+            ("ublk_unavailable", bin("{:ublk_helper_absent, \"/x\"}")),
+        ]))
+        .unwrap();
+
+        assert_eq!(node.frontends, vec!["nbd".to_string()]);
+        assert!(node.ublk_unavailable.unwrap().contains("helper_absent"));
+    }
+
+    #[test]
+    fn test_block_node_frontends_with_both() {
+        let node = BlockNodeFrontends::from_term(map(vec![
+            ("node", atom("n@h")),
+            (
+                "frontends",
+                Term::List(eetf::List {
+                    elements: vec![atom("nbd"), atom("ublk")],
+                }),
+            ),
+            ("ublk_unavailable", atom("nil")),
+        ]))
+        .unwrap();
+
+        assert_eq!(node.frontends, vec!["nbd".to_string(), "ublk".to_string()]);
+        assert!(node.ublk_unavailable.is_none());
+    }
+
     #[test]
     fn test_drive_info_format_capacity() {
         assert_eq!(DriveInfo::format_capacity(0), "unlimited");
@@ -1973,5 +2167,193 @@ mod tests {
         assert_eq!(make_node(3660).format_uptime(), "1h 1m"); // 1h 1m
         assert_eq!(make_node(300).format_uptime(), "5m"); // 5m
         assert_eq!(make_node(0).format_uptime(), "0m"); // 0m
+    }
+}
+
+/// Where an NBD client should dial to attach a device itself
+#[derive(Debug, Serialize)]
+pub struct BlockEndpoint {
+    pub host: String,
+    pub port: u64,
+}
+
+/// The outcome of `block attach`
+///
+/// `device_path` is present exactly when something was attached, which is
+/// the ublk case. For NBD the endpoint is present instead and nothing was
+/// attached — the device appears wherever the client runs `nbd-client`, and
+/// conflating the two would have an operator look for a device that is not
+/// there.
+#[derive(Debug, Serialize)]
+pub struct BlockAttachment {
+    pub export: String,
+    pub frontend: String,
+    pub node: String,
+    pub device_path: Option<String>,
+    pub endpoint: Option<BlockEndpoint>,
+    pub reason: Option<String>,
+}
+
+impl BlockAttachment {
+    /// Parse from Erlang term (map)
+    pub fn from_term(term: Term) -> Result<Self> {
+        let map = term_to_map(&term)?;
+
+        Ok(Self {
+            export: required_string(&map, "export")?,
+            frontend: required_string(&map, "frontend")?,
+            node: required_string(&map, "node")?,
+            device_path: optional_string(&map, "device_path")?,
+            endpoint: match map.get("endpoint") {
+                Some(endpoint) => Some(BlockEndpoint::from_term(endpoint)?),
+                None => None,
+            },
+            reason: optional_string(&map, "reason")?,
+        })
+    }
+}
+
+impl BlockEndpoint {
+    /// Parse from Erlang term (map)
+    pub fn from_term(term: &Term) -> Result<Self> {
+        let map = term_to_map(term)?;
+
+        Ok(Self {
+            host: required_string(&map, "host")?,
+            port: term_to_u64(map.get("port").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'port' field".to_string())
+            })?)?,
+        })
+    }
+}
+
+/// One node's part of a `block detach`
+#[derive(Debug, Serialize)]
+pub struct BlockDetachEntry {
+    pub node: String,
+    pub frontend: String,
+    pub detached: bool,
+    pub reason: Option<String>,
+}
+
+/// The outcome of `block detach`, which may span nodes
+#[derive(Debug, Serialize)]
+pub struct BlockDetachResult {
+    pub export: String,
+    pub detached: Vec<BlockDetachEntry>,
+}
+
+impl BlockDetachResult {
+    /// Parse from Erlang term (map)
+    pub fn from_term(term: Term) -> Result<Self> {
+        let map = term_to_map(&term)?;
+
+        let entries = match map.get("detached") {
+            Some(list) => term_to_list(list)?
+                .iter()
+                .map(BlockDetachEntry::from_term)
+                .collect::<Result<Vec<_>>>()?,
+            None => Vec::new(),
+        };
+
+        Ok(Self {
+            export: required_string(&map, "export")?,
+            detached: entries,
+        })
+    }
+}
+
+impl BlockDetachEntry {
+    /// Parse from Erlang term (map)
+    pub fn from_term(term: &Term) -> Result<Self> {
+        let map = term_to_map(term)?;
+
+        Ok(Self {
+            node: required_string(&map, "node")?,
+            frontend: required_string(&map, "frontend")?,
+            detached: term_to_bool(map.get("detached").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'detached' field".to_string())
+            })?)?,
+            reason: optional_string(&map, "reason")?,
+        })
+    }
+}
+
+/// One attached block device
+#[derive(Debug, Serialize)]
+pub struct BlockDeviceInfo {
+    pub node: String,
+    pub export: String,
+    pub frontend: String,
+    /// NBD only: how many connections hold the device. ublk has exactly one
+    /// holder by construction, so reporting a count there would imply a
+    /// dimension that does not exist.
+    pub holders: Option<u64>,
+}
+
+impl BlockDeviceInfo {
+    /// Parse from Erlang term (map)
+    pub fn from_term(term: Term) -> Result<Self> {
+        let map = term_to_map(&term)?;
+
+        Ok(Self {
+            node: required_string(&map, "node")?,
+            export: required_string(&map, "export")?,
+            frontend: required_string(&map, "frontend")?,
+            holders: match map.get("holders") {
+                Some(holders) => Some(term_to_u64(holders)?),
+                None => None,
+            },
+        })
+    }
+}
+
+/// What one block node can serve
+#[derive(Debug, Serialize)]
+pub struct BlockNodeFrontends {
+    pub node: String,
+    pub frontends: Vec<String>,
+    /// Which of ublk's two checks failed, when it is not on offer. The
+    /// distinction is the useful part: a missing kernel driver and a missing
+    /// helper binary have different fixes.
+    pub ublk_unavailable: Option<String>,
+}
+
+impl BlockNodeFrontends {
+    /// Parse from Erlang term (map)
+    pub fn from_term(term: Term) -> Result<Self> {
+        let map = term_to_map(&term)?;
+
+        let frontends = match map.get("frontends") {
+            Some(list) => term_to_list(list)?
+                .iter()
+                .map(term_to_string)
+                .collect::<Result<Vec<_>>>()?,
+            None => Vec::new(),
+        };
+
+        Ok(Self {
+            node: required_string(&map, "node")?,
+            frontends,
+            ublk_unavailable: optional_string(&map, "ublk_unavailable")?,
+        })
+    }
+}
+
+fn required_string(map: &HashMap<String, Term>, key: &str) -> Result<String> {
+    term_to_string(
+        map.get(key)
+            .ok_or_else(|| CliError::TermConversionError(format!("Missing '{}' field", key)))?,
+    )
+}
+
+// An absent key and an explicit `nil` mean the same thing to a caller —
+// "there is nothing to say here" — and Elixir produces both depending on
+// whether the map was built with the key or not.
+fn optional_string(map: &HashMap<String, Term>, key: &str) -> Result<Option<String>> {
+    match map.get(key) {
+        None => Ok(None),
+        Some(Term::Atom(atom)) if atom.name == "nil" => Ok(None),
+        Some(term) => Ok(Some(term_to_string(term)?)),
     }
 }

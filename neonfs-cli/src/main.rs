@@ -9,8 +9,8 @@ mod tls;
 
 use clap::{Parser, Subcommand};
 use commands::{
-    acl::AclCommand, audit::AuditCommand, backup::BackupCommand, cluster::ClusterCommand,
-    credential::CredentialCommand, dr::DrCommand, drive::DriveCommand,
+    acl::AclCommand, audit::AuditCommand, backup::BackupCommand, block::BlockCommand,
+    cluster::ClusterCommand, credential::CredentialCommand, dr::DrCommand, drive::DriveCommand,
     escalation::EscalationCommand, fuse::FuseCommand, gc::GcCommand, job::JobCommand,
     nfs::NfsCommand, node::NodeCommand, s3::S3Command, scrub::ScrubCommand, volume::VolumeCommand,
     worker::WorkerCommand,
@@ -98,6 +98,12 @@ enum Commands {
         command: JobCommand,
     },
 
+    /// Block device management
+    Block {
+        #[command(subcommand)]
+        command: BlockCommand,
+    },
+
     /// FUSE mount management
     Fuse {
         #[command(subcommand)]
@@ -167,6 +173,7 @@ fn main() {
         Commands::Escalation { command } => command.execute(format),
         Commands::Gc { command } => command.execute(format),
         Commands::Job { command } => command.execute(format),
+        Commands::Block { command } => command.execute(format),
         Commands::Fuse { command } => command.execute(format),
         Commands::Nfs { command } => command.execute(format),
         Commands::Node { command } => command.execute(format),
@@ -220,6 +227,47 @@ mod tests {
     fn test_nfs_subcommand_parsing() {
         let cli = Cli::try_parse_from(["neonfs-cli", "nfs", "export", "myvol"]);
         assert!(cli.is_ok());
+    }
+
+    #[test]
+    fn test_block_subcommand_parsing() {
+        assert!(Cli::try_parse_from(["neonfs-cli", "block", "attach", "myvol"]).is_ok());
+        assert!(Cli::try_parse_from(["neonfs-cli", "block", "detach", "myvol"]).is_ok());
+        assert!(Cli::try_parse_from(["neonfs-cli", "block", "list"]).is_ok());
+        assert!(Cli::try_parse_from(["neonfs-cli", "block", "frontends"]).is_ok());
+    }
+
+    #[test]
+    fn test_block_attach_accepts_each_frontend() {
+        for frontend in ["auto", "ublk", "nbd"] {
+            let cli = Cli::try_parse_from([
+                "neonfs-cli",
+                "block",
+                "attach",
+                "myvol:/dev.img",
+                "--frontend",
+                frontend,
+            ]);
+
+            assert!(cli.is_ok(), "{frontend} should parse");
+        }
+    }
+
+    // A typo must not be read as `auto` and quietly attach over NBD: the
+    // whole point of naming a frontend is that a benchmark measures the one
+    // it asked for.
+    #[test]
+    fn test_block_attach_rejects_an_unknown_frontend() {
+        let cli = Cli::try_parse_from([
+            "neonfs-cli",
+            "block",
+            "attach",
+            "myvol",
+            "--frontend",
+            "scsi",
+        ]);
+
+        assert!(cli.is_err());
     }
 
     #[test]

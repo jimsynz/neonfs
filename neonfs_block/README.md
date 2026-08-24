@@ -91,6 +91,28 @@ the device, and resuming would be the one outcome fencing prevents.
 :recovery_exhausted]` are the events to alert on. A device recovering
 repeatedly is a device about to be dropped.
 
+### Attaching from the CLI
+
+    neonfs block attach <volume>[:<path>] [--frontend auto|ublk|nbd]
+    neonfs block detach <volume>[:<path>]
+    neonfs block list
+    neonfs block frontends
+
+`attach` performs a ublk attach — the device is created on the block node that
+serves it, so `/dev/ublkbN` appears **there**, not on the machine running the
+CLI unless they are the same machine. It cannot perform an NBD attach, because
+that is the client's action: when the frontend resolves to NBD it prints the
+endpoint and the `nbd-client` invocation instead, and says plainly that nothing
+was attached.
+
+`--frontend ublk` is the form to script against: it fails naming the check that
+failed rather than answering with something else. `auto` prefers ublk and
+reports the NBD endpoint when it cannot, which is the useful answer to an
+operator but not one a script should mistake for a device.
+
+`frontends` is what to look at when `auto` is not choosing ublk: it names which
+of the two checks failed on each node.
+
 ### ublk is local; NBD is not
 
 The device node appears on the kernel of the host running the target, so a
