@@ -431,6 +431,15 @@ jobs:
         working-directory: neonfs-cli
         run: cargo clippy --all-targets --all-features -- -D warnings
 
+      # `docs/cli-reference.md` is generated from clap's own `--help`, so it
+      # goes stale exactly when this crate changes — which makes this the job
+      # that should notice. It also already has the release binary and a warm
+      # target cache, so the check costs one `--help` per command rather than
+      # a build. Living in `static-checks` instead would mean building the CLI
+      # in a container that has no Rust.
+      - name: Check the CLI reference is up to date
+        run: bash scripts/regen-cli-reference.sh --check
+
   # =========================================================================
   # neonfs_integration - Integration tests. Stays outside the package matrix:
   # it needs the amd64 runner pool, a registry service sidecar (which is
