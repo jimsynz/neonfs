@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# The CSI block acceptance step, against a k3s VM with the driver deployed.
+#
+# Separate from `./acceptance` because its prerequisites are: bring a cluster
+# up, boot a k3s VM, deploy the driver. `acceptance` runs against a plain
+# cluster, where this could only ever SKIP — and a step that always skips
+# reads as coverage rather than as the gap it is.
+#
+#   ./neonfs-rig up && ./neonfs-rig k3s && ./neonfs-rig csi-deploy
+#   ./csi-block-acceptance
+set -eo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${HERE}/lib/rig.sh"
+source "${HERE}/lib/acceptance.sh"
+
+[ -f "${SSH_KEY}" ] || die "no rig ssh key — bring a cluster up with ./neonfs-rig up first"
+
+step "CSI block volumeDevices pod (fio --verify)" s_csi_block_fio
+
+echo >&2
+echo "================ CSI block acceptance ================" >&2
+printf '%s\n' "${A_RESULTS[@]}" >&2
+echo "------------------------------------------------------" >&2
+echo "PASS=${A_PASS}  FAIL=${A_FAIL}  SKIP=${A_SKIP}" >&2
+[ "${A_FAIL}" -eq 0 ]

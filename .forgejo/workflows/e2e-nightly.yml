@@ -286,6 +286,19 @@ jobs:
           cd test-rig
           ./neonfs-rig csi-deploy
 
+      # #1594's headline criterion, and the only place it can run: a pod with
+      # `volumeDevices` needs a kubelet, a `volumeMode: Block` PVC and a
+      # loadable `nbd` module. The step is driven from here rather than from
+      # `acceptance_run`, which has no k3s VM and where it could only ever
+      # SKIP — and a step that always skips reads as coverage.
+      - name: CSI block volumeDevices pod (fio --verify)
+        env:
+          DOCKER_HOST: unix:///var/run/docker.sock
+        run: |
+          export PATH="$PWD/resources/scripts:$PATH"
+          cd test-rig
+          ./csi-block-acceptance
+
       - name: Collect VM serial logs
         if: always()
         run: |

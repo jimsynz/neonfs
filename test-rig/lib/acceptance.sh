@@ -651,6 +651,155 @@ acceptance_cleanup() {
 # --- driver ----------------------------------------------------------------
 
 
+# --- CSI block ----------------------------------------------------------------
+#
+# #1594's headline criterion: a pod with `volumeDevices` and a `volumeMode:
+# Block` PVC gets a working raw device, and `fio --verify` inside the pod
+# passes. Only provable by running it, which is why it lives here rather than
+# in a unit test.
+#
+# The device is served over NBD. A ublk-attached device would appear on the
+# block node's kernel rather than the kubelet's, so the CSI path is NBD's
+# regardless of what a node could otherwise serve.
+
+CSI_BLOCK_PVC="${CSI_BLOCK_PVC:-neonfs-block-pvc}"
+CSI_BLOCK_POD="${CSI_BLOCK_POD:-neonfs-block-fio}"
+CSI_BLOCK_SIZE="${CSI_BLOCK_SIZE:-256Mi}"
+CSI_BLOCK_FIO_SPAN="${CSI_BLOCK_FIO_SPAN:-64M}"
+CSI_BLOCK_DEV="/dev/xvda"
+CSI_BLOCK_IMAGE="${CSI_BLOCK_IMAGE:-debian:trixie-slim}"
+CSI_BLOCK_TIMEOUT="${CSI_BLOCK_TIMEOUT:-600}"
+
+k3s_kubectl() { node_ssh "${K3S_INDEX}" "sudo k3s kubectl $*"; }
+
+# Everything the step needs that is the environment's rather than ours: a k3s
+# VM, a Ready driver, and an `nbd` module for the node plugin to attach with.
+# Each is a SKIP, matching how the NBD steps treat a host without `nbd`.
+s_csi_block_prereqs() {
+  node_running "${K3S_INDEX}" 2>/dev/null \
+    || { echo "  no k3s VM — run './neonfs-rig k3s' and './neonfs-rig csi-deploy'" >&2; return 77; }
+
+  k3s_kubectl "get storageclass neonfs" >/dev/null 2>&1 \
+    || { echo "  no 'neonfs' StorageClass — run './neonfs-rig csi-deploy'" >&2; return 77; }
+
+  k3s_kubectl "wait --namespace ${CSI_NAMESPACE} --for=condition=Ready pod \
+    --selector app.kubernetes.io/instance=${CSI_RELEASE} --timeout=120s" >/dev/null 2>&1 \
+    || { echo "  CSI pods are not Ready" >&2; return 77; }
+
+  # The node plugin shells out to `nbd-client`, which needs the module on the
+  # kubelet's host — not in the container.
+  node_ssh "${K3S_INDEX}" "sudo modprobe nbd nbds_max=16 && test -b /dev/nbd0" 2>/dev/null \
+    || { echo "  the k3s VM has no loadable nbd module" >&2; return 77; }
+}
+
+# A raw device, not a filesystem: `volumeDevices` rather than `volumeMounts`,
+# so the kubelet hands the container a block device and nothing formats it.
+#
+# fio is installed in the container rather than baked into an image, because
+# the rig has no registry of its own and an image built for this would be one
+# more thing to keep current. The pod runs to completion and its logs are the
+# result.
+s_csi_block_fio() {
+  s_csi_block_prereqs || return 77
+
+  k3s_kubectl "delete pod ${CSI_BLOCK_POD} --ignore-not-found --now" >/dev/null 2>&1 || true
+  k3s_kubectl "delete pvc ${CSI_BLOCK_PVC} --ignore-not-found" >/dev/null 2>&1 || true
+
+  node_ssh "${K3S_INDEX}" "sudo tee /tmp/csi-block.yaml >/dev/null" <<EOF
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ${CSI_BLOCK_PVC}
+spec:
+  accessModes: ["ReadWriteOnce"]
+  volumeMode: Block
+  storageClassName: neonfs
+  resources:
+    requests:
+      storage: ${CSI_BLOCK_SIZE}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ${CSI_BLOCK_POD}
+spec:
+  restartPolicy: Never
+  containers:
+    - name: fio
+      image: ${CSI_BLOCK_IMAGE}
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          set -e
+          test -b ${CSI_BLOCK_DEV} || { echo "${CSI_BLOCK_DEV} is not a block device"; exit 1; }
+          echo "device: \$(blockdev --getsize64 ${CSI_BLOCK_DEV}) bytes, \
+            logical \$(blockdev --getss ${CSI_BLOCK_DEV})"
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update -qq
+          apt-get install -y -qq fio >/dev/null
+          fio --name=csiblock --filename=${CSI_BLOCK_DEV} --direct=1 --rw=randrw \
+              --rwmixread=50 --bs=4k --size=${CSI_BLOCK_FIO_SPAN} \
+              --io_size=${CSI_BLOCK_FIO_SPAN} --verify=crc32c --verify_fatal=1 \
+              --do_verify=1 --numjobs=1 --iodepth=8 --ioengine=libaio \
+              --group_reporting --output-format=terse --minimal
+          echo "fio --verify=crc32c passed against a raw CSI device"
+      volumeDevices:
+        - name: raw
+          devicePath: ${CSI_BLOCK_DEV}
+      securityContext:
+        privileged: true
+  volumes:
+    - name: raw
+      persistentVolumeClaim:
+        claimName: ${CSI_BLOCK_PVC}
+EOF
+
+  k3s_kubectl "apply -f /tmp/csi-block.yaml" 2>&1 | sed 's/^/  /' >&2 \
+    || { echo "  applying the PVC and pod failed" >&2; return 1; }
+
+  # Waiting on the phase rather than Ready: the pod is meant to finish.
+  if ! k3s_kubectl "wait --for=jsonpath={.status.phase}=Succeeded \
+    pod/${CSI_BLOCK_POD} --timeout=${CSI_BLOCK_TIMEOUT}s" >/dev/null 2>&1; then
+    csi_block_explain_known_gap
+    echo "  the pod did not succeed:" >&2
+    k3s_kubectl "get pvc ${CSI_BLOCK_PVC} -o wide" 2>&1 | sed 's/^/    /' >&2 || true
+    k3s_kubectl "describe pod ${CSI_BLOCK_POD}" 2>&1 | tail -30 | sed 's/^/    /' >&2 || true
+    k3s_kubectl "logs ${CSI_BLOCK_POD} --tail=60" 2>&1 | sed 's/^/    /' >&2 || true
+    csi_block_cleanup
+    return 1
+  fi
+
+  k3s_kubectl "logs ${CSI_BLOCK_POD} --tail=20" 2>&1 | sed 's/^/  /' >&2 || true
+  csi_block_cleanup
+}
+
+# One failure here has a known cause and a long fix, and a red nightly whose
+# reason nobody reads is a red nightly nobody acts on. So it names itself:
+# `attach_holder_unreachable` means the controller could not reach the node
+# plugin over Erlang distribution, which is the interface-to-interface peer
+# port discovery gap — EPMD-less distribution learns a peer's port from
+# `cluster.json`, and that file carries core nodes, not other interface nodes.
+csi_block_explain_known_gap() {
+  local events
+  events="$(k3s_kubectl "describe pod ${CSI_BLOCK_POD}" 2>&1 || true)"
+
+  if grep -q "attach_holder_unreachable" <<<"${events}"; then
+    echo "  KNOWN: the CSI controller cannot reach its node plugin over" >&2
+    echo "  distribution. EPMD-less distribution resolves a peer's port from" >&2
+    echo "  cluster.json, which lists core nodes — an interface node has no" >&2
+    echo "  way to learn another interface node's port. Not a regression in" >&2
+    echo "  this step; the attach path itself is unimplemented in this shape." >&2
+  fi
+}
+
+# A leaked PVC holds its NeonFS volume and its attachment claim, so the next
+# run would find the device attached elsewhere.
+csi_block_cleanup() {
+  [ "${KEEP:-0}" = 1 ] && return 0
+  k3s_kubectl "delete pod ${CSI_BLOCK_POD} --ignore-not-found --now" >/dev/null 2>&1 || true
+  k3s_kubectl "delete pvc ${CSI_BLOCK_PVC} --ignore-not-found --timeout=120s" >/dev/null 2>&1 || true
+}
+
 # --- ublk ---------------------------------------------------------------------
 #
 # The ublk frontend end to end: the driver loads, the helper ships, a device

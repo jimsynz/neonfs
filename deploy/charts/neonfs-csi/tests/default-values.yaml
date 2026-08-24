@@ -57,7 +57,7 @@ metadata:
 provisioner: neonfs.csi.harton.dev
 reclaimPolicy: Delete
 volumeBindingMode: Immediate
-allowVolumeExpansion: true
+allowVolumeExpansion: false
 parameters:
   replication_factor: "3"
   tier: "hot"
@@ -454,19 +454,6 @@ spec:
               mountPath: /var/lib/csi/sockets/pluginproxy
         - name: csi-attacher
           image: registry.k8s.io/sig-storage/csi-attacher:v4.9.0
-          imagePullPolicy: IfNotPresent
-          args:
-            - --csi-address=$(ADDRESS)
-            - --leader-election=true
-            - --v=2
-          env:
-            - name: ADDRESS
-              value: /var/lib/csi/sockets/pluginproxy/csi.sock
-          volumeMounts:
-            - name: socket-dir
-              mountPath: /var/lib/csi/sockets/pluginproxy
-        - name: csi-resizer
-          image: registry.k8s.io/sig-storage/csi-resizer:v2.2.1
           imagePullPolicy: IfNotPresent
           args:
             - --csi-address=$(ADDRESS)

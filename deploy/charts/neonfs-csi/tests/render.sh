@@ -51,6 +51,34 @@ check_host_devices() {
   fi
 }
 
+# `sidecars.resizer` is off because the driver implements no expansion, and
+# `csi-resizer` exits fatally when it finds none — which left the controller
+# pod crash-looping and never Ready. So the *absence* is load-bearing here in
+# the same way `hostDevices` is, and the switch has to keep working for
+# whenever `EXPAND_VOLUME` does land.
+check_resizer() {
+  local off on
+  off="$(render)"
+  on="$(render --set sidecars.resizer.enabled=true)"
+
+  if grep -q 'name: csi-resizer' <<<"$off"; then
+    echo "sidecars.resizer is off by default but rendered anyway" >&2
+    return 1
+  fi
+
+  if ! grep -q 'name: csi-resizer' <<<"$on"; then
+    echo "sidecars.resizer.enabled=true rendered no csi-resizer container" >&2
+    return 1
+  fi
+
+  # The StorageClass must not advertise what the driver cannot do, whatever
+  # the sidecar is set to.
+  if ! grep -q 'allowVolumeExpansion: false' <<<"$off"; then
+    echo "the StorageClass claims volume expansion the driver does not implement" >&2
+    return 1
+  fi
+}
+
 case "$mode" in
   check)
     diff -u "$fixture" <(render) || {
@@ -59,6 +87,7 @@ case "$mode" in
       exit 1
     }
     check_host_devices
+    check_resizer
     ;;
   update)
     render > "$fixture"
