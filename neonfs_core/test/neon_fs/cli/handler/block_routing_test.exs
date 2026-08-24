@@ -141,7 +141,10 @@ defmodule NeonFS.CLI.Handler.BlockRoutingTest do
     test "says why ublk was not used, naming the check that failed" do
       assert {:ok, attachment} = Handler.block_attach("vol", "auto")
 
-      assert attachment.reason =~ "ublk_driver_absent"
+      # The remedy, not the term name: an operator reading this needs to know
+      # to load the module, and `{:ublk_driver_absent, _}` does not say that.
+      assert attachment.reason =~ "/dev/ublk-control is absent"
+      assert attachment.reason =~ "modprobe ublk_drv"
     end
 
     test "nothing is attached, so no attach is attempted" do
@@ -215,7 +218,8 @@ defmodule NeonFS.CLI.Handler.BlockRoutingTest do
 
       assert node.node == Node.self()
       assert node.frontends == [:nbd]
-      assert node.ublk_unavailable =~ "ublk_driver_absent"
+      assert node.ublk_unavailable =~ "/dev/ublk-control is absent"
+      assert node.ublk_unavailable =~ "modprobe ublk_drv"
     end
 
     test "reports both frontends and no reason when ublk works" do
