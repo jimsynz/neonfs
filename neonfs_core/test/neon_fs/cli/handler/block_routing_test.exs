@@ -222,6 +222,24 @@ defmodule NeonFS.CLI.Handler.BlockRoutingTest do
       assert node.ublk_unavailable =~ "modprobe ublk_drv"
     end
 
+    # The rig's actual failure: the driver is loaded and the control device is
+    # there, but the daemon may not open it. "Unavailable" would send an
+    # operator to `modprobe` for a permission problem.
+    test "a control device it cannot open names the permission, not the driver" do
+      Application.put_env(
+        :neonfs_core,
+        :block_stub_capability,
+        {:error, {:ublk_control_inaccessible, "/dev/ublk-control", :eacces}}
+      )
+
+      assert {:ok, [node]} = Handler.block_frontends()
+
+      assert node.frontends == [:nbd]
+      assert node.ublk_unavailable =~ "may not open it"
+      assert node.ublk_unavailable =~ "grant the daemon's user access"
+      refute node.ublk_unavailable =~ "modprobe"
+    end
+
     test "reports both frontends and no reason when ublk works" do
       with_ublk()
 
