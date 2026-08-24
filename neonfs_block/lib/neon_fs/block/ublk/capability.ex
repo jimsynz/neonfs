@@ -3,34 +3,59 @@ defmodule NeonFS.Block.Ublk.Capability do
   Whether this node can serve a device over ublk, and if not, which half is
   missing.
 
-  Two checks, because either can fail without the other: a kernel with the
-  driver loaded and no helper shipped, or a helper present on a host whose
-  kernel has no `ublk_drv`. They are reported apart so that forcing ublk on a
-  host that cannot do it says *which* thing to fix — a single "unavailable"
-  sends an operator to `modprobe` when the problem is a release assembled
-  without its native binary.
+  Three checks, because each fails without the others: a kernel with no
+  `ublk_drv`, a control device this process may not open, or a release
+  assembled without its native helper. They are reported apart so that
+  forcing ublk on a host that cannot do it says *which* thing to fix — a
+  single "unavailable" sends an operator to `modprobe` when the problem is a
+  permission or a missing binary.
 
-  ## Cached per node
+  ## The control device has to be *openable*, not merely present
 
-  The probe is two `File.exists?` calls and caching it is not about cost. It
-  is about the answer being *stable*: every attachment on a node agrees about
-  what that node can do, and the frontend a device gets does not depend on
-  which second it was attached in. `refresh/0` exists for an operator who has
-  just loaded the module, and for tests.
+  `/dev/ublk-control` is `crw------- root root` on a stock Debian, and the
+  daemon does not run as root — so a probe that only asked whether the path
+  exists reported ublk available on a node where every attach then failed
+  deep in the helper with `EACCES`. The rig found exactly that. Opening it is
+  the same syscall the helper makes, so the probe now fails where the helper
+  would, with a reason that says so.
+
+  ## A positive answer is cached; a negative one is not
+
+  Caching is not about cost — the probe is two `File.exists?` calls. It is
+  about a *positive* answer being stable: once a node can serve ublk, every
+  attachment on it agrees, because neither a loaded module nor a shipped
+  binary goes away under a serving target.
+
+  A negative answer is different, and caching it was a bug the rig found. A
+  node that boots before `modprobe ublk_drv` cached "driver absent" and then
+  refused ublk forever — `block frontends` reported the driver missing while
+  `/dev/ublk-control` sat there, and the only fix was restarting the node.
+  Re-probing a negative costs two stat calls and can only flip when the world
+  actually changed, so nothing is destabilised by it: an attachment that now
+  succeeds is not a disagreement with one that failed before the module
+  existed.
+
+  `refresh/0` remains, for a test that needs to invalidate a positive.
   """
 
   @key {__MODULE__, :ublk}
 
-  @type reason :: {:ublk_driver_absent, Path.t()} | {:ublk_helper_absent, Path.t()}
+  @type reason ::
+          {:ublk_driver_absent, Path.t()}
+          | {:ublk_control_inaccessible, Path.t(), atom()}
+          | {:ublk_helper_absent, Path.t()}
 
   @doc """
-  Whether ublk is usable here, from the cache, probing once on first ask.
+  Whether ublk is usable here.
+
+  A cached `:ok` is returned as-is; anything else re-probes, so a module
+  loaded after this node started is picked up without a restart.
   """
   @spec check() :: :ok | {:error, reason()}
   def check do
     case :persistent_term.get(@key, :unprobed) do
-      :unprobed -> refresh()
-      cached -> cached
+      :ok -> :ok
+      _unprobed_or_negative -> refresh()
     end
   end
 
@@ -78,7 +103,24 @@ defmodule NeonFS.Block.Ublk.Capability do
 
   defp driver do
     path = control_path()
-    if File.exists?(path), do: :ok, else: {:error, {:ublk_driver_absent, path}}
+
+    if File.exists?(path),
+      do: openable(path),
+      else: {:error, {:ublk_driver_absent, path}}
+  end
+
+  # Read-write, because that is how the helper opens it: a read-only check
+  # would pass where the helper fails. The handle is closed immediately —
+  # this asks the kernel a question rather than taking the device.
+  defp openable(path) do
+    case File.open(path, [:raw, :read, :write]) do
+      {:ok, handle} ->
+        File.close(handle)
+        :ok
+
+      {:error, reason} ->
+        {:error, {:ublk_control_inaccessible, path, reason}}
+    end
   end
 
   # Executable, not merely present: a release that copied the file without its

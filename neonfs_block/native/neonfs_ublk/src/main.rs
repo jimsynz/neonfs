@@ -47,8 +47,13 @@ struct Config {
 fn main() {
     match run(config_from_env()) {
         Ok(()) => {}
+        // Both forms: `UblkError`'s `Display` for several variants is a
+        // category with no number in it — "other IO failure" for any errno at
+        // all — and the number is the whole diagnosis. The node forwards this
+        // line verbatim into the error a `block attach` reports, so what is
+        // printed here is what an operator reads.
         Err(error) => {
-            eprintln!("neonfs_ublk: {error}");
+            eprintln!("neonfs_ublk: {error} ({error:?})");
             std::process::exit(1);
         }
     }
@@ -149,7 +154,10 @@ fn run(config: Config) -> Result<(), UblkError> {
         } else {
             UblkFlags::UBLK_DEV_F_ADD_DEV
         })
-        .build()?;
+        .build()
+        .inspect_err(|_error| {
+            eprintln!("neonfs_ublk: creating the control device failed");
+        })?;
 
     let describe = move |device: &mut UblkDev| {
         device.set_default_params(size_bytes);
@@ -181,7 +189,16 @@ fn run(config: Config) -> Result<(), UblkError> {
         let _ = io::stdout().flush();
     };
 
-    control.run_target(describe, serve_queue, announce)?;
+    // Naming the stage because the two failures look identical from the node
+    // — a non-zero exit and a category — and they mean different things: one
+    // is the driver refusing the device, the other is it refusing to start a
+    // device it accepted.
+    control
+        .run_target(describe, serve_queue, announce)
+        .inspect_err(|_error| {
+            eprintln!("neonfs_ublk: serving the device failed");
+        })?;
+
     Ok(())
 }
 

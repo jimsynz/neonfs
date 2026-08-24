@@ -138,21 +138,68 @@ defmodule NeonFS.CLI.Handler.BlockRouting do
       {:ok, resolved} ->
         {:ok, resolved}
 
-      {:error, _reason} = error ->
-        error
+      {:error, {:frontend_forced_unavailable, frontend, reason}} ->
+        {:error,
+         wrap_error(
+           Unavailable.exception(
+             message: "#{frontend} was forced but #{node} cannot serve it: #{explain(reason)}"
+           )
+         )}
+
+      {:error, reason} ->
+        {:error, wrap_error(reason)}
 
       other ->
         {:error, wrap_error(Unavailable.exception(message: "block node said #{inspect(other)}"))}
     end
   end
 
+  # The CLI renders an error struct's message and nothing else, so a reason
+  # left as a bare tuple reaches an operator as a term dump. Each of these has
+  # a different fix, which is why the two checks are reported apart at all, so
+  # each says what to do about it.
+  defp explain({:ublk_driver_absent, path}),
+    do: "#{path} is absent — load the driver with `modprobe ublk_drv`"
+
+  defp explain({:ublk_control_inaccessible, path, :eacces}),
+    do:
+      "#{path} exists but this node's daemon may not open it — grant the " <>
+        "daemon's user access to the ublk control device"
+
+  defp explain({:ublk_control_inaccessible, path, reason}),
+    do: "#{path} could not be opened (#{inspect(reason)})"
+
+  defp explain({:ublk_helper_absent, path}),
+    do: "no executable helper at #{path} — the release was assembled without it"
+
+  # The helper's own words, when it managed any before dying. Without them the
+  # operator gets an exit status and has to go reading journals on the node.
+  defp explain({:ublk_helper_exited, status, []}),
+    do: "the ublk helper exited (#{inspect(status)}) saying nothing"
+
+  defp explain({:ublk_helper_exited, status, said}),
+    do: "the ublk helper exited (#{inspect(status)}): #{Enum.join(said, "; ")}"
+
+  defp explain({:ublk_device_never_appeared, path, []}),
+    do: "#{path} never appeared and the helper said nothing"
+
+  defp explain({:ublk_device_never_appeared, path, said}),
+    do: "#{path} never appeared; the helper said: #{Enum.join(said, "; ")}"
+
+  defp explain(reason), do: inspect(reason)
+
   defp attach_resolved(node, export, :ublk) do
     case block_rpc(node, NeonFS.Block, :attach_ublk, [export, []], @attach_rpc_timeout) do
       {:ok, device_path} ->
         {:ok, %{export: export, frontend: :ublk, node: node, device_path: device_path}}
 
-      {:error, _reason} = error ->
-        error
+      {:error, reason} ->
+        {:error,
+         wrap_error(
+           Unavailable.exception(
+             message: "#{node} could not attach #{export}: #{explain(reason)}"
+           )
+         )}
     end
   end
 
@@ -188,7 +235,7 @@ defmodule NeonFS.CLI.Handler.BlockRouting do
   defp ublk_unavailable_reason(node) do
     case block_rpc(node, NeonFS.Block.Ublk.Capability, :check, [], @query_rpc_timeout) do
       :ok -> nil
-      {:error, reason} -> inspect(reason)
+      {:error, reason} -> explain(reason)
       _unreachable -> nil
     end
   end

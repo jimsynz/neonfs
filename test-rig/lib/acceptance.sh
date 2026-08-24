@@ -435,8 +435,9 @@ REMOTE
 s_block_attach() {
   block_prereqs || return 77
 
-  # Creating the volume writes the whole device as zeroes, one metadata entry
-  # per chunk, so it takes longer than the interactive CLI timeout allows.
+  # Creation is a metadata commit now rather than a zero-write per chunk, but
+  # it keeps the longer timeout: it still walks the volume's placement, and a
+  # cold cluster is slower than the interactive CLI default allows.
   volume_present "${BLOCK_VOL}" \
     || node_ssh 1 "sudo timeout ${BLOCK_CREATE_TIMEOUT} neonfs volume create ${BLOCK_VOL} --type block --size ${BLOCK_SIZE} --replicas 1" 2>&1 | grep -qi 'created successfully' \
     || { echo "  volume create --type block failed" >&2; return 1; }
@@ -652,11 +653,23 @@ acceptance_cleanup() {
 
 # --- ublk ---------------------------------------------------------------------
 #
-# What this proves is the *environment* the ublk frontend needs: the driver
-# loads, the control device appears, and the helper binary the release ships
-# is there to be spawned. Serving bytes over it needs something to attach the
-# device, which arrives with frontend selection — until then a step here could
-# only re-prove the driver using a target NeonFS does not use.
+# The ublk frontend end to end: the driver loads, the helper ships, a device
+# attaches through the CLI, fio verifies it, and killing the helper mid-IO is
+# survived rather than fatal.
+#
+# A separate volume from the NBD steps on purpose. A device admits one
+# attachment at a time, so sharing one volume would have these steps and those
+# fighting over it and reporting each other's contention as a fault.
+
+UBLK_VOL="${UBLK_VOL:-accept_ublk}"
+UBLK_MIB="${UBLK_MIB:-256}"
+UBLK_BYTES=$(( UBLK_MIB * 1024 * 1024 ))
+UBLK_FIO_BYTES="${UBLK_FIO_BYTES:-64M}"
+
+# Set by s_ublk_attach from what the CLI reports, not assumed: the node picks
+# the device number, so the path is an output rather than a constant.
+UBLK_DEV=""
+UBLK_READY=0
 
 s_ublk_driver() {
   local rc=0
@@ -679,6 +692,170 @@ s_ublk_helper() {
   node_ssh 1 "sudo find ${OMNIBUS_ROOT:-/usr/lib/neonfs/omnibus} -type f -name neonfs_ublk \
     -perm -u+x -print -quit | grep -q ." 2>/dev/null \
     || { echo "  the release ships no executable neonfs_ublk helper" >&2; return 1; }
+}
+
+# `--frontend ublk` rather than `auto`: auto would report the NBD endpoint on a
+# host where ublk is broken and this step would pass having tested nothing.
+# Forcing it fails naming which of the two checks failed.
+s_ublk_attach() {
+  node_ssh 1 "test -c /dev/ublk-control" 2>/dev/null || return 77
+
+  # The node's own answer, before forcing anything. `/dev/ublk-control` is
+  # `crw------- root root` on a stock Debian and the daemon is not root, so a
+  # host can have the driver loaded and still be unable to use it — an
+  # environment gate rather than a defect, and the node says which.
+  local offered
+  offered=$(ncli 1 "block frontends" 2>&1) || true
+  if ! printf '%s' "${offered}" | grep -q "ublk"; then
+    echo "  this node cannot serve ublk:" >&2
+    printf '%s\n' "${offered}" | sed 's/^/    /' >&2
+    return 77
+  fi
+
+  volume_present "${UBLK_VOL}" \
+    || node_ssh 1 "sudo timeout ${BLOCK_CREATE_TIMEOUT} neonfs volume create ${UBLK_VOL} --type block --size ${UBLK_MIB}M --replicas 1" 2>&1 | grep -qi 'created successfully' \
+    || { echo "  volume create --type block failed" >&2; return 1; }
+
+  local out
+  out=$(ncli 1 "block attach ${UBLK_VOL} --frontend ublk --json" 2>&1) || {
+    echo "  block attach --frontend ublk failed:" >&2
+    printf '%s\n' "${out}" | sed 's/^/    /' >&2
+    return 1
+  }
+
+  UBLK_DEV=$(printf '%s' "${out}" | grep -oE '"device_path":"[^"]*"' | head -1 | cut -d'"' -f4)
+  [ -n "${UBLK_DEV}" ] || {
+    echo "  attach reported no device path:" >&2
+    printf '%s\n' "${out}" | sed 's/^/    /' >&2
+    return 1
+  }
+
+  node_ssh 1 "sudo bash -s ${UBLK_DEV} ${UBLK_BYTES}" 2>&1 <<'REMOTE' | sed 's/^/  /' >&2
+set -e
+DEV="$1"; BYTES="$2"
+
+for _ in $(seq 1 30); do [ -b "${DEV}" ] && break; sleep 1; done
+[ -b "${DEV}" ] || { echo "${DEV} never appeared"; exit 1; }
+
+size=$(blockdev --getsize64 "${DEV}")
+ss=$(blockdev --getss "${DEV}")
+pbsz=$(blockdev --getpbsz "${DEV}")
+echo "attached ${DEV}: size=${size} logical=${ss} physical=${pbsz}"
+
+[ "${size}" = "${BYTES}" ] || { echo "device size ${size} != volume size ${BYTES}"; exit 1; }
+[ "${ss}" = 4096 ] || { echo "logical block size ${ss} != 4096"; exit 1; }
+[ "${pbsz}" = 4096 ] || { echo "physical block size ${pbsz} != 4096"; exit 1; }
+REMOTE
+  local rc=$?
+  [ "${rc}" -eq 0 ] && UBLK_READY=1
+  return "${rc}"
+}
+
+# The same verification the NBD path gets, against the same core. Holding both
+# frontends to one standard is the point: a bug in the shared IO core should
+# fail on either, and a bug in one frontend should fail on only that one.
+s_ublk_fio_verify() {
+  [ "${UBLK_READY}" = 1 ] || return 77
+  node_ssh 1 "command -v fio >/dev/null 2>&1 || sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q fio >/dev/null 2>&1
+    command -v fio >/dev/null 2>&1" 2>/dev/null \
+    || { echo "  fio unavailable and not installable — skipping" >&2; return 77; }
+
+  node_ssh 1 "sudo bash -s ${UBLK_DEV} ${UBLK_FIO_BYTES}" 2>&1 <<'REMOTE' | sed 's/^/  /' >&2
+set -e
+DEV="$1"; SPAN="$2"
+SIZE=$(blockdev --getsize64 "${DEV}")
+TAIL=$(( SIZE - 1048576 ))
+
+fio --name=head --filename="${DEV}" --direct=1 --rw=randrw --rwmixread=50 \
+    --bs=4k --size="${SPAN}" --io_size="${SPAN}" --verify=crc32c \
+    --verify_fatal=1 --do_verify=1 --numjobs=1 --iodepth=8 --ioengine=libaio \
+    --group_reporting --output-format=terse --minimal
+fio --name=tail --filename="${DEV}" --direct=1 --rw=randwrite --bs=4k \
+    --offset="${TAIL}" --size=1M --verify=crc32c --verify_fatal=1 \
+    --do_verify=1 --numjobs=1 --iodepth=4 --ioengine=libaio \
+    --group_reporting --output-format=terse --minimal
+echo "fio --verify=crc32c reported no verification errors over ublk"
+REMOTE
+}
+
+# `USER_RECOVERY`'s whole claim, from the guest's side. Before it, killing the
+# helper took the device away and fio reported I/O errors; with it the kernel
+# holds the device quiesced, a replacement helper resumes it, and fio pauses
+# and carries on.
+#
+# The device *path* is asserted unchanged because that is what recovery buys
+# over a re-attach: a guest holding `/dev/ublkbN` survives, which it could not
+# if the replacement published a new device.
+s_ublk_recovery() {
+  [ "${UBLK_READY}" = 1 ] || return 77
+  node_ssh 1 "command -v fio >/dev/null 2>&1" 2>/dev/null || return 77
+
+  node_ssh 1 "sudo bash -s ${UBLK_DEV}" 2>&1 <<'REMOTE' | sed 's/^/  /' >&2
+set -e
+DEV="$1"
+
+before=$(readlink -f "${DEV}")
+pid_before=$(pgrep -f 'neonfs_ublk' | head -1)
+[ -n "${pid_before}" ] || { echo "no neonfs_ublk helper is running"; exit 1; }
+
+# Long enough that the kill lands mid-flight rather than after the run.
+fio --name=recover --filename="${DEV}" --direct=1 --rw=randwrite --bs=4k \
+    --size=32M --verify=crc32c --verify_fatal=1 --do_verify=1 --numjobs=1 \
+    --iodepth=8 --ioengine=libaio --runtime=60 --time_based=0 \
+    --group_reporting --output-format=terse --minimal > /tmp/ublk-recover.out 2>&1 &
+fio_pid=$!
+
+sleep 3
+kill -9 "${pid_before}"
+echo "killed helper ${pid_before} mid-IO"
+
+# The replacement is a new process against the same device, so a *different*
+# pid at the same path is the evidence recovery happened at all.
+for _ in $(seq 1 30); do
+  pid_after=$(pgrep -f 'neonfs_ublk' | head -1)
+  [ -n "${pid_after}" ] && [ "${pid_after}" != "${pid_before}" ] && break
+  sleep 1
+done
+
+[ -n "${pid_after}" ] || { echo "no helper came back"; kill "${fio_pid}" 2>/dev/null || true; exit 1; }
+[ "${pid_after}" != "${pid_before}" ] || { echo "the same helper is still running"; exit 1; }
+echo "helper replaced: ${pid_before} -> ${pid_after}"
+
+wait "${fio_pid}" || { echo "fio failed across the restart:"; cat /tmp/ublk-recover.out; exit 1; }
+sed 's/^/  fio: /' /tmp/ublk-recover.out
+
+[ -b "${DEV}" ] || { echo "${DEV} went away"; exit 1; }
+after=$(readlink -f "${DEV}")
+[ "${before}" = "${after}" ] || { echo "device path changed: ${before} -> ${after}"; exit 1; }
+echo "device survived at ${DEV}, fio verified across the restart"
+REMOTE
+}
+
+# Reporting is part of the deliverable: an operator cannot tell `/dev/nbd0`
+# from `/dev/ublkb0` by looking at it, so the CLI has to say which is which.
+s_ublk_reporting() {
+  [ "${UBLK_READY}" = 1 ] || return 77
+
+  ncli 1 "block frontends" 2>&1 | grep -q "ublk" \
+    || { echo "  block frontends does not report ublk on a node serving it" >&2; return 1; }
+
+  ncli 1 "block list" 2>&1 | grep -E "${UBLK_VOL}.*ublk" >/dev/null \
+    || { echo "  block list does not report ${UBLK_VOL} as attached over ublk" >&2; return 1; }
+}
+
+# A leaked ublk device outlives the test and takes its queue threads with it,
+# so the assertion is that the device is gone rather than that detach exited 0.
+s_ublk_detach() {
+  [ "${UBLK_READY}" = 1 ] || return 77
+
+  ncli 1 "block detach ${UBLK_VOL}" 2>&1 | sed 's/^/  /' >&2 \
+    || { echo "  block detach failed" >&2; return 1; }
+
+  node_ssh 1 "for _ in \$(seq 1 20); do test -b ${UBLK_DEV} || exit 0; sleep 1; done; exit 1" 2>/dev/null \
+    || { echo "  ${UBLK_DEV} survived the detach" >&2; return 1; }
+
+  UBLK_READY=0
+  echo "  ${UBLK_DEV} gone" >&2
 }
 
 acceptance_run() {
@@ -710,6 +887,11 @@ acceptance_run() {
   step "FUSE unmount does not wedge control plane"  s_fuse_unmount_resilience
   step "ublk driver loaded"                          s_ublk_driver
   step "ublk helper present in the release"          s_ublk_helper
+  step "ublk device attach (CLI + geometry)"          s_ublk_attach
+  step "ublk fio --verify=crc32c"                     s_ublk_fio_verify
+  step "ublk survives its helper being killed mid-IO" s_ublk_recovery
+  step "ublk reporting (block list/frontends)"        s_ublk_reporting
+  step "ublk device detach (device is gone)"          s_ublk_detach
   step "replication across nodes"                   s_replication
 
   acceptance_cleanup

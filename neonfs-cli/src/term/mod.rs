@@ -171,7 +171,39 @@ fn extract_error_reason(reason: &Term) -> Option<CliError> {
         return Some(CliError::RpcError(msg));
     }
 
-    None
+    // A tuple or list reason — a handler that forgot to wrap it in an error
+    // struct. Returning None here made the caller fall through to "expected
+    // {:ok, value}" and print eetf's `Debug` rendering at the operator:
+    // `[Atom(Atom { name: "error" }), Tuple(Tuple { elements: [...] })]`. The
+    // handler should wrap it, but a missed one should still read as an error
+    // rather than as a Rust data structure.
+    Some(CliError::RpcError(render_term(reason)))
+}
+
+/// Render an arbitrary term the way Elixir's `inspect/1` would, approximately.
+///
+/// Only the shapes an unwrapped error reason actually takes: atoms, binaries,
+/// integers, tuples and lists. Anything else falls back to `Debug`, which is
+/// still better than the caller's "expected {:ok, value}".
+fn render_term(term: &Term) -> String {
+    match term {
+        Term::Atom(Atom { name }) => format!(":{}", name),
+        Term::Binary(Binary { bytes }) => match String::from_utf8(bytes.clone()) {
+            Ok(text) => format!("{:?}", text),
+            Err(_) => format!("{:?}", bytes),
+        },
+        Term::FixInteger(FixInteger { value }) => value.to_string(),
+        Term::BigInteger(big) => big.to_string(),
+        Term::Tuple(Tuple { elements }) => {
+            let rendered: Vec<String> = elements.iter().map(render_term).collect();
+            format!("{{{}}}", rendered.join(", "))
+        }
+        Term::List(List { elements }) => {
+            let rendered: Vec<String> = elements.iter().map(render_term).collect();
+            format!("[{}]", rendered.join(", "))
+        }
+        other => format!("{:?}", other),
+    }
 }
 
 /// Try to parse an Erlang map as a NeonFS.Error struct.
@@ -250,6 +282,77 @@ fn extract_details_map(term: &Term) -> Option<HashMap<String, String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // A handler that returns `{:error, {:some, :tuple}}` without wrapping it
+    // used to reach the operator as eetf's `Debug` output, via the caller's
+    // "expected {:ok, value}" path. It should read as an error instead.
+    #[test]
+    fn test_extract_error_renders_an_unwrapped_tuple_reason() {
+        let reason = Term::Tuple(Tuple {
+            elements: vec![
+                Term::Atom(Atom {
+                    name: "frontend_forced_unavailable".to_string(),
+                }),
+                Term::Atom(Atom {
+                    name: "ublk".to_string(),
+                }),
+                Term::Tuple(Tuple {
+                    elements: vec![
+                        Term::Atom(Atom {
+                            name: "ublk_driver_absent".to_string(),
+                        }),
+                        Term::Binary(Binary {
+                            bytes: b"/dev/ublk-control".to_vec(),
+                        }),
+                    ],
+                }),
+            ],
+        });
+
+        let term = Term::Tuple(Tuple {
+            elements: vec![
+                Term::Atom(Atom {
+                    name: "error".to_string(),
+                }),
+                reason,
+            ],
+        });
+
+        let err = extract_error(&term).expect("a tuple reason is still an error");
+        let rendered = err.to_string();
+
+        assert!(
+            rendered.contains(":frontend_forced_unavailable"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("/dev/ublk-control"), "{rendered}");
+        assert!(
+            !rendered.contains("Atom {"),
+            "must not leak Debug: {rendered}"
+        );
+    }
+
+    #[test]
+    fn test_render_term_shapes() {
+        assert_eq!(
+            render_term(&Term::Atom(Atom {
+                name: "ok".to_string()
+            })),
+            ":ok"
+        );
+        assert_eq!(
+            render_term(&Term::FixInteger(FixInteger { value: 42 })),
+            "42"
+        );
+        assert_eq!(
+            render_term(&Term::List(List {
+                elements: vec![Term::Atom(Atom {
+                    name: "a".to_string()
+                })]
+            })),
+            "[:a]"
+        );
+    }
 
     #[test]
     fn test_term_to_string_from_binary() {

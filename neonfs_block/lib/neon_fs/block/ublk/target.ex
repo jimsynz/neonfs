@@ -280,22 +280,33 @@ defmodule NeonFS.Block.Ublk.Target do
   # The helper announces itself only after `start_dev`, which is the one
   # moment the device is known to exist. Waiting for the socket instead would
   # hand out a path to nothing, because the queues connect before that.
-  defp await_ready(helper, device_id) do
+  defp await_ready(helper, device_id, said \\ []) do
     expected = "ready #{device_id}"
 
     receive do
       {^helper, {:data, output}} ->
-        if String.contains?(output, expected),
-          do: :ok,
-          else: await_ready(helper, device_id)
+        if String.contains?(output, expected) do
+          :ok
+        else
+          # Anything the helper says before it is ready is a diagnostic, and
+          # discarding it was throwing away the one message that explains a
+          # failed attach: the rig saw `{:ublk_helper_exited, 1}` with the
+          # reason nowhere, because it had been read and dropped here.
+          Logger.warning("ublk helper: #{String.trim(output)}",
+            device_path: device_path_for(device_id)
+          )
+
+          await_ready(helper, device_id, [String.trim(output) | said])
+        end
 
       {^helper, {:exit_status, status}} ->
-        {:error, {:ublk_helper_exited, status}}
+        {:error, {:ublk_helper_exited, status, Enum.reverse(said)}}
 
       {:EXIT, ^helper, reason} ->
-        {:error, {:ublk_helper_exited, reason}}
+        {:error, {:ublk_helper_exited, reason, Enum.reverse(said)}}
     after
-      @ready_timeout_ms -> {:error, {:ublk_device_never_appeared, device_path_for(device_id)}}
+      @ready_timeout_ms ->
+        {:error, {:ublk_device_never_appeared, device_path_for(device_id), Enum.reverse(said)}}
     end
   end
 

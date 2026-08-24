@@ -77,6 +77,28 @@ defmodule NeonFS.Block.FrontendSelectionTest do
       assert {:error, {:ublk_helper_absent, ^path}} = Capability.check()
     end
 
+    # The rig found this: `/dev/ublk-control` is `crw------- root root` and the
+    # daemon is not root, so an existence check reported ublk available on a
+    # node where every attach then failed with EACCES deep inside the helper.
+    #
+    # A directory rather than a mode-000 file, because the property under test
+    # is "exists but will not open" and CI runs as root — which opens a
+    # mode-000 file happily and would make this assert nothing there. `EISDIR`
+    # is a type check rather than a permission one, so it holds for every uid.
+    # The EACCES *message* is tested where it is built, in the CLI handler.
+    test "a path that exists but will not open is not availability" do
+      unopenable = Path.join(System.tmp_dir!(), "ublk-dir-#{System.unique_integer([:positive])}")
+      File.mkdir_p!(unopenable)
+      on_exit(fn -> File.rmdir(unopenable) end)
+
+      Application.put_env(:neonfs_block, :ublk_control_path, unopenable)
+      Application.put_env(:neonfs_block, :ublk_helper, System.find_executable("sh"))
+      Capability.refresh()
+
+      assert {:error, {:ublk_control_inaccessible, ^unopenable, :eisdir}} = Capability.check()
+      assert NeonFS.Block.frontends() == [:nbd]
+    end
+
     test "the driver is named first, since a helper cannot help without it" do
       without_driver()
       Application.put_env(:neonfs_block, :ublk_helper, "/also/missing")
@@ -134,10 +156,10 @@ defmodule NeonFS.Block.FrontendSelectionTest do
     end
   end
 
-  # The point of caching is that two attachments in the same second cannot
-  # disagree about what this node can do.
-  describe "the probe is cached" do
-    test "a change under a running node is not seen until refreshed" do
+  # A positive is cached so that two attachments in the same second cannot
+  # disagree; a negative is not, so a node picks up a late `modprobe`.
+  describe "caching" do
+    test "a positive answer survives the world changing under it" do
       with_ublk()
       assert :ok = Capability.check()
 
@@ -145,6 +167,29 @@ defmodule NeonFS.Block.FrontendSelectionTest do
       assert :ok = Capability.check()
 
       assert {:error, {:ublk_driver_absent, _path}} = Capability.refresh()
+    end
+
+    # The rig found this: a node that booted before `modprobe ublk_drv` cached
+    # "driver absent" and then refused ublk forever, reporting a missing
+    # driver while the control device sat there. Restarting the node was the
+    # only fix.
+    test "a negative answer is re-probed, so a late modprobe is picked up" do
+      without_driver()
+      assert {:error, {:ublk_driver_absent, _path}} = Capability.check()
+
+      # The operator loads the module. Nothing tells this node.
+      with_driver()
+
+      assert :ok = Capability.check()
+    end
+
+    test "a negative for a missing helper is re-probed too" do
+      without_helper()
+      assert {:error, {:ublk_helper_absent, _path}} = Capability.check()
+
+      Application.put_env(:neonfs_block, :ublk_helper, System.find_executable("sh"))
+
+      assert :ok = Capability.check()
     end
   end
 
