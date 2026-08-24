@@ -135,24 +135,23 @@ defmodule NeonFS.TLSDistConfig do
 
   Emits `[:neonfs, :tls, :node_cert_installed]` telemetry on success.
 
-  The running daemon's TLS distribution listener doesn't pick up the
-  new cert until the listener restarts — `:ssl_dist` caches its
-  `certs_keys` config at startup the same way it caches `cacertfile`.
-  The orchestrator drives that restart per-node.
+  No listener restart is needed for the running daemon to present the
+  new pair. What `ssl_dist_sup` caches at listener start is the *option
+  list* from `ssl_dist.conf`, and the entries in it are file **paths** —
+  the paths here don't change, so the cached options stay correct.
+  `inet_tls_dist` resolves them per handshake through the distribution
+  PEM cache, whose validator invalidates any cached file whose mtime
+  moved; the delay is therefore bounded by `ssl_pem_cache_clean`, 120 s
+  by default. Established connections keep the pair they handshook
+  with, as they would across a restart.
+
+  Writing the pair is the whole of the work. See
+  `restart_distribution/1` for the one change that does need a restart.
   """
   @spec install_node_cert(TLS.pem(), TLS.pem(), String.t()) :: :ok | {:error, term()}
   def install_node_cert(node_cert_pem, node_key_pem, tls_dir \\ TLS.tls_dir()) do
-    cert_path = Path.join(tls_dir, "node.crt")
-    key_path = Path.join(tls_dir, "node.key")
-    cert_tmp = cert_path <> ".tmp"
-    key_tmp = key_path <> ".tmp"
-
-    with :ok <- File.write(cert_tmp, node_cert_pem),
-         :ok <- File.chmod(cert_tmp, 0o644),
-         :ok <- File.write(key_tmp, node_key_pem),
-         :ok <- File.chmod(key_tmp, 0o600),
-         :ok <- File.rename(cert_tmp, cert_path),
-         :ok <- File.rename(key_tmp, key_path) do
+    with :ok <- write_atomic(Path.join(tls_dir, "node.crt"), node_cert_pem, 0o644),
+         :ok <- write_atomic(Path.join(tls_dir, "node.key"), node_key_pem, 0o600) do
       :telemetry.execute(
         [:neonfs, :tls, :node_cert_installed],
         %{},
@@ -164,44 +163,92 @@ defmodule NeonFS.TLSDistConfig do
   end
 
   @doc """
-  Picks up trust-store changes for distribution TLS.
+  Stages the rotation's incoming CA on this node and rebuilds the bundle.
 
-  Called by the `cluster ca rotate` orchestrator after staging an
-  incoming CA on every node. Regenerates the bundle on disk and emits a
-  `[:neonfs, :tls, :bundle_reloaded]` telemetry event.
+  Called by the `cluster ca rotate` orchestrator on every node once the
+  incoming CA has been generated. Until this runs the node's trust
+  bundle holds the *active* CA alone, so the certificate the rotation
+  just issued it — signed by the incoming CA — chains to an anchor
+  nobody trusts.
 
-  Erlang's distribution TLS does not support hot-reloading the trust
-  store — `:ssl_dist` reads `cacertfile` once at listener startup. This
-  function therefore takes the **lazy** approach: the on-disk bundle is
-  refreshed, and full effect requires a node-by-node listener restart
-  (driven by the orchestrator, documented in the rotation runbook).
+  Writing the anchor is the whole of the work — no listener restart, on
+  the same terms as `install_node_cert/3`: the path is what
+  `ssl_dist.conf` caches, and the file behind it is re-read once the
+  distribution PEM cache invalidates it, within `ssl_pem_cache_clean`
+  (120 s by default). Established connections keep running under the
+  trust store they handshook with, which is why the rotation holds a
+  grace window before `--finalize` drops the old anchor.
 
-  Existing inter-node connections keep going under their old trust
-  store; a node only adopts the new bundle on its next listener start.
+  Emits `[:neonfs, :tls, :incoming_ca_installed]` on success.
   """
-  @spec reload_listener(String.t()) :: :ok
-  def reload_listener(tls_dir \\ TLS.tls_dir()) do
-    :ok = regenerate_ca_bundle(tls_dir)
+  @spec install_incoming_ca(TLS.pem(), String.t()) :: :ok | {:error, term()}
+  def install_incoming_ca(ca_pem, tls_dir \\ TLS.tls_dir()) do
+    with :ok <- write_atomic(Path.join(tls_dir, "incoming-ca.crt"), ca_pem, 0o644),
+         :ok <- regenerate_ca_bundle(tls_dir) do
+      :telemetry.execute([:neonfs, :tls, :incoming_ca_installed], %{}, %{tls_dir: tls_dir})
+      :ok
+    end
+  end
 
-    :telemetry.execute(
-      [:neonfs, :tls, :bundle_reloaded],
-      %{},
-      %{tls_dir: tls_dir}
-    )
+  @doc """
+  Promotes the rotation's incoming CA to this node's active CA.
 
-    :ok
+  Called on every node by `cluster ca rotate --finalize`. Replaces
+  `ca.crt` with the promoted anchor, discards the staged
+  `incoming-ca.crt`, and rebuilds the bundle — which is what actually
+  drops the superseded CA from the node's trust store. Skipping it
+  leaves the old anchor trusted for as long as the node lives, so the
+  rotation would reissue every certificate without ever retiring what
+  it rotated away from.
+
+  Emits `[:neonfs, :tls, :active_ca_promoted]` on success.
+  """
+  @spec promote_active_ca(TLS.pem(), String.t()) :: :ok | {:error, term()}
+  def promote_active_ca(ca_pem, tls_dir \\ TLS.tls_dir()) do
+    with :ok <- write_atomic(Path.join(tls_dir, "ca.crt"), ca_pem, 0o644),
+         :ok <- remove_incoming_ca(tls_dir),
+         :ok <- regenerate_ca_bundle(tls_dir) do
+      :telemetry.execute([:neonfs, :tls, :active_ca_promoted], %{}, %{tls_dir: tls_dir})
+      :ok
+    end
+  end
+
+  @doc """
+  Discards a staged incoming CA and rebuilds the bundle.
+
+  Called on every node by `cluster ca rotate --abort`. A node that
+  keeps the staged anchor after an abort trusts a CA the cluster has
+  thrown away.
+
+  Emits `[:neonfs, :tls, :incoming_ca_discarded]` on success.
+  """
+  @spec discard_incoming_ca(String.t()) :: :ok | {:error, term()}
+  def discard_incoming_ca(tls_dir \\ TLS.tls_dir()) do
+    with :ok <- remove_incoming_ca(tls_dir),
+         :ok <- regenerate_ca_bundle(tls_dir) do
+      :telemetry.execute([:neonfs, :tls, :incoming_ca_discarded], %{}, %{tls_dir: tls_dir})
+      :ok
+    end
   end
 
   @doc """
   Restarts Erlang's distribution subsystem in-process so a freshly written
   `ssl_dist.conf` takes effect without a full daemon restart.
 
-  `:ssl_dist` consults `-ssl_dist_optfile` exactly once, when the distribution
-  supervisor's subtree starts, and caches it in an ETS table owned by
-  `ssl_dist_sup` (which lives under `net_sup`). Restarting that supervisor
-  re-consults the file, rebuilds the cache, and re-binds the (fixed) dist port
-  via `NeonFS.Epmd`. We can't use `:net_kernel.stop/0` — a node booted with
-  `-name` rejects it with `{:error, :not_allowed}` — so we bounce the
+  Needed only when `ssl_dist.conf` itself changes, which happens once in a
+  node's life: `regenerate_config/1` repoints `certs_keys` from
+  `node-local.crt` to the cluster-signed `node.crt` at init or join.
+  Replacing the *contents* of a file the config already names — a renewed
+  node certificate, a rotated CA bundle — needs nothing from this function;
+  see `install_node_cert/3`.
+
+  `ssl_dist_sup:start_link/0` consults `-ssl_dist_optfile` exactly once and
+  inserts the result into a named ETS table, which `inet_tls_dist` reads per
+  handshake. The table is created by the process that calls `start_link/0`,
+  i.e. `net_sup`, so terminating `net_sup` destroys it and restarting the
+  child re-consults the file. That restart also re-binds the (fixed) dist
+  port via `NeonFS.Epmd`. We can't use `:net_kernel.stop/0` — a node booted
+  with `-name` rejects it with `{:error, :not_allowed}` — so we bounce the
   supervisor child directly, which is what OTP does internally.
 
   This drops every peer connection for the duration (nodedown/nodeup); callers
@@ -228,6 +275,11 @@ defmodule NeonFS.TLSDistConfig do
     retries = Keyword.get(opts, :retries, 5)
     backoff_ms = Keyword.get(opts, :backoff_ms, 200)
 
+    # Drops the *data plane's* view of the newly written certificates.
+    # `:ssl.clear_pem_cache/0` deliberately leaves the distribution cache
+    # alone ("Not supported for distribution at the moment", `ssl_pem_cache`);
+    # the `net_sup` bounce below is what discards that one, by taking the
+    # process that owns it with it.
     :ssl.clear_pem_cache()
 
     case dist_sup_id() do
@@ -321,6 +373,25 @@ defmodule NeonFS.TLSDistConfig do
   defp distribution_restarted do
     :telemetry.execute([:neonfs, :tls, :distribution_restarted], %{}, %{})
     :ok
+  end
+
+  # Temp-file + rename, so a crash mid-write leaves the existing file intact
+  # rather than a half-written certificate the listener will try to load.
+  defp write_atomic(path, contents, mode) do
+    tmp = path <> ".tmp"
+
+    with :ok <- File.write(tmp, contents),
+         :ok <- File.chmod(tmp, mode) do
+      File.rename(tmp, path)
+    end
+  end
+
+  defp remove_incoming_ca(tls_dir) do
+    case File.rm(Path.join(tls_dir, "incoming-ca.crt")) do
+      :ok -> :ok
+      {:error, :enoent} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
   end
 
   defp bundle_sources(tls_dir) do

@@ -268,32 +268,100 @@ defmodule NeonFS.TLSDistConfigTest do
     end
   end
 
-  describe "reload_listener/1" do
-    test "regenerates the bundle and emits telemetry", %{tmp_dir: tmp_dir} do
+  describe "install_incoming_ca/2" do
+    test "writes the staged anchor and puts it in the bundle", %{tmp_dir: tmp_dir} do
       ref =
         :telemetry_test.attach_event_handlers(self(), [
-          [:neonfs, :tls, :bundle_reloaded]
+          [:neonfs, :tls, :incoming_ca_installed]
         ])
 
-      incoming_ca_key = X509.PrivateKey.new_ec(:secp256r1)
+      incoming_pem = self_signed_ca_pem("incoming CA")
 
-      incoming_ca_cert =
-        X509.Certificate.self_signed(incoming_ca_key, "/O=NeonFS/CN=incoming CA",
-          template: :root_ca,
-          validity: 365
-        )
+      :ok = TLSDistConfig.install_incoming_ca(incoming_pem, tmp_dir)
 
-      File.write!(
-        Path.join(tmp_dir, "incoming-ca.crt"),
-        X509.Certificate.to_pem(incoming_ca_cert)
-      )
+      assert File.read!(Path.join(tmp_dir, "incoming-ca.crt")) == incoming_pem
+      assert File.read!(Path.join(tmp_dir, "ca_bundle.crt")) =~ incoming_pem
 
-      :ok = TLSDistConfig.reload_listener(tmp_dir)
+      assert_receive {[:neonfs, :tls, :incoming_ca_installed], ^ref, %{}, %{tls_dir: ^tmp_dir}},
+                     1_000
+    end
+
+    # Writing the anchor without rebuilding the bundle would leave the node
+    # trusting only the CA it is being rotated away from, which is the state
+    # the reissued certificate cannot chain to.
+    test "leaves the active CA in the bundle alongside it", %{tmp_dir: tmp_dir} do
+      active_pem = self_signed_ca_pem("active CA")
+      File.write!(Path.join(tmp_dir, "ca.crt"), active_pem)
+
+      incoming_pem = self_signed_ca_pem("incoming CA")
+      :ok = TLSDistConfig.install_incoming_ca(incoming_pem, tmp_dir)
 
       bundle = File.read!(Path.join(tmp_dir, "ca_bundle.crt"))
-      assert String.contains?(bundle, X509.Certificate.to_pem(incoming_ca_cert))
+      assert bundle =~ active_pem
+      assert bundle =~ incoming_pem
+    end
+  end
 
-      assert_receive {[:neonfs, :tls, :bundle_reloaded], ^ref, %{}, %{tls_dir: ^tmp_dir}}, 1_000
+  describe "promote_active_ca/2" do
+    test "replaces the active CA, drops the staged one, rebuilds the bundle", %{
+      tmp_dir: tmp_dir
+    } do
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:neonfs, :tls, :active_ca_promoted]
+        ])
+
+      old_pem = self_signed_ca_pem("old CA")
+      new_pem = self_signed_ca_pem("new CA")
+
+      File.write!(Path.join(tmp_dir, "ca.crt"), old_pem)
+      :ok = TLSDistConfig.install_incoming_ca(new_pem, tmp_dir)
+
+      :ok = TLSDistConfig.promote_active_ca(new_pem, tmp_dir)
+
+      assert File.read!(Path.join(tmp_dir, "ca.crt")) == new_pem
+      refute File.exists?(Path.join(tmp_dir, "incoming-ca.crt"))
+
+      bundle = File.read!(Path.join(tmp_dir, "ca_bundle.crt"))
+      assert bundle =~ new_pem
+
+      refute bundle =~ old_pem,
+             "the superseded CA is still a trust anchor after the rotation finalized"
+
+      assert_receive {[:neonfs, :tls, :active_ca_promoted], ^ref, %{}, %{tls_dir: ^tmp_dir}},
+                     1_000
+    end
+  end
+
+  describe "discard_incoming_ca/1" do
+    test "removes the staged anchor and rebuilds the bundle without it", %{tmp_dir: tmp_dir} do
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:neonfs, :tls, :incoming_ca_discarded]
+        ])
+
+      active_pem = self_signed_ca_pem("active CA")
+      incoming_pem = self_signed_ca_pem("incoming CA")
+
+      File.write!(Path.join(tmp_dir, "ca.crt"), active_pem)
+      :ok = TLSDistConfig.install_incoming_ca(incoming_pem, tmp_dir)
+
+      :ok = TLSDistConfig.discard_incoming_ca(tmp_dir)
+
+      refute File.exists?(Path.join(tmp_dir, "incoming-ca.crt"))
+
+      bundle = File.read!(Path.join(tmp_dir, "ca_bundle.crt"))
+      assert bundle =~ active_pem
+      refute bundle =~ incoming_pem
+
+      assert_receive {[:neonfs, :tls, :incoming_ca_discarded], ^ref, %{}, %{tls_dir: ^tmp_dir}},
+                     1_000
+    end
+
+    test "is a no-op when nothing is staged", %{tmp_dir: tmp_dir} do
+      File.write!(Path.join(tmp_dir, "ca.crt"), self_signed_ca_pem("active CA"))
+
+      assert :ok = TLSDistConfig.discard_incoming_ca(tmp_dir)
     end
   end
 
@@ -355,5 +423,16 @@ defmodule NeonFS.TLSDistConfigTest do
       assert File.exists?(Path.join(tmp_dir, "ca_bundle.crt"))
       assert File.exists?(Path.join(tmp_dir, "ssl_dist.conf"))
     end
+  end
+
+  defp self_signed_ca_pem(common_name) do
+    key = X509.PrivateKey.new_ec(:secp256r1)
+
+    key
+    |> X509.Certificate.self_signed("/O=NeonFS/CN=#{common_name}",
+      template: :root_ca,
+      validity: 365
+    )
+    |> X509.Certificate.to_pem()
   end
 end

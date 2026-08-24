@@ -132,12 +132,17 @@ defmodule NeonFS.CLI.Handler.CA do
 
   # Private
 
-  # Orchestrator. Stages a fresh CA, walks the BEAM
-  # cluster reissuing each node's cert, distributes the dual-CA
-  # bundle, then either finalizes immediately (`no-wait: true`) or
-  # stops with the rotation in `pending-finalize` state so the
-  # operator can wait for the dual-CA grace window before running
-  # `--finalize`.
+  # Orchestrator. Stages a fresh CA, adds it to every node's trust
+  # bundle, walks the BEAM cluster reissuing each node's cert against
+  # it, then either finalizes immediately (`no-wait: true`) or stops
+  # with the rotation in `pending-finalize` state so the operator can
+  # wait for the dual-CA grace window before running `--finalize`.
+  #
+  # The anchor goes out before the certificates that chain to it. A
+  # node handed a certificate signed by a CA its peers do not yet
+  # trust is a node its peers stop accepting connections from, and
+  # the whole point of the dual-CA window is that neither anchor is
+  # ever missing.
   defp handle_ca_rotate_default(opts) do
     no_wait? = Map.get(opts, "no-wait", false)
     grace_seconds = Map.get(opts, "grace-window-seconds", @default_grace_window_seconds)
@@ -145,8 +150,8 @@ defmodule NeonFS.CLI.Handler.CA do
     with :ok <- require_cluster(),
          {:ok, ca_cert, _ca_key} <- stage_incoming_ca_for_orchestrator(),
          :ok <- log_ca_rotate_started_from_cert(ca_cert),
-         :ok <- reissue_node_certs_across_cluster(),
-         :ok <- distribute_dual_ca_bundle_across_cluster() do
+         :ok <- distribute_dual_ca_bundle_across_cluster(TLS.encode_cert(ca_cert)),
+         :ok <- reissue_node_certs_across_cluster() do
       if no_wait? do
         finalize_rotation_with_audit()
       else
@@ -174,30 +179,14 @@ defmodule NeonFS.CLI.Handler.CA do
     node_atom = String.to_atom(node_name)
 
     with :ok <- require_cluster(),
-         :ok <- ensure_incoming_ca_staged(),
-         :ok <- reissue_node_cert(node_atom),
-         :ok <- distribute_bundle_to(node_atom) do
+         {:ok, incoming_ca_pem} <- staged_incoming_ca_pem(),
+         :ok <- distribute_bundle_to(node_atom, incoming_ca_pem),
+         :ok <- reissue_node_cert(node_atom) do
       {:ok, %{node: node_name, reissued: true}}
     else
       {:error, reason} = err ->
         log_ca_rotate_failed(reason)
         err
-    end
-  end
-
-  defp ensure_incoming_ca_staged do
-    case CertificateAuthority.incoming_ca_info() do
-      {:ok, _info} ->
-        :ok
-
-      {:error, :no_incoming_ca} ->
-        {:error,
-         Invalid.exception(
-           message: "no CA rotation in progress; run `cluster ca rotate` (without --node) first"
-         )}
-
-      {:error, reason} ->
-        {:error, wrap_error(reason)}
     end
   end
 
@@ -234,14 +223,7 @@ defmodule NeonFS.CLI.Handler.CA do
   end
 
   defp reissue_node_certs_across_cluster do
-    nodes = [Node.self() | Node.list()]
-
-    Enum.reduce_while(nodes, :ok, fn node, _acc ->
-      case reissue_node_cert(node) do
-        :ok -> {:cont, :ok}
-        {:error, _reason} = err -> {:halt, err}
-      end
-    end)
+    each_cluster_node(&reissue_node_cert/1)
   end
 
   defp reissue_node_cert(node) do
@@ -277,23 +259,48 @@ defmodule NeonFS.CLI.Handler.CA do
     end
   end
 
-  defp distribute_dual_ca_bundle_across_cluster do
-    nodes = [Node.self() | Node.list()]
+  defp distribute_dual_ca_bundle_across_cluster(incoming_ca_pem) do
+    each_cluster_node(&distribute_bundle_to(&1, incoming_ca_pem))
+  end
 
-    Enum.reduce_while(nodes, :ok, fn node, _acc ->
-      case distribute_bundle_to(node) do
+  defp distribute_bundle_to(node, incoming_ca_pem) do
+    rpc_call_or_error(node, NeonFS.TLSDistConfig, :install_incoming_ca, [incoming_ca_pem])
+  end
+
+  defp promote_active_ca_across_cluster(active_ca_pem) do
+    each_cluster_node(fn node ->
+      rpc_call_or_error(node, NeonFS.TLSDistConfig, :promote_active_ca, [active_ca_pem])
+    end)
+  end
+
+  defp discard_incoming_ca_across_cluster do
+    each_cluster_node(fn node ->
+      rpc_call_or_error(node, NeonFS.TLSDistConfig, :discard_incoming_ca, [])
+    end)
+  end
+
+  defp each_cluster_node(fun) do
+    Enum.reduce_while([Node.self() | Node.list()], :ok, fn node, _acc ->
+      case fun.(node) do
         :ok -> {:cont, :ok}
         {:error, _reason} = err -> {:halt, err}
       end
     end)
   end
 
-  defp distribute_bundle_to(node) do
-    with :ok <- rpc_call_or_error(node, NeonFS.TLSDistConfig, :regenerate_ca_bundle, []),
-         :ok <- rpc_call_or_error(node, NeonFS.TLSDistConfig, :reload_listener, []) do
-      :ok
-    else
-      err -> err
+  defp staged_incoming_ca_pem do
+    case CertificateAuthority.incoming_ca_pem() do
+      {:ok, pem} ->
+        {:ok, pem}
+
+      {:error, :no_incoming_ca} ->
+        {:error,
+         Invalid.exception(
+           message: "no CA rotation in progress; run `cluster ca rotate` (without --node) first"
+         )}
+
+      {:error, reason} ->
+        {:error, wrap_error(reason)}
     end
   end
 
@@ -313,25 +320,40 @@ defmodule NeonFS.CLI.Handler.CA do
   end
 
   defp finalize_rotation_with_audit do
-    old_fingerprint = current_active_ca_fingerprint()
-
-    case CertificateAuthority.finalize_rotation() do
-      :ok ->
-        new_fingerprint = current_active_ca_fingerprint()
-        log_ca_rotate_finalized(old_fingerprint, new_fingerprint)
-
-        {:ok,
-         %{
-           rotated: true,
-           old_fingerprint: old_fingerprint,
-           fingerprint: new_fingerprint
-         }}
-
-      {:error, reason} ->
-        {:error,
-         Unavailable.exception(message: "Failed to finalize CA rotation: #{inspect(reason)}")}
+    with {:ok, old_fingerprint, new_fingerprint} <- finalize_rotation() do
+      {:ok,
+       %{
+         rotated: true,
+         old_fingerprint: old_fingerprint,
+         fingerprint: new_fingerprint
+       }}
     end
   end
+
+  # Promotion is two writes, not one: the system volume is where the CA
+  # lives, and every node's `ca.crt` is what its distribution listener
+  # actually verifies against. Promoting only the former leaves the
+  # superseded CA a trust anchor on every node in the cluster, for as long
+  # as that node lives.
+  defp finalize_rotation do
+    old_fingerprint = current_active_ca_fingerprint()
+
+    with :ok <- map_finalize_error(CertificateAuthority.finalize_rotation()),
+         {:ok, active_ca_pem} <- map_finalize_error(CertificateAuthority.active_ca_pem()),
+         :ok <- map_finalize_error(promote_active_ca_across_cluster(active_ca_pem)) do
+      new_fingerprint = current_active_ca_fingerprint()
+      log_ca_rotate_finalized(old_fingerprint, new_fingerprint)
+      {:ok, old_fingerprint, new_fingerprint}
+    end
+  end
+
+  defp map_finalize_error(:ok), do: :ok
+  defp map_finalize_error({:ok, _} = ok), do: ok
+
+  defp map_finalize_error({:error, reason}),
+    do:
+      {:error,
+       Unavailable.exception(message: "Failed to finalize CA rotation: #{inspect(reason)}")}
 
   defp handle_ca_rotate_status do
     with :ok <- require_cluster() do
@@ -374,13 +396,24 @@ defmodule NeonFS.CLI.Handler.CA do
           {:error, Invalid.exception(message: "No CA rotation in progress to abort")}
 
         {:ok, _info} ->
-          :ok = CertificateAuthority.abort_rotation()
-          log_ca_rotate_aborted()
-          {:ok, %{aborted: true}}
+          do_abort_rotation()
 
         {:error, reason} ->
           {:error, wrap_error(reason)}
       end
+    end
+  end
+
+  # Clearing the staged anchor off every node is the abort. Leaving it
+  # behind means the cluster keeps trusting a CA it discarded, and the next
+  # `--stage` writes a second one alongside it.
+  defp do_abort_rotation do
+    with :ok <- discard_incoming_ca_across_cluster(),
+         :ok <- CertificateAuthority.abort_rotation() do
+      log_ca_rotate_aborted()
+      {:ok, %{aborted: true}}
+    else
+      {:error, reason} -> {:error, wrap_error(reason)}
     end
   end
 
@@ -403,18 +436,8 @@ defmodule NeonFS.CLI.Handler.CA do
   end
 
   defp do_finalize_rotation do
-    old_fingerprint = current_active_ca_fingerprint()
-
-    case CertificateAuthority.finalize_rotation() do
-      :ok ->
-        new_fingerprint = current_active_ca_fingerprint()
-        log_ca_rotate_finalized(old_fingerprint, new_fingerprint)
-
-        {:ok, %{finalized: true, old_fingerprint: old_fingerprint, fingerprint: new_fingerprint}}
-
-      {:error, reason} ->
-        {:error,
-         Unavailable.exception(message: "Failed to finalize CA rotation: #{inspect(reason)}")}
+    with {:ok, old_fingerprint, new_fingerprint} <- finalize_rotation() do
+      {:ok, %{finalized: true, old_fingerprint: old_fingerprint, fingerprint: new_fingerprint}}
     end
   end
 
