@@ -13,6 +13,8 @@ defmodule NeonFS.Client.Application do
 
   use Application
 
+  alias NeonFS.Client.HealthCheck
+
   @impl true
   def start(_type, _args) do
     start_children? = Application.get_env(:neonfs_client, :start_children?, true)
@@ -38,10 +40,22 @@ defmodule NeonFS.Client.Application do
   end
 
   defp register_health_checks do
-    alias NeonFS.Client.{Connection, CostFunction, Discovery, HealthCheck}
-    alias NeonFS.Transport.CertRenewal
+    HealthCheck.register(:client, health_checks())
+  end
 
-    HealthCheck.register(:client,
+  @doc """
+  Returns the keyword list of shared client health checks.
+
+  Public so a test can assert the set that gets registered — registration
+  itself only runs when `:start_children?` is true, which it is not under
+  test, so a subsystem wired in here would otherwise ship unexercised.
+  """
+  @spec health_checks() :: keyword((-> HealthCheck.subsystem_report()))
+  def health_checks do
+    alias NeonFS.Client.{Connection, CostFunction, Discovery}
+    alias NeonFS.Transport.{CAExpiry, CertRenewal}
+
+    [
       connection: fn ->
         if Process.whereis(Connection) do
           case Connection.connected_core_node() do
@@ -69,8 +83,9 @@ defmodule NeonFS.Client.Application do
           %{status: :unhealthy, reason: :not_running}
         end
       end,
-      cert_expiry: &CertRenewal.health_check/0
-    )
+      cert_expiry: &CertRenewal.health_check/0,
+      ca_expiry: &CAExpiry.health_check/0
+    ]
   end
 
   defp build_children do
