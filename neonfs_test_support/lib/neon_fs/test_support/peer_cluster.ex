@@ -473,7 +473,7 @@ defmodule NeonFS.TestSupport.PeerCluster do
   """
   @spec trust_cluster_ca!(cluster(), atom()) :: :ok
   def trust_cluster_ca!(cluster, node_name \\ :node1) do
-    node_tls_dir = Path.join(get_node!(cluster, node_name).data_dir, "tls")
+    node_tls_dir = tls_dir_of(cluster, node_name)
 
     case PeerTLS.add_cluster_ca(node_tls_dir, cli_tls_dir(cluster)) do
       :ok ->
@@ -486,13 +486,13 @@ defmodule NeonFS.TestSupport.PeerCluster do
     end
   end
 
-  # These four reach a peer directly rather than through `rpc/6`, because
-  # each is probing distribution itself — who is connected, connecting two
-  # peers, reconnecting after a restart, querying Ra locally. On a TLS
-  # cluster the controller cannot complete a peer's handshake at all, so
-  # they cannot work and there is no `:peer.call` equivalent that would
-  # mean the same thing. Refusing by name beats surfacing later as a
-  # mysterious `:nodedown`.
+  # `restart_node/3` respawns the VM from `build_restart_config/2` and then
+  # wires it back into the mesh from the controller, which on a TLS cluster
+  # cannot complete a peer's handshake. Everything else that probes
+  # distribution — who is connected, connecting two peers, reconnecting after
+  # a partition — now asks the peers over the control channel instead, which
+  # means the same thing from a vantage point that can answer. Refusing by
+  # name beats surfacing later as a mysterious `:nodedown`.
   defp refuse_on_tls!(%{dist: :tls}, what) do
     raise ArgumentError,
           "#{what} is not supported on a TLS cluster: it probes distribution " <>
@@ -1011,11 +1011,164 @@ defmodule NeonFS.TestSupport.PeerCluster do
   Returns Erlang node atoms (not alias names).
   """
   @spec visible_nodes(cluster(), atom()) :: [node()]
+  def visible_nodes(%{dist: :tls} = cluster, node_name) do
+    cluster
+    |> get_node!(node_name)
+    |> Map.fetch!(:peer)
+    |> :peer.call(Node, :list, [])
+  end
+
   def visible_nodes(cluster, node_name) do
-    refuse_on_tls!(cluster, "visible_nodes/2")
     node_info = get_node!(cluster, node_name)
     :rpc.call(node_info.node, Node, :list, [])
   end
+
+  @doc """
+  Gives a peer the cluster CA of an initialised peer, in effect immediately.
+
+  The trust half of a TLS join. `join_cluster_rpc/3` dials the via node over
+  distribution before it has redeemed anything, and an initialised node
+  presents its cluster-signed certificate alone — so a peer still trusting
+  only the harness CA cannot validate it and the join fails as `:nodedown`.
+  See `NeonFS.TestSupport.PeerTLS.add_cluster_ca/2` for why the HTTP flow does
+  not have this problem.
+
+  "In effect immediately" is the part that has to happen on the peer, and it
+  is only true of the side that dials. Rebuilding `ca_bundle.crt` and clearing
+  the PEM cache is enough for the joiner, which reads its trust store as it
+  opens the connection. The *listening* side's trust store is bound when the
+  listener starts, and a rewritten file reaches it only when the distribution
+  PEM cache's validator fires — every `ssl_pem_cache_clean`, 120 s by default.
+  Anything that needs a rewritten anchor honoured on the accepting side has to
+  restart distribution instead; `activate_cluster_credentials!/2` does, and
+  `cluster_ca_rotate_tls_test.exs` documents the measurement.
+  """
+  @spec trust_cluster_ca_on!(cluster(), atom(), atom()) :: :ok
+  def trust_cluster_ca_on!(cluster, from_node_name, to_node_name) do
+    from_dir = tls_dir_of(cluster, from_node_name)
+    to_info = get_node!(cluster, to_node_name)
+    to_dir = tls_dir_of(cluster, to_node_name)
+
+    case PeerTLS.add_cluster_ca(from_dir, to_dir) do
+      :ok ->
+        :ok = :peer.call(to_info.peer, NeonFS.TLSDistConfig, :regenerate_ca_bundle, [to_dir])
+        :ok = :peer.call(to_info.peer, :ssl, :clear_pem_cache, [])
+        :ok
+
+      {:error, :no_cluster_ca} ->
+        raise ArgumentError,
+              "#{from_node_name} has no cluster CA at #{from_dir}/ca.crt — " <>
+                "initialise the cluster before granting #{to_node_name} its trust"
+    end
+  end
+
+  defp tls_dir_of(cluster, node_name) do
+    Path.join(get_node!(cluster, node_name).data_dir, "tls")
+  end
+
+  @doc """
+  Brings a joined peer's cluster credentials into effect.
+
+  The step `join_cluster_rpc/3` does not take, and the HTTP join does: rebuild
+  the trust bundle and `ssl_dist.conf` from what the join wrote, then restart
+  distribution so the node presents its cluster-signed certificate instead of
+  the one this harness minted. Without it a "TLS cluster" is peers
+  authenticating each other with harness certificates, which is not the shape
+  any real cluster is in — and an assertion about the cluster's own
+  certificates would be asserting about the harness's.
+
+  Restarting distribution drops this node's links, so the caller has to settle
+  the mesh again afterwards.
+  """
+  @spec activate_cluster_credentials!(cluster(), atom()) :: :ok
+  def activate_cluster_credentials!(cluster, node_name) do
+    node_info = get_node!(cluster, node_name)
+    tls_dir = tls_dir_of(cluster, node_name)
+
+    :ok = :peer.call(node_info.peer, NeonFS.TLSDistConfig, :regenerate, [tls_dir])
+    :ok = :peer.call(node_info.peer, NeonFS.TLSDistConfig, :restart_distribution, [])
+    :ok = :peer.call(node_info.peer, NeonFS.TLSDistConfig, :await_distribution, [10_000])
+
+    for other <- cluster.nodes, other.name != node_name do
+      :peer.call(node_info.peer, Node, :connect, [other.node])
+    end
+
+    :ok
+  end
+
+  @doc """
+  Waits out a `cluster init` that restarted its own node, and brings it back.
+
+  `NeonFS.Cluster.Init` finishes a TLS node's init with `:init.restart()`, so
+  the cluster's material takes effect on a clean boot rather than through a
+  distribution bounce. For a peer that means the VM survives — the
+  standard-I/O control channel is part of its boot arguments and re-establishes
+  itself — but everything the harness did *at runtime* does not:
+  `Application.put_env` state is discarded and applications started through
+  `start_peer/3` are not started again. A peer left in that state answers
+  `:peer.call` and has no NeonFS on it, which reads as a mysteriously empty
+  cluster several steps later.
+
+  So this waits for the restart to land (`:neonfs_core` gone), puts the
+  application environment back, starts the applications again, and waits for
+  Ra. The node comes back holding the cluster identity it wrote to disk before
+  restarting.
+
+  Only meaningful on a `dist: :tls` cluster — plain distribution has nothing to
+  reload and `Init` deliberately does not restart it, so this raises there
+  rather than waiting 30 s for a restart that will never happen.
+  """
+  @spec await_init_restart!(cluster(), atom(), keyword()) :: :ok
+  def await_init_restart!(cluster, node_name, opts \\ [])
+
+  def await_init_restart!(%{dist: :tls} = cluster, node_name, opts) do
+    timeout = Keyword.get(opts, :timeout, 30_000)
+    applications = Keyword.get(opts, :applications, [:neonfs_core])
+    node_info = get_node!(cluster, node_name)
+
+    :ok = await_app_stopped(node_info.peer, :neonfs_core, deadline_in(timeout), node_name)
+
+    span_apply_config(node_info.peer, node_info.node, node_app_config(cluster, node_name))
+    span_start_applications(node_info.peer, node_info.node, applications)
+    wait_for_ra_ready(node_info.peer)
+
+    :ok
+  end
+
+  def await_init_restart!(_cluster, node_name, _opts) do
+    raise ArgumentError,
+          "await_init_restart!/3 is only meaningful on a TLS cluster: " <>
+            "`cluster init` on #{node_name} restarts the node only when " <>
+            "distribution runs over TLS"
+  end
+
+  defp await_app_stopped(peer, app, deadline, node_name) do
+    cond do
+      not app_running?(peer, app) ->
+        :ok
+
+      System.monotonic_time(:millisecond) > deadline ->
+        raise "#{node_name} did not restart after cluster init: #{app} is still running"
+
+      true ->
+        Process.sleep(100)
+        await_app_stopped(peer, app, deadline, node_name)
+    end
+  end
+
+  defp app_running?(peer, app) do
+    case :peer.call(peer, :application, :which_applications, []) do
+      apps when is_list(apps) -> Enum.any?(apps, &match?({^app, _, _}, &1))
+      _ -> false
+    end
+  catch
+    # The control channel is briefly unusable while the VM re-runs its boot
+    # script. That is the restart happening, not a failure — but it is not
+    # yet a stopped application either, so keep waiting.
+    _kind, _reason -> true
+  end
+
+  defp deadline_in(timeout), do: System.monotonic_time(:millisecond) + timeout
 
   @doc """
   Connect all peer nodes to each other for Erlang distribution.
@@ -1046,26 +1199,43 @@ defmodule NeonFS.TestSupport.PeerCluster do
       wait_for_dist_port(node_info.dist_port)
     end
 
-    # Connect the controller to all peer nodes
+    connect_controller(cluster)
+    connect_peers_to_each_other(cluster)
+
+    :ok
+  end
+
+  # The controller runs plain distribution, so on a TLS cluster it has no
+  # handshake to offer the peers. Its RPCs go over the control channel
+  # instead (`dispatch_rpc/6`), which is why the mesh below is driven from
+  # each peer rather than from here.
+  defp connect_controller(%{dist: :tls}), do: :ok
+
+  defp connect_controller(cluster) do
     for node_info <- cluster.nodes do
       Node.connect(node_info.node)
     end
 
-    # Get all node atoms
+    :ok
+  end
+
+  defp connect_peers_to_each_other(cluster) do
     all_nodes = Enum.map(cluster.nodes, & &1.node)
 
-    refuse_on_tls!(cluster, "connect_nodes/1")
-
-    # Have each node connect to all other nodes
-    for node_info <- cluster.nodes do
-      other_nodes = Enum.reject(all_nodes, &(&1 == node_info.node))
-
-      for other_node <- other_nodes do
-        :rpc.call(node_info.node, Node, :connect, [other_node])
-      end
+    for node_info <- cluster.nodes,
+        other_node <- Enum.reject(all_nodes, &(&1 == node_info.node)) do
+      connect_peer_to(cluster, node_info, other_node)
     end
 
     :ok
+  end
+
+  defp connect_peer_to(%{dist: :tls}, node_info, other_node) do
+    :peer.call(node_info.peer, Node, :connect, [other_node])
+  end
+
+  defp connect_peer_to(_cluster, node_info, other_node) do
+    :rpc.call(node_info.node, Node, :connect, [other_node])
   end
 
   # Private helpers
@@ -1213,9 +1383,6 @@ defmodule NeonFS.TestSupport.PeerCluster do
   catch
     kind, reason -> %{reachable: false, error: inspect({kind, reason})}
   end
-
-  defp build_peer_opts(node_name, cookie, data_dir, dist_port),
-    do: build_peer_opts(node_name, cookie, data_dir, dist_port, :plain)
 
   defp build_peer_opts(node_name, cookie, data_dir, dist_port, dist) do
     code_paths = build_code_paths()
@@ -1521,14 +1688,25 @@ defmodule NeonFS.TestSupport.PeerCluster do
   defp build_restart_config(cluster, node_name) do
     peer_name = :"#{node_name}_#{cluster.id}"
     data_dir = Path.join(cluster.data_dir, Atom.to_string(node_name))
-    meta_dir = Path.join(data_dir, "meta")
-    ra_dir = Path.join(data_dir, "ra")
 
     # Reuse the same dist_port the node had before restart
     old_info = get_node!(cluster, node_name)
 
     {peer_opts, _dist_port} =
-      build_peer_opts(peer_name, cluster.cookie, data_dir, old_info.dist_port)
+      build_peer_opts(peer_name, cluster.cookie, data_dir, old_info.dist_port, cluster.dist)
+
+    {peer_opts, node_app_config(cluster, node_name)}
+  end
+
+  # The application environment a peer is (re-)started with. Split out of
+  # `build_restart_config/2` because a node that restarted itself needs the
+  # config without the peer options: its VM is still the one we are talking
+  # to, so there is nothing to spawn — only `Application.put_env` state to
+  # put back, which `:init.restart()` discards.
+  defp node_app_config(cluster, node_name) do
+    data_dir = Path.join(cluster.data_dir, Atom.to_string(node_name))
+    meta_dir = Path.join(data_dir, "meta")
+    ra_dir = Path.join(data_dir, "ra")
 
     core_config = [
       data_dir: data_dir,
@@ -1551,7 +1729,7 @@ defmodule NeonFS.TestSupport.PeerCluster do
         drives_fn -> Keyword.put(core_config, :drives, drives_fn.(node_name, data_dir))
       end
 
-    app_config = [
+    [
       logger: [level: :warning],
       neonfs_client: [
         tls_dir: Path.join(data_dir, "tls"),
@@ -1561,8 +1739,6 @@ defmodule NeonFS.TestSupport.PeerCluster do
       neonfs_core: core_config,
       ra: [data_dir: String.to_charlist(ra_dir)]
     ]
-
-    {peer_opts, app_config}
   end
 
   defp replace_node_info(cluster, node_name, peer, node) do

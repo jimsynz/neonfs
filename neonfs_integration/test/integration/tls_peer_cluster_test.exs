@@ -63,16 +63,31 @@ defmodule NeonFS.Integration.TLSPeerClusterTest do
     end
   end
 
-  # Naming the limit at the call site beats surfacing later as a mystery
-  # `:nodedown`: these probe distribution from the controller, which cannot
-  # complete a TLS peer's handshake at all.
-  test "helpers that probe distribution refuse rather than mislead", %{cluster: cluster} do
-    assert_raise ArgumentError, ~r/not supported on a TLS cluster/, fn ->
-      PeerCluster.visible_nodes(cluster, :node1)
-    end
+  # Asking the peer what *it* sees answers the same question from a vantage
+  # point that can answer it, so these no longer have to refuse. The
+  # controller's own view stays empty either way — it never joins the mesh.
+  test "helpers that probe distribution ask the peers instead", %{cluster: cluster} do
+    node1 = PeerCluster.get_node!(cluster, :node1).node
+    node2 = PeerCluster.get_node!(cluster, :node2).node
 
+    assert :ok = PeerCluster.connect_nodes(cluster)
+
+    # The peers see each other; the controller sees neither, because it never
+    # joins their mesh. Both halves matter: the first is the view the plain
+    # path gets from the controller, and the second is why it cannot.
+    assert node2 in PeerCluster.visible_nodes(cluster, :node1)
+    assert node1 in PeerCluster.visible_nodes(cluster, :node2)
+    refute node1 in Node.list()
+    refute node2 in Node.list()
+  end
+
+  # `restart_node/3` still refuses, and still has to: it respawns the VM and
+  # then wires it back into the mesh from the controller, which cannot
+  # complete a TLS peer's handshake. Naming the limit at the call site beats
+  # surfacing later as a mystery `:nodedown`.
+  test "restart_node/3 refuses rather than misleading", %{cluster: cluster} do
     assert_raise ArgumentError, ~r/not supported on a TLS cluster/, fn ->
-      PeerCluster.connect_nodes(cluster)
+      PeerCluster.restart_node(cluster, :node1)
     end
   end
 
