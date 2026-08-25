@@ -183,19 +183,25 @@ defmodule NeonFS.Core.ServiceRegistryTest do
       registry = Process.whereis(ServiceRegistry)
       for mod <- [Listener, PoolManager], do: Mimic.allow(mod, self(), registry)
 
-      ref =
-        :telemetry_test.attach_event_handlers(self(), [
-          [:neonfs, :service_registry, :self_registered],
-          [:neonfs, :service_registry, :self_registration_failed],
-          [:neonfs, :service_registry, :self_register_retry_scheduled]
-        ])
-
       listener = spawn(fn -> receive do: (:stop -> :ok) end)
       Process.register(listener, Listener)
       on_exit(fn -> Process.exit(listener, :kill) end)
 
       stub(Listener, :get_port, fn -> 4001 end)
       stub(PoolManager, :advertise_endpoint, fn port -> "127.0.0.1:#{port}" end)
+
+      # Let the registry's own endpoint chain finish before measuring
+      # anything. It boots before `Listener` is stubbed, so it is still
+      # ticking and waiting for an endpoint to exist; the moment one does it
+      # hands off to `self_register(state, 0)` — a second attempt-0 write,
+      # racing the one this test issues below. Both consume a stubbed
+      # failure, with no backoff between them, and the elapsed-time
+      # assertion at the end then falls under the slack. That is a ~1-in-20
+      # failure, and it is not the retry logic being wrong: `attempts > 3`
+      # still holds when it happens.
+      settle_ref = attach_self_registration_events()
+      assert :ok = await_self_registration!(settle_ref, "127.0.0.1:4001")
+      flush_telemetry(settle_ref)
 
       {:ok, attempts} = Agent.start_link(fn -> 0 end)
 
@@ -209,6 +215,8 @@ defmodule NeonFS.Core.ServiceRegistryTest do
         cmd, timeout ->
           Mimic.call_original(RaSupervisor, :command, [cmd, timeout])
       end)
+
+      ref = attach_self_registration_events()
 
       slack_ms = 1_000
       started_at = System.monotonic_time(:millisecond)
@@ -543,6 +551,14 @@ defmodule NeonFS.Core.ServiceRegistryTest do
   # plus slack and fail only once it has gone quiet for longer than that.
   # `register_service!/1` rides out the same deadline for an explicit
   # registration; this is the self-registration counterpart.
+  defp attach_self_registration_events do
+    :telemetry_test.attach_event_handlers(self(), [
+      [:neonfs, :service_registry, :self_registered],
+      [:neonfs, :service_registry, :self_registration_failed],
+      [:neonfs, :service_registry, :self_register_retry_scheduled]
+    ])
+  end
+
   defp await_self_registration!(ref, endpoint, slack_ms \\ @registration_quiet_ms) do
     do_await_self_registration!(ref, endpoint, slack_ms, slack_ms)
   end
