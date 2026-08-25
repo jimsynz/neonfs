@@ -103,6 +103,8 @@ This drives the rolling reissue in four phases:
 3. **Walk + reissue every node's cert.** For each node connected to the BEAM cluster, the orchestrator generates a fresh keypair, signs a node CSR against the *incoming* CA, and ships the new `node.crt` + `node.key` to that node via RPC. Atomic on-disk swap (temp-file + rename) means a crash mid-write leaves the existing cert intact.
 4. **Finalize.** Promotes the staged incoming CA to active in the system volume, then on every node replaces `ca.crt` with it, deletes `incoming-ca.crt` and rebuilds the bundle. After this step the old CA is no longer trusted anywhere; only the new CA is.
 
+Only the system-volume half of phase 4 is atomic, so `--finalize` is safe to re-run: a second invocation compares every node's anchor against the promoted CA and pushes it to the nodes that are behind. Re-running it against a cluster that is already consistent changes nothing and reports that there is no rotation in progress.
+
 By default, the orchestrator stops between phase 3 and phase 4 with the rotation in `pending-finalize` state and prints the grace-window duration. This gives the dual-CA bundle time to settle on every node before the old CA is dropped — important if a node is briefly unreachable during phase 2 and would otherwise come back to find its peers no longer trust its old cert.
 
 After the grace window passes, finalize the rotation:
@@ -122,7 +124,7 @@ neonfs cluster ca rotate --no-wait
 
 You can tune the documented grace window with `--grace-window-seconds N` (default `86400`, i.e. 24 hours). The flag affects the duration **printed** in the orchestrator's output; the operator is still the one who decides when to run `--finalize` based on the grace window having elapsed.
 
-Audit-log events are written on the orchestrator node for each phase: `cluster_ca_rotate_started`, `cluster_ca_rotate_node_completed` (one per node), `cluster_ca_rotate_finalized`, and `cluster_ca_rotate_failed` if any phase aborts. Inspect them via `neonfs cluster ca status` or by querying the audit log directly during a post-mortem.
+Audit-log events are written on the orchestrator node for each phase: `cluster_ca_rotate_started`, `cluster_ca_rotate_node_completed` (one per node), `cluster_ca_rotate_finalized`, `cluster_ca_rotate_finalize_resumed` if a re-run of `--finalize` reconciled nodes the first one missed, and `cluster_ca_rotate_failed` if any phase aborts. Inspect them via `neonfs cluster ca status` or by querying the audit log directly during a post-mortem.
 
 #### 3c. Verify post-rotation
 
@@ -131,7 +133,8 @@ After `--finalize` returns successfully:
 ```bash
 neonfs cluster ca info                       # new not_valid_after ≥ rotation window
 neonfs cluster ca list                       # every node's cert shows the new validity
-neonfs cluster ca rotate --status            # rotation_in_progress: false, no incoming CA
+neonfs cluster ca rotate --status            # rotation_in_progress: false, no incoming CA,
+                                             # every node in_sync
 neonfs cluster status                        # leader still elected, quorum healthy
 neonfs node status <each-node>               # service reports running, health checks pass
 ```
@@ -144,7 +147,9 @@ Adoption is not instantaneous, though. Both the rotated `ca_bundle.crt` and the 
 
 #### 4. If a node fails to rotate
 
-The orchestrator stops on the first failed node and writes a `cluster_ca_rotate_failed` audit event. The error message identifies the failed node and the failing RPC (`install_incoming_ca`, `install_node_cert`, or `promote_active_ca`). The staged incoming CA stays in place — partial progress is **not** rolled back.
+Phases 2 and 3 stop on the first failed node and write a `cluster_ca_rotate_failed` audit event. The error message identifies the failed node and the failing RPC (`install_incoming_ca` or `install_node_cert`). The staged incoming CA stays in place — partial progress is **not** rolled back.
+
+Phase 4 is the exception: promotion is attempted on every node regardless, and the error names all of the nodes that did not take the new anchor rather than the first. See [Resume an incomplete finalize](#resume-an-incomplete-finalize) below.
 
 Diagnose:
 
@@ -152,10 +157,21 @@ Diagnose:
 # On the failed node:
 sudo journalctl -u neonfs-core --since "10 minutes ago" | grep -iE "tls|cert|handshake"
 # On a working core node:
-neonfs cluster ca rotate --status     # confirms incoming CA is still staged
+neonfs cluster ca rotate --status     # confirms incoming CA is still staged, and
+                                      # lists every node's anchor state
 ```
 
-Two recovery paths depending on root cause:
+The `Nodes` section of `--status` is where a node that missed a phase shows up:
+
+| State | Meaning |
+|---|---|
+| `in_sync` | The node's `ca.crt` is the cluster's active CA and nothing is staged on it. |
+| `dual_ca` | A rotation is in progress and the node holds both anchors. Expected between phases 2 and 4. |
+| `rotation_incomplete` | A rotation is in progress but the node is not in the dual-CA shape — it missed phase 2. Retry it with `--node <name>`. |
+| `finalize_incomplete` | No rotation is in progress, but the node's anchor is not the cluster's active CA and/or it still holds a staged one. It missed phase 4. |
+| `unreachable` | The node did not answer. Nothing can be concluded about its anchors. |
+
+Three recovery paths depending on root cause:
 
 **Per-node retry** — when the failure was transient (the node was briefly unreachable, hit a disk-full error that's now resolved, etc.) and the rest of the cluster reissued cleanly:
 
@@ -173,6 +189,18 @@ neonfs cluster ca rotate              # starts again from phase 1
 ```
 
 `--abort` removes the staged incoming CA from the system volume *and* from every node's `incoming-ca.crt`, rebuilding each node's trust bundle without it; subsequent rotations start fresh. Nodes whose certificate was already reissued against the staged CA are left holding one that nothing now trusts, so run `--abort` before phase 3 where you can, and re-run the rotation promptly where you cannot.
+
+##### Resume an incomplete finalize
+
+**Re-run finalize** — when phase 4 promoted the CA but could not reach every node:
+
+```bash
+neonfs cluster ca rotate --finalize
+```
+
+This is the case `--node` cannot help with. Once the system volume has promoted there is no staged incoming CA left to reissue against, so `--node` refuses; and the nodes that missed the walk keep working, because the stale `incoming-ca.crt` they were left holding still trusts the promoted anchor. Nothing is broken and nothing says so — which is why `--status` lists per-node anchor state, and why a re-run is the recovery rather than editing files on the node.
+
+Re-running compares each node's anchor against the promoted CA and pushes it to whichever nodes are behind, writing a `cluster_ca_rotate_finalize_resumed` audit event naming them. It is safe against a node that already finalized: the promotion writes the same anchor, removes an `incoming-ca.crt` that is already gone, and rebuilds an identical bundle. Repeat until `--status` reports every node `in_sync`; a node that stays `unreachable` needs the [offline-node](#4a-offline-node-handling) path instead.
 
 #### 4a. Offline-node handling
 

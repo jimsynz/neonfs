@@ -232,6 +232,33 @@ defmodule NeonFS.TLSDistConfig do
   end
 
   @doc """
+  Reports which CA anchors this node currently holds on disk.
+
+  Read half of the rotation's write operations: `install_incoming_ca/2`,
+  `promote_active_ca/2` and `discard_incoming_ca/1` all change what this
+  returns. The orchestrator calls it on every node to tell a node that
+  finished a rotation from one that was unreachable partway through it —
+  a distinction nothing else exposes, because a node left holding a
+  stale `incoming-ca.crt` keeps working and so says nothing.
+
+  Fingerprints are `TLS.cert_fingerprint/1` over each anchor, or `nil`
+  where the file is absent or unreadable as a certificate. An
+  unreadable anchor reads as absent deliberately: for the caller's
+  purpose — does this node trust what the cluster says it should — a
+  corrupt anchor and a missing one have the same answer.
+  """
+  @spec local_ca_state(String.t()) ::
+          {:ok,
+           %{active_ca_fingerprint: String.t() | nil, incoming_ca_fingerprint: String.t() | nil}}
+  def local_ca_state(tls_dir \\ TLS.tls_dir()) do
+    {:ok,
+     %{
+       active_ca_fingerprint: anchor_fingerprint(Path.join(tls_dir, "ca.crt")),
+       incoming_ca_fingerprint: anchor_fingerprint(Path.join(tls_dir, "incoming-ca.crt"))
+     }}
+  end
+
+  @doc """
   Restarts Erlang's distribution subsystem in-process so a freshly written
   `ssl_dist.conf` takes effect without a full daemon restart.
 
@@ -383,6 +410,15 @@ defmodule NeonFS.TLSDistConfig do
     with :ok <- File.write(tmp, contents),
          :ok <- File.chmod(tmp, mode) do
       File.rename(tmp, path)
+    end
+  end
+
+  defp anchor_fingerprint(path) do
+    with {:ok, pem} <- File.read(path),
+         {:ok, cert} <- X509.Certificate.from_pem(pem) do
+      TLS.cert_fingerprint(cert)
+    else
+      _ -> nil
     end
   end
 

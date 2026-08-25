@@ -441,7 +441,9 @@ pub enum CaCommand {
         abort: bool,
 
         /// Promote the staged incoming CA to active. Drops the previous
-        /// active CA and invalidates every cert it signed.
+        /// active CA and invalidates every cert it signed. Safe to
+        /// re-run: a finalize that could not reach every node is
+        /// resumed by running it again.
         #[arg(long, conflicts_with_all = ["status", "stage", "abort", "node"])]
         finalize: bool,
 
@@ -2186,6 +2188,12 @@ fn term_to_json_value(term: &Term) -> Option<serde_json::Value> {
             let nested = term_to_map(term).ok()?;
             Some(rotate_response_to_json(&nested))
         }
+        Term::List(list) => Some(serde_json::Value::Array(
+            list.elements
+                .iter()
+                .filter_map(term_to_json_value)
+                .collect(),
+        )),
         _ => None,
     }
 }
@@ -2207,9 +2215,15 @@ fn print_rotate_table(mode_key: &str, map: &std::collections::HashMap<String, Te
             println!("✓ Aborted CA rotation; staged incoming CA discarded");
         }
         "finalize" => {
-            println!("✓ Finalised CA rotation");
-            print_field(map, "old_fingerprint", "Previous CA");
-            print_field(map, "fingerprint", "New active CA");
+            if map.contains_key("resumed") {
+                println!("✓ Resumed an incomplete finalize");
+                print_field(map, "fingerprint", "Active CA");
+                print_nodes_field(map, "reconciled_nodes", "Reconciled");
+            } else {
+                println!("✓ Finalised CA rotation");
+                print_field(map, "old_fingerprint", "Previous CA");
+                print_field(map, "fingerprint", "New active CA");
+            }
         }
         "status" => {
             let in_progress = map
@@ -2247,10 +2261,72 @@ fn print_rotate_table(mode_key: &str, map: &std::collections::HashMap<String, Te
                     print_field(&incoming, "valid_to", "  Valid to");
                 }
             }
+
+            print_node_ca_states(map);
         }
         _ => {
             // Fall through; should be unreachable.
         }
+    }
+}
+
+/// Per-node anchor state, so an operator can see which nodes a
+/// `--finalize` actually reached. A node it missed keeps working — it
+/// still trusts the promoted CA through the anchor it was left holding —
+/// so this listing is the only place that divergence shows up.
+fn print_node_ca_states(map: &std::collections::HashMap<String, Term>) {
+    let Some(nodes) = map.get("nodes").and_then(|t| term_to_list(t).ok()) else {
+        return;
+    };
+
+    if nodes.is_empty() {
+        return;
+    }
+
+    println!();
+    println!("Nodes");
+
+    for node_term in &nodes {
+        let Ok(node) = term_to_map(node_term) else {
+            continue;
+        };
+
+        let name = node
+            .get("node")
+            .and_then(|t| term_to_string(t).ok())
+            .unwrap_or_else(|| "?".to_string());
+
+        let state = node
+            .get("state")
+            .and_then(term_to_json_value)
+            .map(|v| match v {
+                serde_json::Value::String(s) => s,
+                other => other.to_string(),
+            })
+            .unwrap_or_else(|| "unknown".to_string());
+
+        let marker = if state == "in_sync" || state == "dual_ca" {
+            "✓"
+        } else {
+            "✗"
+        };
+
+        println!("  {} {}: {}", marker, name, state);
+    }
+}
+
+fn print_nodes_field(map: &std::collections::HashMap<String, Term>, key: &str, label: &str) {
+    let Some(nodes) = map.get(key).and_then(|t| term_to_list(t).ok()) else {
+        return;
+    };
+
+    let names: Vec<String> = nodes
+        .iter()
+        .filter_map(|t| term_to_string(t).ok())
+        .collect();
+
+    if !names.is_empty() {
+        println!("  {}: {}", label, names.join(", "));
     }
 }
 
