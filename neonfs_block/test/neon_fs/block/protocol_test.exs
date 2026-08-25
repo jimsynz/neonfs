@@ -158,6 +158,28 @@ defmodule NeonFS.Block.ProtocolTest do
       refute Protocol.rotational?(flags)
     end
 
+    # Without this the kernel refuses a second socket to the export — "server
+    # does not support multiple connections per device" — and a device is
+    # served by one serialised connection whatever the guest's queue depth.
+    # `WriteWindow` and `ConnectionHandler` are both written assuming several
+    # sockets share one device, so not advertising it made that design
+    # unreachable.
+    test "several connections to one export are permitted" do
+      assert <<0::16, _size::64, flags::16>> = Protocol.encode_info_export(@export)
+      assert Protocol.can_multi_conn?(flags), "NBD_FLAG_CAN_MULTI_CONN must be offered"
+      assert Bitwise.band(flags, 256) == 256
+    end
+
+    # The flag is a promise about coherence, and it holds because every
+    # connection goes through the device's one window rather than because each
+    # connection is careful. A read-only export keeps it trivially.
+    test "a read-only export still permits several connections" do
+      assert <<0::16, _size::64, flags::16>> =
+               Protocol.encode_info_export(%{@export | read_only: true})
+
+      assert Protocol.can_multi_conn?(flags)
+    end
+
     test "a read-only export says so" do
       assert <<0::16, _size::64, flags::16>> =
                Protocol.encode_info_export(%{@export | read_only: true})

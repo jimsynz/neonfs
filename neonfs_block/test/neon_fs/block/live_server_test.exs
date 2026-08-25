@@ -268,6 +268,33 @@ defmodule NeonFS.Block.LiveServerTest do
       assert Keyword.fetch!(opts, :telemetry_metadata) == %{export: @export}
     end
 
+    # `NBD_FLAG_CAN_MULTI_CONN` tells a client several sockets to one export
+    # are safe. The flag is a promise, and a promise nothing checks is how it
+    # stops being kept — so this asserts the half that is decidable here: a
+    # flush issued on one connection covers a write made on another. That the
+    # two share one window, which is what makes cross-connection reads
+    # coherent too, is asserted in `DeviceRegistryTest`; the read path is
+    # stubbed here and never reaches the window overlay.
+    test "a flush on one connection covers a write made on another", %{port: port} do
+      test = self()
+      stub_core(fn _module, function, args -> record(test, function, args) end)
+
+      a = connect(port)
+      {:ok, _export} = handshake(a, @export)
+      b = connect(port)
+      {:ok, _export} = handshake(b, @export)
+
+      :ok = :gen_tcp.send(a, request(@write, 1, 0, @block) <> :binary.copy(<<0xC3>>, @block))
+      assert {:ok, <<@simple_reply_magic::32, 0::32, 1::64>>} = :gen_tcp.recv(a, 16, 2_000)
+
+      # A guest filesystem's journal depends on this: it may issue the flush
+      # on whichever queue is free, not the one that carried the write.
+      :ok = :gen_tcp.send(b, request(@flush, 2, 0, 0))
+      assert {:ok, <<@simple_reply_magic::32, 0::32, 2::64>>} = :gen_tcp.recv(b, 16, 5_000)
+
+      assert_receive {:core_call, :commit_written, ["vol", "/dev.img", _extents, _opts]}, 5_000
+    end
+
     test "a write split across TCP segments is not acted on until it is whole", %{port: port} do
       test = self()
       stub_core(fn _module, function, args -> record(test, function, args) end)
