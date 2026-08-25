@@ -48,8 +48,8 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
   end
 
   describe "version/0" do
-    test "returns 23" do
-      assert MetadataStateMachine.version() == 23
+    test "returns 24" do
+      assert MetadataStateMachine.version() == 24
     end
   end
 
@@ -275,6 +275,21 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
                MetadataStateMachine.apply(%{}, {:machine_version, 22, 23}, base_state())
 
       assert migrated.redeemed_invites == %{}
+    end
+  end
+
+  describe "machine version 24" do
+    # Zero is the honest value for a registration written before the field
+    # existed: the node is discoverable but not dialable by a sibling until
+    # it re-registers, which every node does within one `Registrar` interval.
+    test "a stored registration gains a zero distribution port" do
+      stored = %{node: :n1@host, type: :core, status: :online, metadata: %{}}
+      old_state = Map.put(base_state(), :services, %{{:n1@host, :core} => stored})
+
+      assert {migrated, :ok, []} =
+               MetadataStateMachine.apply(%{}, {:machine_version, 23, 24}, old_state)
+
+      assert %{dist_port: 0} = migrated.services[{:n1@host, :core}]
     end
   end
 

@@ -60,24 +60,20 @@ defmodule NeonFS.Epmd do
   end
 
   @doc false
-  def names(_hostname) do
-    local =
-      case read_dist_port_env() do
-        {:ok, port} ->
-          case :os.getenv(~c"RELEASE_NODE") do
-            false -> []
-            node_name -> [{short_name(List.to_string(node_name)), port}]
-          end
+  # `erl_epmd:names/1`'s contract is the names registered *at the given host*,
+  # each as a short name — `{"arne", 40262}`, not `{"arne@dunn", 40262}`. The
+  # sources here all know `name@host`, so the host is the filter and the short
+  # name is what comes out. Discarding the host instead, as this used to,
+  # answered for peers on other machines and collided two nodes that shared a
+  # name part.
+  def names(hostname) do
+    host = stringify(hostname)
 
-        :error ->
-          []
-      end
-
-    entries =
-      (local ++ peers_from_env() ++ peers_from_cluster_state())
-      |> Enum.uniq_by(fn {name, _port} -> name end)
-
-    {:ok, entries}
+    (local_name() ++ peers_from_env() ++ peers_from_cluster_state())
+    |> Enum.filter(fn {_name, entry_host, _port} -> entry_host == host end)
+    |> Enum.map(fn {name, _host, port} -> {String.to_charlist(name), port} end)
+    |> Enum.uniq_by(fn {name, _port} -> name end)
+    |> then(&{:ok, &1})
   end
 
   # --- Private helpers ---
@@ -122,6 +118,16 @@ defmodule NeonFS.Epmd do
     end)
   end
 
+  defp local_name do
+    with {:ok, port} <- read_dist_port_env(),
+         node_name when is_list(node_name) <- :os.getenv(~c"RELEASE_NODE") do
+      {name, host} = split_node(List.to_string(node_name))
+      [{name, host, port}]
+    else
+      _ -> []
+    end
+  end
+
   defp peers_from_env do
     case :os.getenv(~c"NEONFS_PEER_PORTS") do
       false -> []
@@ -134,7 +140,7 @@ defmodule NeonFS.Epmd do
     |> String.split(",", trim: true)
     |> Enum.flat_map(fn entry ->
       case parse_peer_entry(entry) do
-        {name, port} -> [{short_name(name), port}]
+        {full_name, port} -> [named_entry(full_name, port)]
         _ -> []
       end
     end)
@@ -199,7 +205,7 @@ defmodule NeonFS.Epmd do
           case data do
             %{"this_node" => %{"name" => name, "dist_port" => port}}
             when is_integer(port) and port > 0 ->
-              [{short_name(name), port}]
+              [named_entry(name, port)]
 
             _ ->
               []
@@ -210,7 +216,7 @@ defmodule NeonFS.Epmd do
             %{"known_peers" => peers} when is_list(peers) ->
               Enum.flat_map(peers, fn
                 %{"name" => name, "dist_port" => port} when is_integer(port) and port > 0 ->
-                  [{short_name(name), port}]
+                  [named_entry(name, port)]
 
                 _ ->
                   []
@@ -283,10 +289,15 @@ defmodule NeonFS.Epmd do
     end
   end
 
-  defp short_name(full_name) do
+  defp named_entry(full_name, port) do
+    {name, host} = split_node(full_name)
+    {name, host, port}
+  end
+
+  defp split_node(full_name) do
     case String.split(full_name, "@", parts: 2) do
-      [short | _] -> String.to_charlist(short)
-      _ -> String.to_charlist(full_name)
+      [name, host] -> {name, host}
+      [name] -> {name, ""}
     end
   end
 

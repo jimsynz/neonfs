@@ -1097,6 +1097,23 @@ defmodule NeonFS.Core.MetadataStateMachine do
     {Map.put(state, :redeemed_invites, counted), :ok, []}
   end
 
+  def apply(_meta, {:machine_version, 23, 24}, state) do
+    require Logger
+
+    Logger.info("Ra machine version upgrade",
+      from: 23,
+      to: 24,
+      change: "service registrations carry the node's distribution port"
+    )
+
+    # Round-tripping through `ServiceInfo` materialises the new field at its
+    # default rather than leaving readers to infer it. A stored registration
+    # predates the port, so zero is the honest value: the node is discoverable
+    # but not dialable by a sibling until it re-registers, which every node
+    # does within one `Registrar` interval.
+    {%{state | services: migrate_services(state.services)}, :ok, []}
+  end
+
   def apply(_meta, {:machine_version, from_version, to_version}, state) do
     require Logger
     Logger.info("Ra machine version upgrade", from: from_version, to: to_version)
@@ -2627,7 +2644,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
   Return the state machine version for upgrade/migration support.
   """
   @impl :ra_machine
-  def version, do: 23
+  def version, do: 24
 
   @doc """
   Return the module to handle a specific state machine version.

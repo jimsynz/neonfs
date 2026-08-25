@@ -210,9 +210,7 @@ defmodule NeonFS.Cluster.Init do
     if port > 0 do
       endpoint = PoolManager.advertise_endpoint(port)
       this_node = Node.self()
-
-      info =
-        ServiceInfo.new(this_node, :core, metadata: %{data_endpoint: endpoint})
+      info = ServiceInfo.for_self(:core, metadata: %{data_endpoint: endpoint})
 
       for node <- ServiceRegistry.connected_nodes_by_type(:core) do
         try do

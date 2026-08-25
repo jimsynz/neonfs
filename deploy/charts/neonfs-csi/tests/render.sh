@@ -11,16 +11,53 @@ fixture="$here/default-values.yaml"
 mode="${1:-check}"
 
 # `coreNode` is required, and `bootstrap.uses` is required alongside the token
-# this snapshot sets. The chart refuses to render without them rather than
+# this snapshot sets. The distribution ports are required too — a peer has to
+# learn them rather than ask, so a driver installed without them attaches
+# nothing. The chart refuses to render without any of these rather than
 # producing pods that come up and never reach the cluster, so the snapshot has
-# to supply both.
+# to supply them all. 9101/9102 is the rig's convention.
 render() {
   helm template release "$chart_dir" \
     --namespace neonfs-csi \
     --set coreNode=neonfs_core@neonfs-core.example \
     --set bootstrap.uses=3 \
     --set bootstrap.value=test-bootstrap-token-redacted \
+    --set controller.distPort=9101 \
+    --set node.distPort=9102 \
     "$@"
+}
+
+# Rendering without a distribution port has to *fail*, and name the value.
+# There is no safe default: both workloads are `hostNetwork: true`, so this is
+# a host port the chart cannot pick. A default would install a driver that
+# looks configured and then cannot attach a block volume, which is the failure
+# this requirement exists to convert into a render error.
+check_dist_ports_required() {
+  local without_controller without_node
+
+  without_controller="$(helm template release "$chart_dir" \
+    --namespace neonfs-csi \
+    --set coreNode=neonfs_core@neonfs-core.example \
+    --set bootstrap.uses=3 \
+    --set bootstrap.value=test-bootstrap-token-redacted \
+    --set node.distPort=9102 2>&1 || true)"
+
+  if ! grep -q 'controller.distPort is required' <<<"$without_controller"; then
+    echo "rendering without controller.distPort did not fail naming the value" >&2
+    return 1
+  fi
+
+  without_node="$(helm template release "$chart_dir" \
+    --namespace neonfs-csi \
+    --set coreNode=neonfs_core@neonfs-core.example \
+    --set bootstrap.uses=3 \
+    --set bootstrap.value=test-bootstrap-token-redacted \
+    --set controller.distPort=9101 2>&1 || true)"
+
+  if ! grep -q 'node.distPort is required' <<<"$without_node"; then
+    echo "rendering without node.distPort did not fail naming the value" >&2
+    return 1
+  fi
 }
 
 # `node.hostDevices` is the one value whose *absence* from the default render is
@@ -88,6 +125,7 @@ case "$mode" in
     }
     check_host_devices
     check_resizer
+    check_dist_ports_required
     ;;
   update)
     render > "$fixture"

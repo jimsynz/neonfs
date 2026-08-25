@@ -58,8 +58,11 @@ defmodule NeonFS.Core.RaTest do
       assert result == :ok
     end
 
-    test "version/0 returns state machine version" do
-      assert MetadataStateMachine.version() == 23
+    # The *value* is asserted once, in `metadata_state_machine_test.exs`.
+    # This block is about the Ra callback surface, and a second copy of the
+    # literal only means every version bump has two places to remember.
+    test "version/0 returns a state machine version" do
+      assert is_integer(MetadataStateMachine.version())
     end
 
     test "which_module/1 returns correct module" do

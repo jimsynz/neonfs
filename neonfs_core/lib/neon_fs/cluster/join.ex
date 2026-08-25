@@ -204,7 +204,7 @@ defmodule NeonFS.Cluster.Join do
            add_peer_to_state(state, joining_node, type, dist_port),
          :ok <- State.save(updated_state),
          :ok <- maybe_add_to_ra_cluster(joining_node, type) do
-      register_service(joining_node, type, data_endpoint)
+      register_service(joining_node, type, data_endpoint, dist_port)
       maybe_adjust_system_volume_replication(updated_state, type)
       propagate_new_peer(state, joining_node, joiner_peer, type)
 
@@ -284,9 +284,7 @@ defmodule NeonFS.Cluster.Join do
     if port > 0 do
       endpoint = PoolManager.advertise_endpoint(port)
       this_node = Node.self()
-
-      info =
-        ServiceInfo.new(this_node, :core, metadata: %{data_endpoint: endpoint})
+      info = ServiceInfo.for_self(:core, metadata: %{data_endpoint: endpoint})
 
       for node <- ServiceRegistry.connected_nodes_by_type(:core) do
         try do
@@ -461,7 +459,11 @@ defmodule NeonFS.Cluster.Join do
     end
   end
 
-  defp register_service(joining_node, type, data_endpoint) do
+  # The one registration that is not about this node, so the one that cannot
+  # use `ServiceInfo.for_self/2`: the joining node's distribution port comes
+  # from its join request, and using the local one would publish this node's
+  # port under the joiner's name.
+  defp register_service(joining_node, type, data_endpoint, dist_port) do
     metadata =
       if data_endpoint do
         %{data_endpoint: data_endpoint}
@@ -469,7 +471,7 @@ defmodule NeonFS.Cluster.Join do
         %{}
       end
 
-    info = ServiceInfo.new(joining_node, type, metadata: metadata)
+    info = ServiceInfo.new(joining_node, type, metadata: metadata, dist_port: dist_port)
 
     case ServiceRegistry.register(info) do
       :ok ->

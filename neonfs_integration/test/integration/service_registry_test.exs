@@ -19,7 +19,7 @@ defmodule NeonFS.Integration.ServiceRegistryTest do
   """
   use NeonFS.TestSupport.ClusterCase, async: false
 
-  alias NeonFS.Client.ServiceInfo
+  alias NeonFS.Client.{Discovery, PeerPorts, ServiceInfo}
   alias NeonFS.Core.ServiceRegistry
 
   @moduletag timeout: 180_000
@@ -30,6 +30,49 @@ defmodule NeonFS.Integration.ServiceRegistryTest do
   setup_all %{cluster: cluster} do
     :ok = init_multi_node_cluster(cluster, name: "service-registry-test")
     %{}
+  end
+
+  # `NeonFS.Epmd` replaces EPMD, so a node dialling a peer has to have been
+  # told that peer's distribution port. Core's port reaches an interface node
+  # through `cluster.json`; a *sibling interface node's* port had no source at
+  # all, which is why a CSI controller could not `erpc` its own node plugin.
+  # The registry is now that source, and this is the chain end to end:
+  # registration carries the port, Ra stores it, `Discovery` publishes it into
+  # `NEONFS_PEER_PORTS`.
+  describe "distribution ports reach siblings" do
+    test "a registration carries the registering node's distribution port", %{cluster: cluster} do
+      node2 = PeerCluster.get_node!(cluster, :node2).node
+
+      registered =
+        cluster
+        |> PeerCluster.rpc(:node1, ServiceRegistry, :list, [])
+        |> Enum.map(&ServiceInfo.from_map/1)
+        |> Enum.find(&(&1.node == node2))
+
+      assert registered, "node2 has not registered"
+
+      assert registered.dist_port == PeerCluster.get_node!(cluster, :node2).dist_port,
+             "the registration does not carry node2's distribution port"
+    end
+
+    # Cleared first, because the harness seeds every peer's port up front —
+    # which is exactly why this bug survived to be found on a k3s rig. What
+    # is being asserted is that `Discovery` can rebuild the entry from the
+    # registry alone.
+    test "Discovery republishes a sibling's port after it is cleared", %{cluster: cluster} do
+      node1 = PeerCluster.get_node!(cluster, :node1).node
+      node1_port = PeerCluster.get_node!(cluster, :node1).dist_port
+
+      :ok = PeerCluster.rpc(cluster, :node2, PeerPorts, :reset, [])
+      assert PeerCluster.rpc(cluster, :node2, PeerPorts, :current, []) == %{}
+
+      :ok = PeerCluster.rpc(cluster, :node2, Discovery, :refresh, [])
+
+      assert_eventually timeout: 10_000 do
+        PeerCluster.rpc(cluster, :node2, PeerPorts, :current, [])
+        |> Map.get(Atom.to_string(node1)) == node1_port
+      end
+    end
   end
 
   describe "cross-node visibility" do
