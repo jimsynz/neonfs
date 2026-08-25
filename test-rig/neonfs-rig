@@ -319,6 +319,11 @@ cmd_bench_write_window() {
   BLOCK_VOL="${BENCH_WW_VOL:-bench_block}"
   BLOCK_MIB="${BENCH_WW_VOL_MIB:-1024}"
   BLOCK_MNT="/mnt/${BLOCK_VOL}-blk"
+  # Several sockets, because one is not a queue: the server advertises
+  # CAN_MULTI_CONN and blk-mq only issues in parallel when the client opened
+  # more than one. A single-connection attach serialises every write and the
+  # window has nothing concurrent to fold.
+  BLOCK_CONNECTIONS="${BENCH_WW_CONNECTIONS:-4}"
   BLOCK_SIZE="${BLOCK_MIB}M"
   BLOCK_BYTES=$(( BLOCK_MIB * 1024 * 1024 ))
 

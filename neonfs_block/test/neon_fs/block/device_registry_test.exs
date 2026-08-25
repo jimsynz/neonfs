@@ -127,6 +127,26 @@ defmodule NeonFS.Block.DeviceRegistryTest do
       refute_receive {:coordinator_call, :claim_path_for, _args}
     end
 
+    # `NBD_FLAG_CAN_MULTI_CONN` promises a client that a read on one socket
+    # sees a write on another and that a flush covers both. What makes that
+    # true is this: the window is the *device's*, so every connection buffers
+    # into and reads out of the same one. A window started per attach would
+    # let two sockets hold different views of one extent and lose whichever
+    # drained first.
+    test "several connections to one export share one write window", %{registry: registry} do
+      stub_core()
+      stub_coordinator({:ok, "claim-1"})
+
+      second = spawn(fn -> receive do: (:stop -> :ok) end)
+      on_exit(fn -> Process.exit(second, :kill) end)
+
+      assert {:ok, first_device} = DeviceRegistry.attach("blockvol:/dev.img", self(), registry)
+      assert {:ok, second_device} = DeviceRegistry.attach("blockvol:/dev.img", second, registry)
+
+      assert is_pid(first_device.window)
+      assert first_device.window == second_device.window
+    end
+
     test "is released when the last connection detaches", %{registry: registry} do
       stub_core()
       stub_coordinator({:ok, "claim-1"})

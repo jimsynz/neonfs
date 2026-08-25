@@ -69,6 +69,7 @@ defmodule NeonFS.Block.Protocol do
   @flag_rotational 16
   @flag_send_trim 32
   @flag_send_write_zeroes 64
+  @flag_can_multi_conn 256
 
   @options %{
     1 => :export_name,
@@ -329,15 +330,49 @@ defmodule NeonFS.Block.Protocol do
   device that cannot be flushed is one a filesystem cannot safely use. TRIM and
   WRITE_ZEROES are offered because zeroing is cheap on a content-addressed
   store. `NBD_FLAG_ROTATIONAL` is never set.
+
+  ## `NBD_FLAG_CAN_MULTI_CONN`
+
+  Without it the kernel refuses a second socket to an export — *"server does
+  not support multiple connections per device"* — and a device is served by
+  one serialised connection however many threads the guest has. That is where
+  blk-mq's parallelism was going, and both
+  `NeonFS.Block.ConnectionHandler` and `NeonFS.Block.WriteWindow` are written
+  on the assumption that several sockets share one device.
+
+  The flag is a promise about coherence, so it is offered because the
+  structure keeps it rather than because it is convenient:
+
+    * **One window per device, shared.** `NeonFS.Block.DeviceRegistry`'s
+      attach hands a second connection the *same* `device` — window pid
+      included — and only notes another holder; it opens and claims once.
+    * **A read sees another connection's un-drained write.**
+      `Device.read/3` overlays `WriteWindow.buffered/2` onto what it fetched,
+      and that window is the device's, not the connection's.
+    * **A flush covers every connection's writes.** `Device.flush/1` drains
+      `device.window`, the shared one, before the backing store's own
+      barrier.
+
+  So the three things a client is entitled to assume — cross-connection
+  read-after-write, a flush that is not per-socket, and one durability
+  domain — hold because the per-device window is what every connection goes
+  through, not because each connection is careful.
   """
   @spec transmission_flags(export()) :: non_neg_integer()
   def transmission_flags(export) do
     base =
       @flag_has_flags ||| @flag_send_flush ||| @flag_send_fua ||| @flag_send_trim |||
-        @flag_send_write_zeroes
+        @flag_send_write_zeroes ||| @flag_can_multi_conn
 
     if export.read_only, do: base ||| @flag_read_only, else: base
   end
+
+  @doc """
+  Whether these flags permit a client to open several connections to the
+  export. Here so a test asserts the promise by name rather than by bit.
+  """
+  @spec can_multi_conn?(non_neg_integer()) :: boolean()
+  def can_multi_conn?(flags), do: (flags &&& @flag_can_multi_conn) != 0
 
   @doc """
   Whether these flags mark a rotational device — always false, and here so the

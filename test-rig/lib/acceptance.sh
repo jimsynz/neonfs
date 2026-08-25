@@ -442,16 +442,20 @@ s_block_attach() {
     || node_ssh 1 "sudo timeout ${BLOCK_CREATE_TIMEOUT} neonfs volume create ${BLOCK_VOL} --type block --size ${BLOCK_SIZE} --replicas 1" 2>&1 | grep -qi 'created successfully' \
     || { echo "  volume create --type block failed" >&2; return 1; }
 
-  node_ssh 1 "sudo bash -s ${BLOCK_VOL} ${BLOCK_DEV} ${BLOCK_BYTES}" 2>&1 <<'REMOTE' | sed 's/^/  /' >&2
+  # `BLOCK_CONNECTIONS` is unset by default, which is one socket — the shape
+  # the acceptance matrix has always run. The server advertises
+  # `NBD_FLAG_CAN_MULTI_CONN`, so a caller that wants blk-mq's parallelism
+  # (the bench does) can ask for several.
+  node_ssh 1 "sudo bash -s ${BLOCK_VOL} ${BLOCK_DEV} ${BLOCK_BYTES} ${BLOCK_CONNECTIONS:-}" 2>&1 <<'REMOTE' | sed 's/^/  /' >&2
 set -e
-VOL="$1"; DEV="$2"; BYTES="$3"
+VOL="$1"; DEV="$2"; BYTES="$3"; CONNS="$4"
 
 nbd-client -d "${DEV}" >/dev/null 2>&1 || true
 # `-b 4096` is not decoration: nbd-client defaults to 512 regardless of the
 # NBD_INFO_BLOCK_SIZE the server advertises, and the backing store refuses a
 # request that is not 4 KiB-aligned — so a 512-block attachment breaks on the
 # first sub-4K IO the kernel decides to issue.
-nbd-client -N "${VOL}" 127.0.0.1 10809 "${DEV}" -b 4096 -persist -timeout 60
+nbd-client -N "${VOL}" 127.0.0.1 10809 "${DEV}" -b 4096 -persist -timeout 60 ${CONNS:+-connections ${CONNS}}
 
 for _ in $(seq 1 30); do [ "$(blockdev --getsize64 "${DEV}" 2>/dev/null || echo 0)" != 0 ] && break; sleep 1; done
 
