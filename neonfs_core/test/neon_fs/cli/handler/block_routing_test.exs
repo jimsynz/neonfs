@@ -236,8 +236,14 @@ defmodule NeonFS.CLI.Handler.BlockRoutingTest do
 
       assert node.frontends == [:nbd]
       assert node.ublk_unavailable =~ "may not open it"
-      assert node.ublk_unavailable =~ "grant the daemon's user access"
       refute node.ublk_unavailable =~ "modprobe"
+
+      # Names the standalone target, not a permission to widen. Telling an
+      # operator to grant the omnibus daemon access would make the attach
+      # work and leave it sharing the host's mount namespace, which is the
+      # arrangement a ublk daemon must not be in.
+      assert node.ublk_unavailable =~ "neonfs-block"
+      refute node.ublk_unavailable =~ "grant the daemon's user access"
     end
 
     test "reports both frontends and no reason when ublk works" do

@@ -266,7 +266,7 @@ jobs:
           # is left empty (which is how `neonfs_blob.so` ended up missing
           # from `neonfs_core-0.2.3/priv/native/` in the omnibus deb, #746).
           # Wipe `_build/prod/rel/` before every release.
-          for component in neonfs_core neonfs_fuse neonfs_nfs neonfs_s3 neonfs_webdav neonfs_docker neonfs_containerd neonfs_cifs neonfs_omnibus; do
+          for component in neonfs_core neonfs_fuse neonfs_nfs neonfs_s3 neonfs_webdav neonfs_docker neonfs_containerd neonfs_cifs neonfs_block neonfs_omnibus; do
             cd "$component"
             mix deps.get --only prod
             MIX_ENV=prod mix compile
@@ -287,7 +287,7 @@ jobs:
           OUT_DIR="$FORGEJO_WORKSPACE/dist" bash packaging/build-vfs-deb.sh
 
           cd packaging/nfpm
-          for config in neonfs-cli neonfs-common neonfs-core neonfs-fuse neonfs-nfs neonfs-s3 neonfs-webdav neonfs-docker neonfs-containerd neonfs-cifs neonfs-omnibus; do
+          for config in neonfs-cli neonfs-common neonfs-core neonfs-fuse neonfs-nfs neonfs-s3 neonfs-webdav neonfs-docker neonfs-containerd neonfs-cifs neonfs-block neonfs-omnibus; do
             envsubst < "${config}.yaml" > ".generated-${config}.yaml"
             nfpm package --config ".generated-${config}.yaml" --packager deb --target "$FORGEJO_WORKSPACE/dist/"
             rm -f ".generated-${config}.yaml"
@@ -381,7 +381,7 @@ jobs:
           # is left empty (which is how `neonfs_blob.so` ended up missing
           # from `neonfs_core-0.2.3/priv/native/` in the omnibus deb, #746).
           # Wipe `_build/prod/rel/` before every release.
-          for component in neonfs_core neonfs_fuse neonfs_nfs neonfs_s3 neonfs_webdav neonfs_docker neonfs_containerd neonfs_cifs neonfs_omnibus; do
+          for component in neonfs_core neonfs_fuse neonfs_nfs neonfs_s3 neonfs_webdav neonfs_docker neonfs_containerd neonfs_cifs neonfs_block neonfs_omnibus; do
             cd "$component"
             mix deps.get --only prod
             MIX_ENV=prod mix compile
@@ -402,7 +402,7 @@ jobs:
           OUT_DIR="$FORGEJO_WORKSPACE/dist" bash packaging/build-vfs-deb.sh
 
           cd packaging/nfpm
-          for config in neonfs-cli neonfs-common neonfs-core neonfs-fuse neonfs-nfs neonfs-s3 neonfs-webdav neonfs-docker neonfs-containerd neonfs-cifs neonfs-omnibus; do
+          for config in neonfs-cli neonfs-common neonfs-core neonfs-fuse neonfs-nfs neonfs-s3 neonfs-webdav neonfs-docker neonfs-containerd neonfs-cifs neonfs-block neonfs-omnibus; do
             envsubst < "${config}.yaml" > ".generated-${config}.yaml"
             nfpm package --config ".generated-${config}.yaml" --packager deb --target "$FORGEJO_WORKSPACE/dist/"
             rm -f ".generated-${config}.yaml"
