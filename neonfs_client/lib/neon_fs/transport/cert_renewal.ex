@@ -13,6 +13,19 @@ defmodule NeonFS.Transport.CertRenewal do
   `neonfs_client` gets it exactly once — including omnibus, where they share a
   BEAM node. A node that holds no certificate is a daily no-op.
 
+  ## Renewal takes effect without a restart
+
+  Writing the renewed pair is all a renewal does, and all it needs to do.
+  `ssl_dist.conf` names `node.crt` / `node.key` by path and the paths do not
+  change, so the running distribution listener presents the renewed
+  certificate on its next handshake once the distribution PEM cache notices
+  the mtime moved — bounded by `ssl_pem_cache_clean`, 120 s by default. See
+  `NeonFS.TLSDistConfig.install_node_cert/3`.
+
+  That matters because the alternative would be worse than the problem:
+  `NeonFS.TLSDistConfig.restart_distribution/1` drops every peer connection
+  the node holds, and renewal runs unattended on a live node.
+
   ## When renewal cannot happen
 
   An expired certificate cannot be renewed. Distribution verifies peers at the

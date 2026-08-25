@@ -2056,6 +2056,15 @@ defmodule NeonFS.CLI.HandlerTest do
     end
 
     test "discards the staged incoming CA and emits an audit event" do
+      Application.put_env(:neonfs_core, :ca_rotate_rpc_mod, NeonFS.CLI.HandlerTest.RPCStub)
+
+      start_supervised!(%{
+        id: :ca_rotate_rpc_calls,
+        start: {Agent, :start_link, [fn -> [] end, [name: :ca_rotate_rpc_calls]]}
+      })
+
+      on_exit(fn -> Application.delete_env(:neonfs_core, :ca_rotate_rpc_mod) end)
+
       # Stage an incoming CA so abort has something to clear.
       {:ok, _ca_cert, _ca_key} = CertificateAuthority.init_incoming_ca("rotated-cluster")
       assert {:ok, _info} = CertificateAuthority.incoming_ca_info()
@@ -2063,6 +2072,10 @@ defmodule NeonFS.CLI.HandlerTest do
       assert {:ok, %{aborted: true}} = Handler.handle_ca_rotate(%{"abort" => true})
 
       assert {:error, :no_incoming_ca} = CertificateAuthority.incoming_ca_info()
+
+      # Discarding it from the system volume is half the job: a node that
+      # keeps the staged anchor goes on trusting a CA the cluster threw away.
+      assert recorded_ca_rotate_funs() == [:discard_incoming_ca]
 
       :ok = AuditLog.flush()
       events = AuditLog.recent(10)
@@ -2073,11 +2086,11 @@ defmodule NeonFS.CLI.HandlerTest do
     end
 
     test "default mode + --no-wait runs orchestrator end-to-end" do
-      # Stub the RPC layer — the orchestrator dispatches `install_node_cert`,
-      # `regenerate_ca_bundle`, and `reload_listener` to every node in the
-      # BEAM cluster. In a unit test the cluster is a single node (self),
-      # so a stub that records calls and returns `:ok` is enough to drive
-      # the full path.
+      # Stub the RPC layer — the orchestrator dispatches
+      # `install_incoming_ca`, `install_node_cert` and `promote_active_ca`
+      # to every node in the BEAM cluster. In a unit test the cluster is a
+      # single node (self), so a stub that records calls and returns `:ok`
+      # is enough to drive the full path.
       stub_mod = NeonFS.CLI.HandlerTest.RPCStub
 
       Application.put_env(:neonfs_core, :ca_rotate_rpc_mod, stub_mod)
@@ -2100,13 +2113,13 @@ defmodule NeonFS.CLI.HandlerTest do
       # one — finalize swapped incoming → active.
       assert result.fingerprint != result.old_fingerprint
 
-      # The orchestrator should have RPC'd `install_node_cert` +
-      # `regenerate_ca_bundle` + `reload_listener` against `Node.self()`.
-      calls = Agent.get(:ca_rotate_rpc_calls, & &1)
-      called_funs = calls |> Enum.map(fn {_node, _mod, fun, _args} -> fun end) |> Enum.uniq()
-      assert :install_node_cert in called_funs
-      assert :regenerate_ca_bundle in called_funs
-      assert :reload_listener in called_funs
+      # The orchestrator should have RPC'd the anchor, the certificate and
+      # the promotion against `Node.self()` — in that order, because a
+      # certificate that lands before the CA that signed it is one no peer
+      # can validate.
+      called_funs = recorded_ca_rotate_funs()
+
+      assert called_funs == [:install_incoming_ca, :install_node_cert, :promote_active_ca]
 
       # Audit-log trail: started + node_completed + finalized.
       :ok = AuditLog.flush()
@@ -2171,15 +2184,12 @@ defmodule NeonFS.CLI.HandlerTest do
       assert {:ok, %{node: "node1@host", reissued: true}} =
                Handler.handle_ca_rotate(%{"node" => "node1@host"})
 
-      # Retry path: `install_node_cert` + bundle for that one node only.
+      # Retry path: the staged anchor + a fresh cert for that one node only.
       calls = Agent.get(:ca_rotate_rpc_calls, & &1)
       retried_nodes = calls |> Enum.map(fn {node, _, _, _} -> node end) |> Enum.uniq()
       assert retried_nodes == [:node1@host]
 
-      called_funs = calls |> Enum.map(fn {_node, _mod, fun, _args} -> fun end) |> Enum.uniq()
-      assert :install_node_cert in called_funs
-      assert :regenerate_ca_bundle in called_funs
-      assert :reload_listener in called_funs
+      assert recorded_ca_rotate_funs() == [:install_incoming_ca, :install_node_cert]
     end
 
     test "--node <name> with no rotation staged returns a clear error" do
@@ -2400,6 +2410,16 @@ defmodule NeonFS.CLI.HandlerTest do
 
       assert msg =~ "Cluster not initialised"
     end
+  end
+
+  # The stub prepends, so the recorded list is newest-first; the order the
+  # orchestrator dispatched in is what the assertions are about.
+  defp recorded_ca_rotate_funs do
+    :ca_rotate_rpc_calls
+    |> Agent.get(& &1)
+    |> Enum.reverse()
+    |> Enum.map(fn {_node, _mod, fun, _args} -> fun end)
+    |> Enum.uniq()
   end
 
   defp register_extra_drive(id) do

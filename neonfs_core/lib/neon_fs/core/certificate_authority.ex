@@ -66,6 +66,20 @@ defmodule NeonFS.Core.CertificateAuthority do
   end
 
   @doc """
+  Returns the active cluster CA certificate as PEM.
+  """
+  @spec active_ca_pem() :: {:ok, TLS.pem()} | {:error, term()}
+  def active_ca_pem, do: SystemVolume.read(@active_cert_path)
+
+  @doc """
+  Returns the staged incoming CA certificate as PEM.
+
+  Returns `{:error, :no_incoming_ca}` when no rotation is staged.
+  """
+  @spec incoming_ca_pem() :: {:ok, TLS.pem()} | {:error, :no_incoming_ca | term()}
+  def incoming_ca_pem, do: read_incoming(@incoming_cert_path)
+
+  @doc """
   Aborts a staged CA rotation by discarding the incoming CA.
 
   Removes every file under `_system/tls/incoming/`. Idempotent — returns

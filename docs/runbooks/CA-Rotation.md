@@ -85,11 +85,11 @@ neonfs cluster ca rotate
 This drives the rolling reissue in four phases:
 
 1. **Stage incoming CA.** Generates a new CA key + cert and writes them to the system volume under `_system/tls/incoming/`. The old CA is still active.
-2. **Walk + reissue every node's cert.** For each node connected to the BEAM cluster, the orchestrator generates a fresh keypair, signs a node CSR against the *incoming* CA, and ships the new `node.crt` + `node.key` to that node via RPC. Atomic on-disk swap (temp-file + rename) means a crash mid-write leaves the existing cert intact.
-3. **Distribute the dual-CA bundle.** Every node's `ca_bundle.crt` is regenerated to include both the old and the new CA, then the local `ssl_dist` listener is asked to refresh its trust store. During this window each node accepts inbound connections from peers that present *either* the old-CA-signed cert or the new-CA-signed cert.
-4. **Finalize.** Promotes the staged incoming CA to active in the system volume, deletes the incoming tree. After this step the old CA is no longer trusted; only the new CA bundle is.
+2. **Distribute the dual-CA bundle.** Every node gets the staged CA written to its `incoming-ca.crt`, and its `ca_bundle.crt` regenerated to hold both the old and the new anchor. During this window each node accepts inbound connections from peers presenting *either* an old-CA-signed cert or a new-CA-signed one. This happens **before** phase 3, so no node is ever handed a certificate its peers cannot yet validate.
+3. **Walk + reissue every node's cert.** For each node connected to the BEAM cluster, the orchestrator generates a fresh keypair, signs a node CSR against the *incoming* CA, and ships the new `node.crt` + `node.key` to that node via RPC. Atomic on-disk swap (temp-file + rename) means a crash mid-write leaves the existing cert intact.
+4. **Finalize.** Promotes the staged incoming CA to active in the system volume, then on every node replaces `ca.crt` with it, deletes `incoming-ca.crt` and rebuilds the bundle. After this step the old CA is no longer trusted anywhere; only the new CA is.
 
-By default, the orchestrator stops between phase 3 and phase 4 with the rotation in `pending-finalize` state and prints the grace-window duration. This gives the dual-CA bundle time to settle on every node before the old CA is dropped — important if a node is briefly unreachable during phase 3 and would otherwise come back to find its peers no longer trust its old cert.
+By default, the orchestrator stops between phase 3 and phase 4 with the rotation in `pending-finalize` state and prints the grace-window duration. This gives the dual-CA bundle time to settle on every node before the old CA is dropped — important if a node is briefly unreachable during phase 2 and would otherwise come back to find its peers no longer trust its old cert.
 
 After the grace window passes, finalize the rotation:
 
@@ -98,13 +98,13 @@ After the grace window passes, finalize the rotation:
 neonfs cluster ca rotate --finalize
 ```
 
-If you've explicitly verified every node picked up the dual-CA bundle in phase 3 and want to skip the grace window (for example: a planned rotation in a maintenance window, every node is reachable, every cert has been visibly reissued), pass `--no-wait` to the initial command and the finalize step runs as part of phase 4 in the same invocation:
+If you've explicitly verified every node picked up the dual-CA bundle in phase 2 and want to skip the grace window (for example: a planned rotation in a maintenance window, every node is reachable, every cert has been visibly reissued), pass `--no-wait` to the initial command and the finalize step runs as part of phase 4 in the same invocation:
 
 ```bash
 neonfs cluster ca rotate --no-wait
 ```
 
-`--no-wait` is faster but riskier: any node that didn't successfully install the dual-CA bundle in phase 3 will be unable to handshake with its peers immediately. Reach for it only when you have direct visibility into every node.
+`--no-wait` is faster but riskier, in two ways. Any node that didn't successfully install the dual-CA bundle in phase 2 will be unable to handshake with its peers immediately. And because finalize drops the old anchor before any node has adopted the new material, each node's PEM cache flips on its own 120 s tick — so for up to that long a node that has flipped and a node that hasn't cannot complete a *new* handshake with each other. Established connections are unaffected, which is why this is survivable rather than an outage, but it is exactly what the grace window exists to avoid. Reach for `--no-wait` only when you have direct visibility into every node.
 
 You can tune the documented grace window with `--grace-window-seconds N` (default `86400`, i.e. 24 hours). The flag affects the duration **printed** in the orchestrator's output; the operator is still the one who decides when to run `--finalize` based on the grace window having elapsed.
 
@@ -124,11 +124,13 @@ neonfs node status <each-node>               # service reports running, health c
 
 From an interface node, perform a smoke-test read and a smoke-test write. If distribution handshakes are silently falling back to old certs you will see handshake retries in the journal; a real write flushing to disk confirms the new chain is end-to-end.
 
-**Estimated downtime: none for the rolling reissue.** Phase 2 and 3 do not interrupt existing inter-node connections — `:ssl_dist` keeps using its already-handshaken sockets under the old trust store and only the *next* listener restart picks up the new bundle. Phase 4 (`--finalize`) atomically swaps the active CA in the system volume; existing connections continue, and a brief reconnect blip is possible if a peer re-handshakes within seconds of finalize.
+**Estimated downtime: none for the rolling reissue.** No phase restarts a distribution listener, and none needs to: `ssl_dist.conf` names the certificate, key and bundle by path, and those paths do not change, so replacing the files is enough for the *next* handshake to use them. Established connections are unaffected throughout — they keep the material they handshook with.
+
+Adoption is not instantaneous, though. Both the rotated `ca_bundle.crt` and the replaced `node.crt` / `node.key` wait for the distribution PEM cache's validator to notice the file changed, and that runs every `ssl_pem_cache_clean` milliseconds — **120 s by default**, and not settable from the command line. Budget a couple of minutes between each phase and the next for that reason alone, quite apart from the grace window. Phase 4 (`--finalize`) drops the old anchor on every node; existing connections continue, and a brief reconnect blip is possible if a peer re-handshakes within seconds of finalize.
 
 #### 4. If a node fails to rotate
 
-The orchestrator stops on the first failed node and writes a `cluster_ca_rotate_failed` audit event. The error message identifies the failed node and the failing RPC (typically `install_node_cert`, `regenerate_ca_bundle`, or `reload_listener`). The staged incoming CA stays in place — partial progress is **not** rolled back.
+The orchestrator stops on the first failed node and writes a `cluster_ca_rotate_failed` audit event. The error message identifies the failed node and the failing RPC (`install_incoming_ca`, `install_node_cert`, or `promote_active_ca`). The staged incoming CA stays in place — partial progress is **not** rolled back.
 
 Diagnose:
 
@@ -147,7 +149,7 @@ Two recovery paths depending on root cause:
 neonfs cluster ca rotate --node <node-name>
 ```
 
-`--node` retries phase 2 + phase 3 for the named node only, against the **same** staged incoming CA. The orchestrator preserves the partial state from the original run, so other nodes' new certs are not regenerated. After the per-node retry succeeds, run `--finalize` (or re-run with `--no-wait`) to complete phase 4 across the cluster. The retry path expects the staged incoming CA to still exist; if you previously ran `--abort`, the retry will refuse and you must restart the rotation from scratch.
+`--node` retries phase 2 + phase 3 for that one node only, against the **same** staged incoming CA. The orchestrator preserves the partial state from the original run, so other nodes' new certs are not regenerated. After the per-node retry succeeds, run `--finalize` (or re-run with `--no-wait`) to complete phase 4 across the cluster. The retry path expects the staged incoming CA to still exist; if you previously ran `--abort`, the retry will refuse and you must restart the rotation from scratch.
 
 **Abort and restart** — when the failure indicates a bigger problem (the staged CA is corrupt, the original rotation never reached phase 3 cleanly, you want to start over):
 
@@ -156,7 +158,7 @@ neonfs cluster ca rotate --abort      # discards the staged incoming CA
 neonfs cluster ca rotate              # starts again from phase 1
 ```
 
-`--abort` removes the staged incoming CA and every cert it issued; subsequent rotations start fresh.
+`--abort` removes the staged incoming CA from the system volume *and* from every node's `incoming-ca.crt`, rebuilding each node's trust bundle without it; subsequent rotations start fresh. Nodes whose certificate was already reissued against the staged CA are left holding one that nothing now trusts, so run `--abort` before phase 3 where you can, and re-run the rotation promptly where you cannot.
 
 #### 4a. Offline-node handling
 
@@ -306,8 +308,8 @@ After the incident, use the post-mortem template at [Post-Mortem-Template.md](Po
 
 - `neonfs cluster ca info` does not emit a machine-readable "expiring in N days" warning via telemetry — an operator monitoring dashboard gets visibility only if it polls and evaluates the validity window itself. Tracked as a future improvement.
 - `ca rotate` has no dry-run mode. There is no way to preview which certs would be reissued before running the command for real.
-- After `--finalize`, the new active CA cert is held in the system volume but is not pushed into each node's local `<tls_dir>/ca.crt` cache. Until that cache is refreshed (currently on the next listener restart), the on-disk single-CA copy remains stale even though the dual-CA bundle on disk is correct.
 - The orchestrator's per-node walk uses `[Node.self() | Node.list()]`. A node that is genuinely offline is skipped and must be re-onboarded via `cluster join` after rotation completes; there is no buffered/deferred reissue.
+- `--finalize` has no per-node retry. It promotes the CA in the system volume and then walks the nodes; if the walk fails partway there is no staged incoming CA left for `--node` to work against, so a node left mid-finalize keeps a stale `incoming-ca.crt` and must be fixed by hand. It keeps working in the meantime — it trusts the new anchor via that stale file — which is what makes it quiet.
 
 ## References
 
