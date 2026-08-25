@@ -24,7 +24,15 @@
     {:compiler, "mix compile --warnings-as-errors"},
     {:formatter, "mix format --check-formatted"},
     {:credo, "mix credo --strict"},
-    {:dialyzer, "mix dialyzer"},
+    # `--force-check`, not bare `mix dialyzer`. Dialyxir decides the PLT is
+    # fresh by hashing `mix.lock` plus the app-name list, and a path
+    # dependency appears in neither — so changing `neonfs_client` can never
+    # invalidate the PLT, and dialyzer reports every new function in it as
+    # `call_to_missing` while printing "PLT is up to date!". Forcing the
+    # check re-reads the beams and updates only what moved; it costs about
+    # 25s per package and is the difference between this tool being trusted
+    # and being reflexively re-run.
+    {:dialyzer, "mix dialyzer --force-check"},
     {:doctor, "mix doctor"},
     {:ex_doc, "mix docs"},
     {:gettext, false},
