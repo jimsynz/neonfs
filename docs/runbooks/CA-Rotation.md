@@ -11,9 +11,23 @@ This runbook covers two scenarios:
 
 ### Planned rotation (no outage yet)
 
+- The `client_ca_expiry` subsystem on any node's `/health` endpoint reports `degraded` (180 days left) or `unhealthy` (30). This is the intended trigger — see below.
 - `neonfs cluster ca info` reports `not_valid_after` less than 30 days from now.
 - SMART alerting on TLS certificate expiry (if configured via Prometheus) fires below its warn threshold.
 - Calendar or change-management reminder fires ("CA rotates annually, next: 2026-05-12").
+
+#### `client_ca_expiry` is a cluster-level signal
+
+Nothing renews the cluster CA, and nothing will: rotation generates a fresh CA keypair and reissues every certificate in the fleet, which is not an operation to fire on a calendar date with nobody watching. `client_ca_expiry` exists so the expiry is visible far enough ahead to *schedule* the rotation described in this runbook.
+
+Two things to get right when wiring alerts on it:
+
+- **Deduplicate.** Every node reports the same CA, so a 20-node cluster produces 20 copies of one problem.
+- **Do not route on it.** When the CA reaches the unhealthy threshold every node goes unhealthy simultaneously, and there is no healthy node to fail over to. Anything using `/health` for readiness or load-balancer membership should ignore this subsystem.
+
+A node whose `days_remaining` disagrees with its peers is itself worth investigating: it means that node's `ca.crt` is stale relative to the rest of the cluster.
+
+The thresholds are `:ca_renewal_threshold_days` (180) and `:ca_unhealthy_threshold_days` (30) under `:neonfs_client`. They are deliberately far wider than the node certificate's 30 and 7, because the node certificate has an automated remedy to leave room for and this has none — the numbers here are how long you need to notice, schedule and run a disruptive cluster-wide operation.
 
 ### Emergency (expiry has passed)
 
@@ -306,7 +320,7 @@ After the incident, use the post-mortem template at [Post-Mortem-Template.md](Po
 
 ## Known limitations
 
-- `neonfs cluster ca info` does not emit a machine-readable "expiring in N days" warning via telemetry — an operator monitoring dashboard gets visibility only if it polls and evaluates the validity window itself. Tracked as a future improvement.
+- The CA's remaining life is exposed as a health subsystem, not as a telemetry event or a Prometheus gauge — a dashboard has to scrape `/health` and read `client_ca_expiry.days_remaining` rather than receiving a metric.
 - `ca rotate` has no dry-run mode. There is no way to preview which certs would be reissued before running the command for real.
 - The orchestrator's per-node walk uses `[Node.self() | Node.list()]`. A node that is genuinely offline is skipped and must be re-onboarded via `cluster join` after rotation completes; there is no buffered/deferred reissue.
 - `--finalize` has no per-node retry. It promotes the CA in the system volume and then walks the nodes; if the walk fails partway there is no staged incoming CA left for `--node` to work against, so a node left mid-finalize keeps a stale `incoming-ca.crt` and must be fixed by hand. It keeps working in the meantime — it trusts the new anchor via that stale file — which is what makes it quiet.
