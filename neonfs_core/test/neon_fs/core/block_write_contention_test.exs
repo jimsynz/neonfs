@@ -11,21 +11,35 @@ defmodule NeonFS.Core.BlockWriteContentionTest do
   the last writer winning.
 
   The bytes are placed the way an interface node places them and published
-  through `commit_written/4`, because that is the only device write path
-  there is.
+  through `commit_written/4`, one commit per writer.
 
   This is a correctness test: every writer commits and nothing is lost. Its
   runtime is not the assertion — timing belongs in the rig's bench.
 
+  ## This is not the shape a real device produces
+
+  Nothing in production publishes one extent at a time. A guest write reaches
+  `NeonFS.Block.Device`, which buffers it in `NeonFS.Block.WriteWindow` and
+  drains every dirty extent in one `publish_extents/3` — one commit per drain,
+  not one per write. `Device.write/3` is the only caller, so there is no
+  device write path that looks like this test.
+
+  It writes through `commit_written/4` anyway because `WriteWindow` lives in
+  `neonfs_block`, which `neonfs_core` cannot depend on. What is being asserted
+  here is the core-side property — that concurrent publishers of distinct
+  extents resolve their shared shard root by retrying — and that property is
+  reached from a window drain just as it is from here, only in larger and
+  rarer batches.
+
   ## Why the commit deadline is raised here
 
-  Every publication is its own commit through the volume's committer, which
-  serialises them: a queue of 32 is 32 metadata rounds one after another, so
-  the last writer waits for all of them. The deadline is raised because that
-  wait is the shape of the test rather than a fault in it — a runner slow
-  enough to push the tail past the default would fail this test for a reason
-  it is not about. What the queueing costs belongs to the coalescing window
-  and the bench.
+  Each publication is its own commit through the volume's committer, which
+  serialises them, so a queue of 32 is 32 metadata rounds one after another
+  and the last writer waits for all of them. The deadline is raised because
+  that wait is the shape of *this test* — a runner slow enough to push the
+  tail past the default would fail it for a reason it is not about. It is not
+  tolerance for a slow production path, because production does not queue
+  writes this way. The rig's bench measures what a real device costs.
   """
 
   use ExUnit.Case, async: false

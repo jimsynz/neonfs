@@ -295,6 +295,64 @@ cmd_bench() {
   return "${rc}"
 }
 
+# Guest-visible cost of the block write window, swept over `:write_window_bytes`
+# including 0 — which `NeonFS.Block.WriteWindow` documents as the behaviour from
+# before the window existed, so before and after are two points of one run.
+#
+# Separate from `cmd_bench` because it is a different shape: not the
+# interface × operation matrix, but one workload measured repeatedly against a
+# knob. And the measurement is `fio`'s own completion-latency percentiles — the
+# harness cannot see individual IOs from outside a shell command, so wrapping
+# benchee around one would report the wrong thing confidently.
+cmd_bench_write_window() {
+  command -v mix >/dev/null 2>&1 || die "mix (Elixir) not found on the rig host — needed to run the harness"
+
+  # Reuses the acceptance suite's block plumbing rather than a second copy of
+  # nbd-client invocation and its 4096-byte-block reasoning.
+  # shellcheck source=lib/acceptance.sh
+  . "${RIG_ROOT}/lib/acceptance.sh"
+
+  # Its own volume and its own size, assigned unconditionally: sourcing
+  # acceptance.sh has already set both, so a `:-` default here would silently
+  # inherit the acceptance suite's `accept_block` and write the bench's load
+  # into a volume that another run owns.
+  BLOCK_VOL="${BENCH_WW_VOL:-bench_block}"
+  BLOCK_MIB="${BENCH_WW_VOL_MIB:-1024}"
+  BLOCK_MNT="/mnt/${BLOCK_VOL}-blk"
+  BLOCK_SIZE="${BLOCK_MIB}M"
+  BLOCK_BYTES=$(( BLOCK_MIB * 1024 * 1024 ))
+
+  s_block_attach || die "could not attach a block device — see above"
+
+  node_ssh 1 "command -v fio >/dev/null 2>&1 || sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q fio >/dev/null 2>&1" \
+    || die "fio unavailable and not installable on the guest"
+
+  local sha
+  sha="$(git -C "${REPO_ROOT}" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+
+  cd "${RIG_ROOT}/bench"
+  mix deps.get --quiet
+  log "sweeping :write_window_bytes against ${BLOCK_DEV} (sha ${sha})"
+
+  local rc=0
+  # The release's `rpc` boots a temporary node, and this cluster pins its
+  # distribution port — so the temporary one needs a port of its own and a
+  # `NEONFS_PEER_PORTS` entry to resolve the target, EPMD being replaced.
+  env \
+    BENCH_RIG="${RIG_ROOT}/neonfs-rig" \
+    BENCH_SHA="${sha}" \
+    BENCH_NODE=1 \
+    BENCH_BLOCK_DEV="${BLOCK_DEV}" \
+    BENCH_WW_TARGET_NODE="$(node_erl 1)" \
+    BENCH_WW_TARGET_DIST_PORT="${DIST_PORT}" \
+    mix run -e "NeonFS.Bench.WriteWindow.run()" || rc=$?
+
+  # Leave the device detached: an attached export blocks the volume from being
+  # deleted and confuses a later acceptance run that expects to attach its own.
+  s_block_detach >/dev/null 2>&1 || true
+  return "${rc}"
+}
+
 # Standard cluster-config benchmark matrix. Each config is a full
 # boot → bench → teardown cycle (node counts differ), reusing up/bench/down.
 # Every run is tagged with its config label (recorded in meta.json and the
@@ -394,6 +452,7 @@ Commands:
   docker-storage     Docker image blobs via the containerd content proxy + a shared NeonFS docker volume (needs NODES>=2)
   bench [--rev <sha>]  Run the benchee suite against the running cluster; --rev checks out/builds/boots that revision first (for bisect)
   bench-matrix       Boot/bench/teardown across the standard cluster-config matrix (baseline/durable/spread)
+  bench-write-window Sweep :write_window_bytes (0 = window off) and report guest write latency over NBD
   status             Show VM and cluster status
   ssh <n> [cmd...]   SSH into node <n> (default 1)
   cli <n> -- <args>  Run the neonfs CLI on node <n>, e.g. cli 1 -- volume list
@@ -429,6 +488,7 @@ main() {
     docker-storage) cmd_docker_storage "$@" ;;
     bench)  cmd_bench "$@" ;;
     bench-matrix) cmd_bench_matrix "$@" ;;
+    bench-write-window) cmd_bench_write_window "$@" ;;
     status) cmd_status "$@" ;;
     ssh)    cmd_ssh "$@" ;;
     cli)    cmd_cli "$@" ;;

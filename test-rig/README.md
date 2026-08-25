@@ -154,6 +154,36 @@ like a regression rather than like emulation.
 | `down` | Stop all VMs, keep their disks |
 | `clean` | Stop all VMs and delete runtime state (disks, seeds, ssh key) |
 
+### `bench-write-window`
+
+```bash
+./neonfs-rig up
+./neonfs-rig bench-write-window
+```
+
+Attaches a block volume over NBD, then sweeps `:write_window_bytes` and reports
+what each setting costs a guest: IOPS, bandwidth, and `fio`'s completion-latency
+percentiles for 32 concurrent writers.
+
+**`0` is one of the sweep points**, and it is the interesting one —
+`NeonFS.Block.WriteWindow` documents it as "drains every write as it arrives,
+which is the behaviour from before this existed". So the before and the after
+come out of one run against one device rather than two builds.
+
+The cap is read per write, so a sweep point is an `Application.put_env` over the
+release's `rpc` — no restart, and therefore no re-attach between points, which
+is what makes the rows comparable.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `BENCH_WW_CAPS` | `0,1048576` | Comma-separated `:write_window_bytes` values to sweep |
+| `BENCH_WW_WRITERS` | `32` | Concurrent `fio` jobs, each on its own region |
+| `BENCH_WW_BS` | `4k` | Write size |
+| `BENCH_WW_REGION` | `16m` | Per-writer region, so writers land on distinct extents |
+| `BENCH_WW_RUNTIME` | `30` | Seconds of measurement per sweep point |
+| `BENCH_WW_RAMP` | `5` | Seconds discarded before measuring |
+| `BLOCK_MIB` | `1024` | Size of the block volume it creates |
+
 ## Configuration
 
 All knobs are environment variables (defaults in parentheses):
