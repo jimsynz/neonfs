@@ -1046,6 +1046,7 @@ defmodule NeonFS.TestSupport.PeerCluster do
   @spec trust_cluster_ca_on!(cluster(), atom(), atom()) :: :ok
   def trust_cluster_ca_on!(cluster, from_node_name, to_node_name) do
     from_dir = tls_dir_of(cluster, from_node_name)
+    from_info = get_node!(cluster, from_node_name)
     to_info = get_node!(cluster, to_node_name)
     to_dir = tls_dir_of(cluster, to_node_name)
 
@@ -1053,12 +1054,42 @@ defmodule NeonFS.TestSupport.PeerCluster do
       :ok ->
         :ok = :peer.call(to_info.peer, NeonFS.TLSDistConfig, :regenerate_ca_bundle, [to_dir])
         :ok = :peer.call(to_info.peer, :ssl, :clear_pem_cache, [])
-        :ok
+        await_peer_handshake!(to_info, from_info)
 
       {:error, :no_cluster_ca} ->
         raise ArgumentError,
               "#{from_node_name} has no cluster CA at #{from_dir}/ca.crt — " <>
                 "initialise the cluster before granting #{to_node_name} its trust"
+    end
+  end
+
+  # Proving the trust took, rather than assuming it. The join's own dial is an
+  # `:rpc.call` whose failure surfaces as `{:rpc_failed, :nodedown}` — which
+  # covers a refused handshake, a listener that has not finished coming back,
+  # and a node that is genuinely gone, without distinguishing them. Completing
+  # one handshake here first means the join fails only for its own reasons.
+  defp await_peer_handshake!(from_info, to_info, timeout \\ 30_000) do
+    deadline = deadline_in(timeout)
+
+    if do_await_peer_handshake(from_info, to_info, deadline) do
+      :ok
+    else
+      raise "#{from_info.name} could not complete a handshake with #{to_info.name} " <>
+              "within #{timeout}ms of being given its CA"
+    end
+  end
+
+  defp do_await_peer_handshake(from_info, to_info, deadline) do
+    cond do
+      :peer.call(from_info.peer, Node, :connect, [to_info.node]) == true ->
+        true
+
+      System.monotonic_time(:millisecond) > deadline ->
+        false
+
+      true ->
+        Process.sleep(200)
+        do_await_peer_handshake(from_info, to_info, deadline)
     end
   end
 
@@ -1131,6 +1162,15 @@ defmodule NeonFS.TestSupport.PeerCluster do
     span_apply_config(node_info.peer, node_info.node, node_app_config(cluster, node_name))
     span_start_applications(node_info.peer, node_info.node, applications)
     wait_for_ra_ready(node_info.peer)
+
+    # Applications running is not the same as being reachable. The restart
+    # takes distribution down with it, and a peer that will be dialled next —
+    # by a joining node, say — is `:nodedown` until its listener is back on
+    # its port. On an idle machine that gap closes before anything notices; on
+    # a loaded CI runner it does not, and the join fails with an error that
+    # says nothing about a restart.
+    :ok = :peer.call(node_info.peer, NeonFS.TLSDistConfig, :await_distribution, [timeout])
+    wait_for_dist_port(node_info.dist_port)
 
     :ok
   end
