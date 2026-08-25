@@ -108,6 +108,29 @@ defmodule NeonFS.Client.ServiceInfoTest do
     end
   end
 
+  describe "to_map/1 across versions" do
+    # A node running a build from before `dist_port` existed sends a struct
+    # without the key. Dot access on it raises `KeyError`, and the raise
+    # happens inside `ServiceRegistry.do_register/2` — so the *receiving*
+    # node's registry terminates, and the older node's retry loop takes it
+    # down again each time. Observed on a rig with one upgraded node and one
+    # not.
+    test "tolerates a struct from a build that had no dist_port" do
+      legacy = Map.delete(ServiceInfo.new(:old@host, :nfs), :dist_port)
+
+      assert %{dist_port: 0, node: :old@host, type: :nfs} = ServiceInfo.to_map(legacy)
+    end
+
+    # The point is the pair: `from_map/1` already read a missing port as zero,
+    # and `to_map/1` writing one that must be present is the asymmetry that
+    # produced the crash.
+    test "round-trips a legacy struct through from_map/1" do
+      legacy = Map.delete(ServiceInfo.new(:old@host, :nfs), :dist_port)
+
+      assert legacy |> ServiceInfo.to_map() |> ServiceInfo.from_map() |> Map.get(:dist_port) == 0
+    end
+  end
+
   describe "from_map/1" do
     test "passes through existing ServiceInfo structs unchanged" do
       info = ServiceInfo.new(:node@host, :core)

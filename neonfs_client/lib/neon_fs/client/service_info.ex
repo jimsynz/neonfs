@@ -89,7 +89,15 @@ defmodule NeonFS.Client.ServiceInfo do
       registered_at: info.registered_at,
       metadata: info.metadata,
       status: info.status,
-      dist_port: info.dist_port
+      # `Map.get`, not `info.dist_port`, and symmetric with `from_map/1`'s
+      # `Map.get(map, :dist_port) || 0`. A node running a build from before
+      # this field existed sends a struct without the key, and dot access on
+      # it raises `KeyError` — inside `ServiceRegistry.do_register/2`, which
+      # takes the registry down on every registration that older node
+      # retries. Absent means zero here for the same reason it does when
+      # reading: a node that reports no port is discoverable and not dialable
+      # by siblings, which is a state the rest of the code already handles.
+      dist_port: Map.get(info, :dist_port, 0)
     }
   end
 
