@@ -216,7 +216,7 @@ defmodule NeonFS.CLI.Handler.CA do
   end
 
   defp log_ca_rotate_started_from_cert(ca_cert) do
-    fingerprint = ca_fingerprint(ca_cert)
+    fingerprint = TLS.cert_fingerprint(ca_cert)
     info = TLS.certificate_info(ca_cert)
     log_ca_rotate_started(fingerprint, info)
     :ok
@@ -267,10 +267,25 @@ defmodule NeonFS.CLI.Handler.CA do
     rpc_call_or_error(node, NeonFS.TLSDistConfig, :install_incoming_ca, [incoming_ca_pem])
   end
 
+  # Promotion visits every node even after one of them fails, unlike the
+  # staging walks: the nodes it can reach are better off holding the
+  # promoted anchor, and the operator needs the whole list of the ones
+  # that missed it rather than the first. That list is what a re-run of
+  # `--finalize` reconciles.
   defp promote_active_ca_across_cluster(active_ca_pem) do
-    each_cluster_node(fn node ->
-      rpc_call_or_error(node, NeonFS.TLSDistConfig, :promote_active_ca, [active_ca_pem])
-    end)
+    case promote_active_ca_on(cluster_nodes(), active_ca_pem) do
+      [] -> :ok
+      failed -> {:error, {:promote_active_ca_failed, failed}}
+    end
+  end
+
+  defp promote_active_ca_on(nodes, active_ca_pem) do
+    nodes
+    |> Enum.map(
+      &{&1, rpc_call_or_error(&1, NeonFS.TLSDistConfig, :promote_active_ca, [active_ca_pem])}
+    )
+    |> Enum.reject(&match?({_node, :ok}, &1))
+    |> Enum.map(&elem(&1, 0))
   end
 
   defp discard_incoming_ca_across_cluster do
@@ -280,13 +295,15 @@ defmodule NeonFS.CLI.Handler.CA do
   end
 
   defp each_cluster_node(fun) do
-    Enum.reduce_while([Node.self() | Node.list()], :ok, fn node, _acc ->
+    Enum.reduce_while(cluster_nodes(), :ok, fn node, _acc ->
       case fun.(node) do
         :ok -> {:cont, :ok}
         {:error, _reason} = err -> {:halt, err}
       end
     end)
   end
+
+  defp cluster_nodes, do: [Node.self() | Node.list()]
 
   defp staged_incoming_ca_pem do
     case CertificateAuthority.incoming_ca_pem() do
@@ -350,6 +367,18 @@ defmodule NeonFS.CLI.Handler.CA do
   defp map_finalize_error(:ok), do: :ok
   defp map_finalize_error({:ok, _} = ok), do: ok
 
+  defp map_finalize_error({:error, {:promote_active_ca_failed, nodes}}) do
+    names = Enum.map_join(nodes, ", ", &Atom.to_string/1)
+
+    {:error,
+     Unavailable.exception(
+       message:
+         "CA promoted in the cluster, but #{length(nodes)} node(s) did not take the new " <>
+           "anchor: #{names}. Re-run `cluster ca rotate --finalize` to reconcile them; " <>
+           "`cluster ca rotate --status` reports each node's anchor."
+     )}
+  end
+
   defp map_finalize_error({:error, reason}),
     do:
       {:error,
@@ -385,7 +414,62 @@ defmodule NeonFS.CLI.Handler.CA do
             nil
         end
 
-      {:ok, %{rotation_in_progress: not is_nil(incoming), active: active, incoming: incoming}}
+      nodes =
+        cluster_node_ca_states(
+          active && active.fingerprint,
+          incoming && incoming.fingerprint
+        )
+
+      {:ok,
+       %{
+         rotation_in_progress: not is_nil(incoming),
+         active: active,
+         incoming: incoming,
+         nodes: Enum.map(nodes, &Map.update!(&1, :node, fn node -> Atom.to_string(node) end))
+       }}
+    end
+  end
+
+  # What each node holds on disk, against what the cluster says it
+  # should. Nothing else in the rotation reports this, and a node that
+  # missed a step is not otherwise visible — the anchors it kept are
+  # what let it go on working.
+  defp cluster_node_ca_states(cluster_active, cluster_incoming) do
+    Enum.map(cluster_nodes(), fn node ->
+      case rpc_call_for_ca_rotate(node, NeonFS.TLSDistConfig, :local_ca_state, []) do
+        {:ok, %{active_ca_fingerprint: active, incoming_ca_fingerprint: staged}} ->
+          %{
+            node: node,
+            ca_fingerprint: active,
+            incoming_ca_fingerprint: staged,
+            state: classify_node_ca(active, staged, cluster_active, cluster_incoming)
+          }
+
+        _unreachable ->
+          %{
+            node: node,
+            ca_fingerprint: nil,
+            incoming_ca_fingerprint: nil,
+            state: :unreachable
+          }
+      end
+    end)
+  end
+
+  defp classify_node_ca(node_active, node_staged, cluster_active, cluster_incoming) do
+    cond do
+      not is_nil(cluster_incoming) and node_active == cluster_active and
+          node_staged == cluster_incoming ->
+        :dual_ca
+
+      not is_nil(cluster_incoming) ->
+        :rotation_incomplete
+
+      node_active == cluster_active and is_nil(node_staged) ->
+        :in_sync
+
+      true ->
+        :finalize_incomplete
     end
   end
 
@@ -421,10 +505,7 @@ defmodule NeonFS.CLI.Handler.CA do
     with :ok <- require_cluster() do
       case CertificateAuthority.incoming_ca_info() do
         {:error, :no_incoming_ca} ->
-          {:error,
-           Invalid.exception(
-             message: "No CA rotation in progress to finalize; stage one with --stage first"
-           )}
+          resume_finalize_rotation()
 
         {:ok, _incoming_info} ->
           do_finalize_rotation()
@@ -441,13 +522,61 @@ defmodule NeonFS.CLI.Handler.CA do
     end
   end
 
+  # A finalize with no staged CA left to promote is either a no-op the
+  # operator should be told about, or the second half of a finalize that
+  # only got partway. The two are indistinguishable from the system
+  # volume alone — the promotion there has already happened either way —
+  # so the nodes are what decides it.
+  #
+  # A node the first attempt could not reach keeps its superseded
+  # `ca.crt` and its now-meaningless staged `incoming-ca.crt`, and goes
+  # on working, because the staged anchor still trusts the promoted CA.
+  # That is what makes this quiet. Promoting again is safe on a node
+  # that already ran it: `promote_active_ca/2` writes the same anchor,
+  # removes an `incoming-ca.crt` that is already gone, and rebuilds the
+  # same bundle.
+  defp resume_finalize_rotation do
+    with {:ok, active_ca_pem} <- map_finalize_error(CertificateAuthority.active_ca_pem()) do
+      fingerprint = TLS.cert_fingerprint(active_ca_pem)
+
+      case Enum.reject(cluster_node_ca_states(fingerprint, nil), &(&1.state == :in_sync)) do
+        [] ->
+          {:error,
+           Invalid.exception(
+             message: "No CA rotation in progress to finalize; stage one with --stage first"
+           )}
+
+        behind ->
+          reconcile_finalize(Enum.map(behind, & &1.node), active_ca_pem, fingerprint)
+      end
+    end
+  end
+
+  defp reconcile_finalize(nodes, active_ca_pem, fingerprint) do
+    case promote_active_ca_on(nodes, active_ca_pem) do
+      [] ->
+        log_ca_rotate_finalize_resumed(nodes, fingerprint)
+
+        {:ok,
+         %{
+           finalized: true,
+           resumed: true,
+           fingerprint: fingerprint,
+           reconciled_nodes: Enum.map(nodes, &Atom.to_string/1)
+         }}
+
+      failed ->
+        map_finalize_error({:error, {:promote_active_ca_failed, failed}})
+    end
+  end
+
   defp handle_ca_rotate_stage do
     with :ok <- require_cluster(),
          {:ok, state} <- load_cluster_state() do
       case CertificateAuthority.init_incoming_ca(state.cluster_name) do
         {:ok, ca_cert, _ca_key} ->
           info = TLS.certificate_info(ca_cert)
-          fingerprint = ca_fingerprint(ca_cert)
+          fingerprint = TLS.cert_fingerprint(ca_cert)
           log_ca_rotate_started(fingerprint, info)
 
           {:ok,
@@ -471,11 +600,6 @@ defmodule NeonFS.CLI.Handler.CA do
     end
   end
 
-  defp ca_fingerprint(ca_cert) do
-    der = ca_cert |> X509.Certificate.to_der()
-    :crypto.hash(:sha256, der) |> Base.encode16(case: :lower)
-  end
-
   defp current_active_ca_fingerprint do
     read_ca_fingerprint("/tls/ca.crt")
   end
@@ -487,7 +611,7 @@ defmodule NeonFS.CLI.Handler.CA do
   defp read_ca_fingerprint(path) do
     case SystemVolume.read(path) do
       {:ok, ca_pem} ->
-        ca_pem |> TLS.decode_cert!() |> ca_fingerprint()
+        TLS.cert_fingerprint(ca_pem)
 
       {:error, _} ->
         nil
@@ -547,6 +671,18 @@ defmodule NeonFS.CLI.Handler.CA do
       details: %{
         old_ca_fingerprint: old_fingerprint,
         new_ca_fingerprint: new_fingerprint
+      }
+    )
+  end
+
+  defp log_ca_rotate_finalize_resumed(nodes, fingerprint) do
+    AuditLog.log_event(
+      event_type: :cluster_ca_rotate_finalize_resumed,
+      actor_uid: 0,
+      resource: cluster_resource(),
+      details: %{
+        ca_fingerprint: fingerprint,
+        reconciled_nodes: Enum.map(nodes, &Atom.to_string/1)
       }
     )
   end

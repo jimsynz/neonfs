@@ -2332,6 +2332,54 @@ defmodule NeonFS.CLI.HandlerTest do
                  e.details[:new_ca_fingerprint] == new_fp
              end)
     end
+
+    # The failure this exists to prevent: finalize promotes the CA in the
+    # system volume and then walks the nodes, and a node it cannot reach is
+    # left trusting the superseded anchor while the cluster has moved on.
+    # Before this was resumable the operator's only recovery was by hand,
+    # because with the staged CA gone both `--finalize` and `--node` refused.
+    test "a node the walk could not reach is reconciled by re-running --finalize" do
+      assert {:ok, %{staged: true, fingerprint: incoming_fp}} =
+               Handler.handle_ca_rotate(%{"stage" => true})
+
+      Application.put_env(:neonfs_core, :ca_rotate_rpc_mod, FailingRPCStub)
+
+      assert {:error, %NeonFS.Error.Unavailable{message: msg}} =
+               Handler.handle_ca_rotate(%{"finalize" => true})
+
+      assert msg =~ "did not take the new anchor"
+      assert msg =~ Atom.to_string(Node.self())
+      assert msg =~ "--finalize"
+
+      # The system-volume half is done and is not rolled back, so there is
+      # no staged CA left to find.
+      assert {:error, :no_incoming_ca} = CertificateAuthority.incoming_ca_info()
+
+      Application.delete_env(:neonfs_core, :ca_rotate_rpc_mod)
+
+      assert {:ok,
+              %{
+                finalized: true,
+                resumed: true,
+                fingerprint: ^incoming_fp,
+                reconciled_nodes: reconciled
+              }} = Handler.handle_ca_rotate(%{"finalize" => true})
+
+      assert reconciled == [Atom.to_string(Node.self())]
+
+      :ok = AuditLog.flush()
+
+      assert Enum.any?(AuditLog.recent(20), fn e ->
+               e.event_type == :cluster_ca_rotate_finalize_resumed and
+                 e.details[:ca_fingerprint] == incoming_fp
+             end)
+
+      # Reconciled means reconciled: a third finalize has nothing to do.
+      assert {:error, %NeonFS.Error.Invalid{message: msg}} =
+               Handler.handle_ca_rotate(%{"finalize" => true})
+
+      assert msg =~ "No CA rotation in progress"
+    end
   end
 
   describe "handle_ca_rotate/1 — status mode" do
@@ -2385,6 +2433,23 @@ defmodule NeonFS.CLI.HandlerTest do
       assert {:ok, _} = Handler.handle_ca_rotate(%{"finalize" => true})
 
       assert {:ok, %{rotation_in_progress: false, incoming: nil}} =
+               Handler.handle_ca_rotate(%{"status" => true})
+    end
+
+    test "reports each node's anchor, and which of them a finalize missed" do
+      self_name = Atom.to_string(Node.self())
+
+      assert {:ok, %{nodes: [%{node: ^self_name, state: :in_sync, ca_fingerprint: fp}]}} =
+               Handler.handle_ca_rotate(%{"status" => true})
+
+      assert is_binary(fp)
+
+      assert {:ok, _} = Handler.handle_ca_rotate(%{"stage" => true})
+      Application.put_env(:neonfs_core, :ca_rotate_rpc_mod, FailingRPCStub)
+      assert {:error, _} = Handler.handle_ca_rotate(%{"finalize" => true})
+      Application.delete_env(:neonfs_core, :ca_rotate_rpc_mod)
+
+      assert {:ok, %{nodes: [%{node: ^self_name, state: :finalize_incomplete}]}} =
                Handler.handle_ca_rotate(%{"status" => true})
     end
   end

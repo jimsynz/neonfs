@@ -179,6 +179,26 @@ defmodule NeonFS.Transport.TLS do
   end
 
   @doc """
+  Returns a certificate's SHA-256 fingerprint as lowercase hex.
+
+  The fingerprint is over the DER encoding, so it identifies the
+  certificate itself rather than any particular PEM framing of it. Both
+  sides of a CA rotation compare anchors this way — the orchestrator
+  against the system volume, each node against its own `tls_dir` — so
+  the two have to agree on the digest.
+
+  Accepts either a decoded certificate or PEM binary.
+  """
+  @spec cert_fingerprint(cert() | pem()) :: String.t()
+  def cert_fingerprint(cert_or_pem) do
+    cert_or_pem
+    |> maybe_decode_cert()
+    |> X509.Certificate.to_der()
+    |> then(&:crypto.hash(:sha256, &1))
+    |> Base.encode16(case: :lower)
+  end
+
+  @doc """
   Returns the number of days until the certificate expires.
 
   Accepts either a decoded certificate or PEM binary.

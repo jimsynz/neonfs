@@ -38,6 +38,7 @@ defmodule NeonFS.TLSDistConfigTest do
   use ExUnit.Case, async: true
 
   alias NeonFS.TLSDistConfig
+  alias NeonFS.Transport.TLS
   alias X509.Certificate.Extension
 
   setup do
@@ -330,6 +331,36 @@ defmodule NeonFS.TLSDistConfigTest do
 
       assert_receive {[:neonfs, :tls, :active_ca_promoted], ^ref, %{}, %{tls_dir: ^tmp_dir}},
                      1_000
+    end
+  end
+
+  describe "local_ca_state/1" do
+    test "reports both anchors, and tracks the rotation's writes", %{tmp_dir: tmp_dir} do
+      active_pem = self_signed_ca_pem("active CA")
+      incoming_pem = self_signed_ca_pem("incoming CA")
+
+      assert {:ok, %{active_ca_fingerprint: nil, incoming_ca_fingerprint: nil}} =
+               TLSDistConfig.local_ca_state(tmp_dir)
+
+      File.write!(Path.join(tmp_dir, "ca.crt"), active_pem)
+      :ok = TLSDistConfig.install_incoming_ca(incoming_pem, tmp_dir)
+
+      assert {:ok, %{active_ca_fingerprint: active_fp, incoming_ca_fingerprint: incoming_fp}} =
+               TLSDistConfig.local_ca_state(tmp_dir)
+
+      assert active_fp == TLS.cert_fingerprint(active_pem)
+      assert incoming_fp == TLS.cert_fingerprint(incoming_pem)
+
+      :ok = TLSDistConfig.promote_active_ca(incoming_pem, tmp_dir)
+
+      assert {:ok, %{active_ca_fingerprint: ^incoming_fp, incoming_ca_fingerprint: nil}} =
+               TLSDistConfig.local_ca_state(tmp_dir)
+    end
+
+    test "reads an unparseable anchor as absent", %{tmp_dir: tmp_dir} do
+      File.write!(Path.join(tmp_dir, "ca.crt"), "not a certificate")
+
+      assert {:ok, %{active_ca_fingerprint: nil}} = TLSDistConfig.local_ca_state(tmp_dir)
     end
   end
 
