@@ -161,10 +161,17 @@ defmodule NeonFS.CLI.Handler.BlockRouting do
   defp explain({:ublk_driver_absent, path}),
     do: "#{path} is absent — load the driver with `modprobe ublk_drv`"
 
+  # Deliberately not "grant the daemon's user access". On omnibus that is the
+  # wrong advice: ublk is a capability of the standalone `neonfs-block` target,
+  # which has the private mount namespace a ublk daemon needs — the omnibus
+  # unit shares the host's by design, so a ublk daemon there can deadlock on
+  # its own device at shutdown. Widening permissions by hand would make the
+  # attach work and leave that hazard in place.
   defp explain({:ublk_control_inaccessible, path, :eacces}),
     do:
-      "#{path} exists but this node's daemon may not open it — grant the " <>
-        "daemon's user access to the ublk control device"
+      "#{path} exists but this node's daemon may not open it — ublk is served " <>
+        "by the standalone `neonfs-block` target rather than by omnibus, and " <>
+        "that target needs group access to #{path}; attach over NBD otherwise"
 
   defp explain({:ublk_control_inaccessible, path, reason}),
     do: "#{path} could not be opened (#{inspect(reason)})"
