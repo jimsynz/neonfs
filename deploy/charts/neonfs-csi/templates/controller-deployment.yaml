@@ -132,6 +132,8 @@ spec:
               value: controller
             - name: NEONFS_CORE_NODE
               value: {{ .Values.coreNode | quote }}
+            - name: NEONFS_DIST_PORT
+              value: {{ required "controller.distPort is required: the node plugin cannot dial a controller whose distribution port nothing published, so volumeMode: Block attach fails. Pick a free host port (the rig uses 9101)." .Values.controller.distPort | quote }}
             {{- with .Values.controller.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

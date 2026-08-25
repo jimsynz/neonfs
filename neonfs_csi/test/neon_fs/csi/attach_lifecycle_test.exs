@@ -102,6 +102,29 @@ defmodule NeonFS.CSI.AttachLifecycleTest do
   end
 
   describe "ControllerPublishVolume" do
+    # `UNAVAILABLE`, not `INTERNAL`. There is a real window where the
+    # controller is up and the node plugin has not yet reached `Discovery`'s
+    # cache, so its distribution port is unpublished and the `erpc` cannot
+    # connect. The attach-detach controller retries `UNAVAILABLE` with
+    # backoff; `INTERNAL` turns a cold cache that resolves itself into a
+    # failed attach that reads as a driver fault.
+    test "a node plugin that cannot be reached is UNAVAILABLE, so the CO retries" do
+      Application.put_env(:neonfs_csi, :service_list_fn, fn :csi ->
+        [
+          %ServiceInfo{
+            node: :"absent@127.0.0.1",
+            type: :csi,
+            metadata: %{mode: :node, node_id: "worker-gone"}
+          }
+        ]
+      end)
+
+      error = assert_raise GRPC.RPCError, fn -> publish("blk", "worker-gone") end
+
+      assert error.status == GRPC.Status.unavailable()
+      assert error.message =~ "absent@127.0.0.1"
+    end
+
     test "attaches a block volume and names the node in the publish context" do
       reply = publish("blk", "worker-a")
 

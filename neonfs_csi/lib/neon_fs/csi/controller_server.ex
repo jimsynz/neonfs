@@ -1023,6 +1023,24 @@ defmodule NeonFS.CSI.ControllerServer do
       message: "#{operation} refused: #{Exception.message(reason)}"
   end
 
+  # An attach holder that cannot be reached is `UNAVAILABLE`, not `INTERNAL`,
+  # for the same reason a refusal is not: the status decides what the CO does
+  # next. There is a real window where the controller is up and the node
+  # plugin has not yet reached `Discovery`'s cache — so its distribution port
+  # is not yet published and the `erpc` cannot connect — and the
+  # attach-detach controller retries `UNAVAILABLE` with backoff. `INTERNAL`
+  # turns a cold cache that resolves itself into a failed attach that reads
+  # as a driver fault.
+  #
+  # The cost is that a genuinely dead node now retries instead of failing
+  # fast. That is the right trade: the two are indistinguishable at the time,
+  # and the transient one is far more common.
+  defp core_error!(operation, {:attach_holder_unreachable, node, reason}) do
+    raise GRPC.RPCError,
+      status: :unavailable,
+      message: "#{operation} failed: node #{node} is not reachable yet (#{inspect(reason)})"
+  end
+
   defp core_error!(operation, reason) do
     raise GRPC.RPCError, status: :internal, message: "#{operation} failed: #{inspect(reason)}"
   end

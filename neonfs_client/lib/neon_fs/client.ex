@@ -8,6 +8,8 @@ defmodule NeonFS.Client do
 
   alias NeonFS.Client.{Discovery, Router, ServiceInfo}
 
+  require Logger
+
   # `NeonFS.Core` facade operations that mutate a volume's per-volume metadata
   # tree (and so resolve + update its root segment). Each takes the volume name
   # as its first argument, so `core_call/3` routes them to a node that holds the
@@ -42,7 +44,8 @@ defmodule NeonFS.Client do
   """
   @spec register(NeonFS.Client.ServiceType.t(), map()) :: :ok | {:error, term()}
   def register(type, metadata \\ %{}) do
-    info = ServiceInfo.new(Node.self(), type, metadata: metadata)
+    info = ServiceInfo.for_self(type, metadata: metadata)
+    warn_on_undialable_registration(type, info.dist_port)
 
     case core_call(NeonFS.Core.ServiceRegistry, :register, [info]) do
       :ok -> :ok
@@ -168,4 +171,20 @@ defmodule NeonFS.Client do
   def write_call_by_id(volume_id, module, function, args) do
     Router.volume_metadata_call_by_id(volume_id, module, function, args)
   end
+
+  # A registration with no distribution port is still a valid registration:
+  # discovery, `neonfs node list` and routing to core all work, and that is
+  # everything an interface node does today. What it cannot do is be dialled
+  # *by a sibling*, because `NeonFS.Client.PeerPorts` has nothing to publish
+  # for it and `NeonFS.Epmd` has nothing to resolve. Without this line the
+  # condition is invisible until an attach fails.
+  defp warn_on_undialable_registration(type, 0) do
+    Logger.warning(
+      "Registering without NEONFS_DIST_PORT — siblings will not be able to reach this node",
+      service_type: type,
+      node: Node.self()
+    )
+  end
+
+  defp warn_on_undialable_registration(_type, _dist_port), do: :ok
 end

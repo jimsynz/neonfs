@@ -23,7 +23,7 @@ defmodule NeonFS.Client.Join do
   `NeonFS.Cluster.State`, invoked after the join has been persisted.
   """
 
-  alias NeonFS.Client.{HostLock, InviteCrypto, ServiceType}
+  alias NeonFS.Client.{HostLock, InviteCrypto, PeerPorts, ServiceType}
   alias NeonFS.Cluster.State
   alias NeonFS.TLSDistConfig
   alias NeonFS.Transport.{Listener, PoolManager, TLS}
@@ -449,9 +449,7 @@ defmodule NeonFS.Client.Join do
     via_node = credentials["via_node"] |> String.to_atom()
     via_dist_port = credentials["via_dist_port"]
 
-    if is_integer(via_dist_port) and via_dist_port > 0 do
-      System.put_env("NEONFS_PEER_PORTS", "#{via_node}:#{via_dist_port}")
-    end
+    PeerPorts.publish(%{via_node => via_dist_port})
 
     case Node.connect(via_node) do
       true ->

@@ -23,6 +23,7 @@ defmodule NeonFS.Cluster.Formation do
 
   require Logger
 
+  alias NeonFS.Client.PeerPorts
   alias NeonFS.Cluster.{Init, Invite, Join, State}
   alias NeonFS.Core.DriveRegistry
   alias NeonFS.Core.RaSupervisor
@@ -625,11 +626,10 @@ defmodule NeonFS.Cluster.Formation do
     System.monotonic_time(:millisecond) > state.deadline
   end
 
-  defp set_peer_ports_env(peer_ports) when map_size(peer_ports) == 0, do: :ok
-
+  # Through `PeerPorts` rather than `System.put_env/2`: a re-formation must
+  # not wipe the sibling ports `NeonFS.Client.Discovery` has published.
   defp set_peer_ports_env(peer_ports) do
-    value = Enum.map_join(peer_ports, ",", fn {node, port} -> "#{node}:#{port}" end)
-
-    System.put_env("NEONFS_PEER_PORTS", value)
+    PeerPorts.publish(peer_ports)
+    :ok
   end
 end

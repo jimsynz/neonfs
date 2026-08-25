@@ -614,6 +614,11 @@ k3s_sideload_csi_image() {
 # material, not the meta directory, so without this they cannot work out which
 # port core listens on and every connect fails `:nxdomain` — with no error, the
 # driver just reports no core connection forever.
+#
+# Only the *core* ports need seeding here. Each pod's own port now comes from
+# the chart's `distPort`, and the two pods learn each other's through the
+# service registry, which `NeonFS.Client.Discovery` publishes into this same
+# variable at runtime.
 k3s_peer_ports() {
   local n out=""
   for n in $(seq 1 "${NODES}"); do
@@ -663,6 +668,7 @@ controller:
   replicaCount: 1
   hostNetwork: true
   podAntiAffinity: false
+  distPort: ${CSI_CONTROLLER_DIST_PORT}
   # The image runs as \`nobody\`; the joined VM's distribution key is 0600 and
   # owned by the \`neonfs\` user, so a \`nobody\` controller cannot start TLS
   # distribution and never reaches core. Borrowing an identity from the host
@@ -682,9 +688,8 @@ controller:
       value: $(node_erl 1)
     - name: NEONFS_PEER_PORTS
       value: "$(k3s_peer_ports)"
-    - name: NEONFS_DIST_PORT
-      value: "${CSI_CONTROLLER_DIST_PORT}"
 node:
+  distPort: ${CSI_NODE_DIST_PORT}
   extraEnv:
     - name: RELEASE_DISTRIBUTION
       value: name
@@ -694,8 +699,6 @@ node:
       value: $(node_erl 1)
     - name: NEONFS_PEER_PORTS
       value: "$(k3s_peer_ports)"
-    - name: NEONFS_DIST_PORT
-      value: "${CSI_NODE_DIST_PORT}"
 storageClass:
   parameters:
     replication_factor: "${REPLICAS}"

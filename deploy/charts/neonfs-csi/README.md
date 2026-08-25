@@ -49,6 +49,8 @@ helm install neonfs-csi ./deploy/charts/neonfs-csi \
   --set image.repository=harton.dev/project-neon/neonfs-csi \
   --set image.tag=0.1.0 \
   --set coreNode=neonfs_core@10.0.0.1 \
+  --set controller.distPort=9101 \
+  --set node.distPort=9102 \
   --set bootstrap.uses=20 \
   --set bootstrap.value=$(cat /etc/neonfs/bootstrap-token)
 ```
@@ -63,6 +65,25 @@ Two addresses, deliberately separate because they are different kinds of thing:
   Set it when core's API is on another port, or when redemption should go to a
   different member than the plugin dials.
 
+### Distribution ports are required
+
+`controller.distPort` and `node.distPort` have no defaults, and rendering fails
+naming whichever is missing.
+
+NeonFS replaces EPMD, so a peer cannot ask a node which port it is on — it has
+to have been told. Each plugin publishes its port when it registers, and every
+other node learns it from the service registry. A plugin with no port still
+registers, still discovers, and still routes to core; the one thing it cannot do
+is be dialled *by a sibling*, which is exactly what a `volumeMode: Block` attach
+needs when the controller has to reach the node plugin.
+
+There is no safe default to fall back on. Both workloads run with
+`hostNetwork: true`, so these are host ports: they have to be free on every node
+and distinct from each other, and the chart cannot know what else is on the
+host. Failing at `helm template` is the honest version of a driver that would
+otherwise install, look healthy, and fail every block attach. `9101` and `9102`
+above are the test rig's convention, not a recommendation.
+
 To use an existing Secret for the bootstrap token (recommended for
 production):
 
@@ -74,6 +95,8 @@ kubectl create secret generic neonfs-csi-bootstrap \
 helm install neonfs-csi ./deploy/charts/neonfs-csi \
   --namespace kube-system \
   --set coreNode=neonfs_core@10.0.0.1 \
+  --set controller.distPort=9101 \
+  --set node.distPort=9102 \
   --set bootstrap.existingSecret=neonfs-csi-bootstrap
 ```
 
@@ -130,6 +153,8 @@ granting the node plugin the host's `/dev`:
 ```bash
 helm install neonfs-csi ./deploy/charts/neonfs-csi \
   --set coreNode=neonfs_core@10.0.0.1 \
+  --set controller.distPort=9101 \
+  --set node.distPort=9102 \
   --set node.hostDevices.enabled=true
 ```
 

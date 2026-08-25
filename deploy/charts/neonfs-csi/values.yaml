@@ -120,13 +120,27 @@ controller:
   # The cost is explicit — on a single-node cluster the second replica stays
   # `Pending` forever. Set `controller.replicaCount: 1` there.
   podAntiAffinity: true
+  # The Erlang distribution port this process listens on. **Required, no
+  # default.**
+  #
+  # `NeonFS.Epmd` replaces EPMD, so a peer has to learn this port rather than
+  # ask for it — it is published into the service registry at registration and
+  # from there into every sibling's `NEONFS_PEER_PORTS`. A process with no
+  # port registers fine and routes to core fine, and is simply undialable by
+  # its siblings, which is what `volumeMode: Block` attach needs.
+  #
+  # No default because there is no safe one. Both workloads are
+  # `hostNetwork: true`, so the port is a host port and has to be free and
+  # distinct from `node.distPort` and from anything else on the host — none of
+  # which the chart can know. Rendering fails naming this value, which is the
+  # honest version of a driver that would otherwise install and then fail to
+  # attach. The rig uses 9101 here and 9102 for the node plugin.
+  distPort: null
   # Extra environment, volumes and mounts for the plugin container. The
   # driver reaches a NeonFS cluster over Erlang distribution, so a deployment
   # whose cluster is not itself in Kubernetes needs to say where it is
-  # (`NEONFS_CORE_NODE`), which port this process listens on
-  # (`NEONFS_DIST_PORT` — one per process, so co-located pods must differ),
-  # and where its TLS material comes from. None of that is derivable from the
-  # chart, so it is passed in rather than guessed at.
+  # (`NEONFS_CORE_NODE`) and where its TLS material comes from. Neither is
+  # derivable from the chart, so it is passed in rather than guessed at.
   extraEnv: []
   extraVolumes: []
   extraVolumeMounts: []
@@ -187,9 +201,12 @@ node:
   hostDevices:
     enabled: false
     path: /dev
-  # As `controller.extraEnv` / `extraVolumes` / `extraVolumeMounts`. The node
-  # plugin is already `hostNetwork: true`, so its `NEONFS_DIST_PORT` must
-  # differ from anything else on the host.
+  # As `controller.distPort`. **Required, no default.** The node plugin shares
+  # the host's network namespace with the controller replica that may be
+  # scheduled beside it, so this must differ from `controller.distPort`. The
+  # rig uses 9102.
+  distPort: null
+  # As `controller.extraEnv` / `extraVolumes` / `extraVolumeMounts`.
   extraEnv: []
   extraVolumes: []
   extraVolumeMounts: []

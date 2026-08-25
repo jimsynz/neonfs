@@ -98,6 +98,8 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
+            - name: NEONFS_DIST_PORT
+              value: {{ required "node.distPort is required: the controller cannot dial a node plugin whose distribution port nothing published, so volumeMode: Block attach fails. Pick a free host port distinct from controller.distPort (the rig uses 9102)." .Values.node.distPort | quote }}
             {{- with .Values.node.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

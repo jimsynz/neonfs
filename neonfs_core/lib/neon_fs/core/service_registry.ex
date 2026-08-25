@@ -441,7 +441,7 @@ defmodule NeonFS.Core.ServiceRegistry do
   # will.
   defp self_register(state, attempt) do
     metadata = build_self_metadata()
-    info = ServiceInfo.new(Node.self(), :core, metadata: metadata)
+    info = ServiceInfo.for_self(:core, metadata: metadata)
     {result, new_state} = do_register(info, state)
 
     report_self_registration(result, metadata, attempt)

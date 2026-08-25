@@ -11,7 +11,7 @@ defmodule NeonFS.Client.Discovery do
   use GenServer
   require Logger
 
-  alias NeonFS.Client.{Connection, ServiceInfo, ServiceType}
+  alias NeonFS.Client.{Connection, PeerPorts, ServiceInfo, ServiceType}
 
   @default_refresh_ms 5_000
   @ets_table :neonfs_client_services
@@ -161,6 +161,7 @@ defmodule NeonFS.Client.Discovery do
         infos = Enum.map(services, &ServiceInfo.from_map/1)
 
         cache_services(infos)
+        publish_peer_ports(infos)
         Connection.sync_services(infos)
 
         :telemetry.execute(
@@ -175,6 +176,17 @@ defmodule NeonFS.Client.Discovery do
           reason: inspect(reason)
         )
     end
+  end
+
+  # Ordering is load-bearing: this has to run before `sync_services/1`, which
+  # casts through to `reconcile_connections/1` and dials. `NeonFS.Epmd`
+  # resolves the port at dial time, so publishing afterwards would be one
+  # refresh interval too late — and for an interface node dialling a sibling,
+  # this registry is the only place the port has ever been written down.
+  defp publish_peer_ports(services) do
+    services
+    |> Enum.map(&{&1.node, &1.dist_port})
+    |> PeerPorts.publish()
   end
 
   defp invalidate_node(node) do
