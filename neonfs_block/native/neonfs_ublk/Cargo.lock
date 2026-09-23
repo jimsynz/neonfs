@@ -447,9 +447,9 @@ dependencies = [
 
 [[package]]
 name = "libublk"
-version = "0.4.7"
+version = "0.4.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "25d2e91aa5046a25e8aeef80f75d33e77645fc812e3cdf82f83678b89b47c028"
+checksum = "212246283957aba80cbd6f04586d19eb57cf94aa49232c2a8a6b25b72c356239"
 dependencies = [
  "async-lock",
  "bitflags",
@@ -469,9 +469,9 @@ dependencies = [
 
 [[package]]
 name = "libublk-rs-sys"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e43961a17c2599912d3d6f3e5cd13f9275688f34cb14e9545e1cc34a605f6052"
+checksum = "3fd981fd7cf597c782453c2520f0d8f511dd6f66fc184b68577d7c7cf7108e44"
 dependencies = [
  "anyhow",
  "bindgen",

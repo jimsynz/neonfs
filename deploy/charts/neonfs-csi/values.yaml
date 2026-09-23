@@ -26,7 +26,7 @@ sidecars:
   # Kubernetes creates attachments nothing ever acts on, and every pod
   # using a NeonFS volume waits forever.
   attacher:
-    image: registry.k8s.io/sig-storage/csi-attacher:v4.9.0
+    image: registry.k8s.io/sig-storage/csi-attacher:v4.13.0
     pullPolicy: IfNotPresent
     extraArgs: []
   # Off, because this driver does not implement expansion. `csi-resizer`
@@ -45,10 +45,10 @@ sidecars:
     pullPolicy: IfNotPresent
     extraArgs: []
   livenessProbe:
-    image: registry.k8s.io/sig-storage/livenessprobe:v2.19.0
+    image: registry.k8s.io/sig-storage/livenessprobe:v2.20.0
     pullPolicy: IfNotPresent
   nodeDriverRegistrar:
-    image: registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.17.0
+    image: registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.18.0
     pullPolicy: IfNotPresent
 
 # The core node the plugin talks to, as an Erlang node name — e.g.
