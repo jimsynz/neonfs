@@ -49,7 +49,10 @@ version_of() {
   printf '%s' "$version"
 }
 
+# asdf needs the `-otp-N` suffix to pick the right Elixir build, but the
+# image tags name Elixir by its bare version.
 elixir="$(version_of elixir)"
+elixir="${elixir%-otp-*}"
 erlang="$(version_of erlang)"
 rust="$(version_of rust)"
 
