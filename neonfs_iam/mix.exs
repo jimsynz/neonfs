@@ -23,7 +23,22 @@ defmodule NeonFS.IAM.MixProject do
       elixirc_paths: elixirc_paths(Mix.env()),
       package: package(),
       start_permanent: Mix.env() == :prod,
+      usage_rules: usage_rules(),
       version: @version
+    ]
+  end
+
+  defp usage_rules do
+    [
+      file: "CLAUDE.md",
+      usage_rules: [
+        :ash,
+        ~r/^ash_/,
+        :igniter,
+        :usage_rules,
+        "usage_rules:elixir",
+        "usage_rules:otp"
+      ]
     ]
   end
 
@@ -58,14 +73,14 @@ defmodule NeonFS.IAM.MixProject do
       {:credo, "~> 1.6", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
       {:doctor, "~> 0.22", only: [:dev, :test], runtime: false},
-      {:ex_check, "~> 0.16", only: [:dev, :test], runtime: false},
+      {:ex_check, "~> 0.17", only: [:dev, :test], runtime: false},
       {:ex_doc, "~> 0.40", only: [:dev, :test], runtime: false},
       {:git_ops, "~> 2.4", only: [:dev, :test], runtime: false},
       {:igniter, "~> 0.8", only: [:dev, :test]},
       {:mimic, "~> 2.0", only: [:test]},
       {:mix_audit, "~> 2.0", only: [:dev, :test], runtime: false},
       {:stream_data, "~> 1.0"},
-      {:usage_rules, "~> 1.0", only: [:dev]}
+      {:usage_rules, "~> 1.0", only: [:dev, :test]}
     ]
   end
 end

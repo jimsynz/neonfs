@@ -1,197 +1,7 @@
 <!-- usage-rules-start -->
-<!-- usage-rules-header -->
-# Usage Rules
-
-**IMPORTANT**: Consult these usage rules early and often when working with the packages listed below.
-Before attempting to use any of these packages or to discover if you should use them, review their
-usage rules to understand the correct patterns, conventions, and best practices.
-<!-- usage-rules-header-end -->
-
-<!-- igniter-start -->
-## igniter usage
-_A code generation and project patching framework_
-
-<!--
-SPDX-FileCopyrightText: 2020 Zach Daniel
-SPDX-FileCopyrightText: 2024 igniter contributors <https://github.com/ash-project/igniter/graphs.contributors>
-
-SPDX-License-Identifier: MIT
--->
-
-# Rules for working with Igniter
-
-## Understanding Igniter
-
-Igniter is a code generation and project patching framework that enables semantic manipulation of Elixir codebases. It provides tools for creating intelligent generators that can both create new files and modify existing ones safely. Igniter works with AST (Abstract Syntax Trees) through Sourceror.Zipper to make precise, context-aware changes to your code.
-
-## Available Modules
-
-### Project-Level Modules (`Igniter.Project.*`)
-
-- **`Igniter.Project.Application`** - Working with Application modules and application configuration
-- **`Igniter.Project.Config`** - Modifying Elixir config files (config.exs, runtime.exs, etc.)
-- **`Igniter.Project.Deps`** - Managing dependencies declared in mix.exs
-- **`Igniter.Project.Formatter`** - Interacting with .formatter.exs files
-- **`Igniter.Project.IgniterConfig`** - Managing .igniter.exs configuration files
-- **`Igniter.Project.MixProject`** - Updating project configuration in mix.exs
-- **`Igniter.Project.Module`** - Creating and managing modules with proper file placement
-- **`Igniter.Project.TaskAliases`** - Managing task aliases in mix.exs
-- **`Igniter.Project.Test`** - Working with test and test support files
-
-### Code-Level Modules (`Igniter.Code.*`)
-
-- **`Igniter.Code.Common`** - General purpose utilities for working with Sourceror.Zipper
-- **`Igniter.Code.Function`** - Working with function definitions and calls
-- **`Igniter.Code.Keyword`** - Manipulating keyword lists
-- **`Igniter.Code.List`** - Working with lists in AST
-- **`Igniter.Code.Map`** - Manipulating maps
-- **`Igniter.Code.Module`** - Working with module definitions and usage
-- **`Igniter.Code.String`** - Utilities for string literals
-- **`Igniter.Code.Tuple`** - Working with tuples
-
-<!-- igniter-end -->
-<!-- usage_rules-start -->
-## usage_rules usage
-_A dev tool for Elixir projects to gather LLM usage rules from dependencies_
-
-## Using Usage Rules
-
-Many packages have usage rules, which you should *thoroughly* consult before taking any
-action. These usage rules contain guidelines and rules *directly from the package authors*.
-They are your best source of knowledge for making decisions.
-
-## Modules & functions in the current app and dependencies
-
-When looking for docs for modules & functions that are dependencies of the current project,
-or for Elixir itself, use `mix usage_rules.docs`
-
-```
-# Search a whole module
-mix usage_rules.docs Enum
-
-# Search a specific function
-mix usage_rules.docs Enum.zip
-
-# Search a specific function & arity
-mix usage_rules.docs Enum.zip/1
-```
-
-
-## Searching Documentation
-
-You should also consult the documentation of any tools you are using, early and often. The best 
-way to accomplish this is to use the `usage_rules.search_docs` mix task. Once you have
-found what you are looking for, use the links in the search results to get more detail. For example:
-
-```
-# Search docs for all packages in the current application, including Elixir
-mix usage_rules.search_docs Enum.zip
-
-# Search docs for specific packages
-mix usage_rules.search_docs Req.get -p req
-
-# Search docs for multi-word queries
-mix usage_rules.search_docs "making requests" -p req
-
-# Search only in titles (useful for finding specific functions/modules)
-mix usage_rules.search_docs "Enum.zip" --query-by title
-```
-
-
-<!-- usage_rules-end -->
-<!-- usage_rules:elixir-start -->
-## usage_rules:elixir usage
-# Elixir Core Usage Rules
-
-## Pattern Matching
-- Use pattern matching over conditional logic when possible
-- Prefer to match on function heads instead of using `if`/`else` or `case` in function bodies
-- `%{}` matches ANY map, not just empty maps. Use `map_size(map) == 0` guard to check for truly empty maps
-
-## Error Handling
-- Use `{:ok, result}` and `{:error, reason}` tuples for operations that can fail
-- Avoid raising exceptions for control flow
-- Use `with` for chaining operations that return `{:ok, _}` or `{:error, _}`
-
-## Common Mistakes to Avoid
-- Elixir has no `return` statement, nor early returns. The last expression in a block is always returned.
-- Don't use `Enum` functions on large collections when `Stream` is more appropriate
-- Avoid nested `case` statements - refactor to a single `case`, `with` or separate functions
-- Don't use `String.to_atom/1` on user input (memory leak risk)
-- Lists and enumerables cannot be indexed with brackets. Use pattern matching or `Enum` functions
-- Prefer `Enum` functions like `Enum.reduce` over recursion
-- When recursion is necessary, prefer to use pattern matching in function heads for base case detection
-- Using the process dictionary is typically a sign of unidiomatic code
-- Only use macros if explicitly requested
-- There are many useful standard library functions, prefer to use them where possible
-
-## Function Design
-- Use guard clauses: `when is_binary(name) and byte_size(name) > 0`
-- Prefer multiple function clauses over complex conditional logic
-- Name functions descriptively: `calculate_total_price/2` not `calc/2`
-- Predicate function names should not start with `is` and should end in a question mark.
-- Names like `is_thing` should be reserved for guards
-
-## Data Structures
-- Use structs over maps when the shape is known: `defstruct [:name, :age]`
-- Prefer keyword lists for options: `[timeout: 5000, retries: 3]`
-- Use maps for dynamic key-value data
-- Prefer to prepend to lists `[new | list]` not `list ++ [new]`
-
-## Mix Tasks
-
-- Use `mix help` to list available mix tasks
-- Use `mix help task_name` to get docs for an individual task
-- Read the docs and options fully before using tasks
-
-## Testing
-- Run tests in a specific file with `mix test test/my_test.exs` and a specific test with the line number `mix test path/to/test.exs:123`
-- Limit the number of failed tests with `mix test --max-failures n`
-- Use `@tag` to tag specific tests, and `mix test --only tag` to run only those tests
-- Use `assert_raise` for testing expected exceptions: `assert_raise ArgumentError, fn -> invalid_function() end`
-- Use `mix help test` to for full documentation on running tests
-
-## Debugging
-
-- Use `dbg/1` to print values while debugging. This will display the formatted value and other relevant information in the console.
-
-<!-- usage_rules:elixir-end -->
-<!-- usage_rules:otp-start -->
-## usage_rules:otp usage
-# OTP Usage Rules
-
-## GenServer Best Practices
-- Keep state simple and serializable
-- Handle all expected messages explicitly
-- Use `handle_continue/2` for post-init work
-- Implement proper cleanup in `terminate/2` when necessary
-
-## Process Communication
-- Use `GenServer.call/3` for synchronous requests expecting replies
-- Use `GenServer.cast/2` for fire-and-forget messages.
-- When in doubt, use `call` over `cast`, to ensure back-pressure
-- Set appropriate timeouts for `call/3` operations
-
-## Fault Tolerance
-- Set up processes such that they can handle crashing and being restarted by supervisors
-- Use `:max_restarts` and `:max_seconds` to prevent restart loops
-
-## Task and Async
-- Use `Task.Supervisor` for better fault tolerance
-- Handle task failures with `Task.yield/2` or `Task.shutdown/2`
-- Set appropriate task timeouts
-- Use `Task.async_stream/3` for concurrent enumeration with back-pressure
-
-<!-- usage_rules:otp-end -->
 <!-- ash-start -->
 ## ash usage
 _A declarative, extensible framework for building Elixir applications._
-
-<!--
-SPDX-FileCopyrightText: 2019 ash contributors <https://github.com/ash-project/ash/graphs/contributors>
-
-SPDX-License-Identifier: MIT
--->
 
 # Rules for working with Ash
 
@@ -203,12 +13,6 @@ Ash is an opinionated, composable framework for building applications in Elixir.
 <!-- ash-end -->
 <!-- ash:actions-start -->
 ## ash:actions usage
-<!--
-SPDX-FileCopyrightText: 2019 ash contributors <https://github.com/ash-project/ash/graphs/contributors>
-
-SPDX-License-Identifier: MIT
--->
-
 # Actions
 
 - Create specific, well-named actions rather than generic ones
@@ -246,7 +50,7 @@ Validations ensure that data meets your business requirements before it gets pro
 
 Validations work on both changesets and queries. Built-in validations that support queries include:
 - `action_is`, `argument_does_not_equal`, `argument_equals`, `argument_in`
-- `compare`, `confirm`, `match`, `negate`, `one_of`, `present`, `string_length`
+- `byte_size`, `compare`, `confirm`, `match`, `negate`, `one_of`, `present`, `string_length`
 - Custom validations that implement the `supports/1` callback
 
 Common validation patterns:
@@ -613,16 +417,9 @@ change MyApp.MyDomain.MyResource.Changes.SlugifyName
 - **Generic**: For custom operations that don't fit the other types
 
 
-
 <!-- ash:actions-end -->
 <!-- ash:aggregates-start -->
 ## ash:aggregates usage
-<!--
-SPDX-FileCopyrightText: 2019 ash contributors <https://github.com/ash-project/ash/graphs/contributors>
-
-SPDX-License-Identifier: MIT
--->
-
 # Aggregates
 
 Aggregates allow you to retrieve summary information over groups of related data, like counts, sums, or averages. Define aggregates in the `aggregates` block of a resource.
@@ -733,12 +530,6 @@ calculate :stats, :map, expr(%{
 <!-- ash:aggregates-end -->
 <!-- ash:authorization-start -->
 ## ash:authorization usage
-<!--
-SPDX-FileCopyrightText: 2019 ash contributors <https://github.com/ash-project/ash/graphs/contributors>
-
-SPDX-License-Identifier: MIT
--->
-
 # Authorization
 
 - When performing administrative actions, you can bypass authorization with `authorize?: false`
@@ -924,12 +715,6 @@ end
 <!-- ash:authorization-end -->
 <!-- ash:calculations-start -->
 ## ash:calculations usage
-<!--
-SPDX-FileCopyrightText: 2019 ash contributors <https://github.com/ash-project/ash/graphs/contributors>
-
-SPDX-License-Identifier: MIT
--->
-
 # Calculations
 
 Calculations allow you to define derived values based on a resource's attributes or related data. Define calculations in the `calculations` block of a resource:
@@ -1084,12 +869,6 @@ MyDomain.full_name("John", "Doe", ", ")  # Returns "John, Doe"
 <!-- ash:calculations-end -->
 <!-- ash:code_interfaces-start -->
 ## ash:code_interfaces usage
-<!--
-SPDX-FileCopyrightText: 2019 ash contributors <https://github.com/ash-project/ash/graphs/contributors>
-
-SPDX-License-Identifier: MIT
--->
-
 # Code Interfaces
 
 Domains and Resources can define code interfaces. Prefer writing code interfaces instead of regular elixir functions.
@@ -1200,7 +979,27 @@ Inside action hooks and callbacks, use the provided `context` parameter as your 
 end)
 ```
 
+## Predicate interfaces (`?`-suffixed names)
+
+When a code interface name ends in `?` (e.g. `define :user_exists?, action: :user_exists?, args: [:email]`), Ash treats it as a **predicate interface** and generates two action functions (same pattern as calculation interfaces):
+
+- `user_exists/…` (with `?` stripped from the name) returns `{:ok, result}` or `{:error, reason}` (from `:action`)
+- `user_exists?/…` returns the **unwrapped result** (typically bare `true`/`false`); raises on failure (from `:action!`)
+- **No** `user_exists!/…` or `user_exists?!/…`
+
+The action's `run` callback still returns `{:ok, result}` or `{:error, reason}`; the code interface unwraps it for the `?`-suffixed function.
+
+Authorization helpers for predicate interfaces:
+
+- `can_user_exists/…` returns `{:ok, true/false}` or `{:error, reason}`
+- `can_user_exists?/…` returns a bare boolean
+- **No** `can_user_exists??/…` is generated
+
+Both action functions come from the default `functions:` list (`:action` and `:action!`). Omit `:action` to skip the tuple form; omit `:action!` to skip the predicate form. See the [Code interface guide](https://hexdocs.pm/ash/code-interfaces.html) for examples.
+
 ## Authorization Functions
+
+For predicate interfaces (names ending in `?`), see [Predicate interfaces](#predicate-interfaces-suffixed-names) above for naming rules.
 
 For each action defined in a code interface, Ash automatically generates corresponding authorization check functions:
 
@@ -1231,12 +1030,6 @@ These functions are particularly useful for conditional rendering of UI elements
 <!-- ash:code_interfaces-end -->
 <!-- ash:code_structure-start -->
 ## ash:code_structure usage
-<!--
-SPDX-FileCopyrightText: 2019 ash contributors <https://github.com/ash-project/ash/graphs/contributors>
-
-SPDX-License-Identifier: MIT
--->
-
 # Code Structure & Organization
 
 - Organize code around domains and resources
@@ -1248,12 +1041,6 @@ SPDX-License-Identifier: MIT
 <!-- ash:code_structure-end -->
 <!-- ash:data_layers-start -->
 ## ash:data_layers usage
-<!--
-SPDX-FileCopyrightText: 2019 ash contributors <https://github.com/ash-project/ash/graphs/contributors>
-
-SPDX-License-Identifier: MIT
--->
-
 # Data Layers
 
 Data layers determine how resources are stored and retrieved. Examples of data layers:
@@ -1303,12 +1090,6 @@ Each data layer has its own configuration options and capabilities. Refer to the
 <!-- ash:data_layers-end -->
 <!-- ash:exist_expressions-start -->
 ## ash:exist_expressions usage
-<!--
-SPDX-FileCopyrightText: 2019 ash contributors <https://github.com/ash-project/ash/graphs/contributors>
-
-SPDX-License-Identifier: MIT
--->
-
 # Exists Expressions
 
 Use `exists/2` to check for the existence of records, either through relationships or unrelated resources:
@@ -1344,12 +1125,6 @@ Unrelated exists expressions automatically apply authorization using the target 
 <!-- ash:exist_expressions-end -->
 <!-- ash:generating_code-start -->
 ## ash:generating_code usage
-<!--
-SPDX-FileCopyrightText: 2019 ash contributors <https://github.com/ash-project/ash/graphs/contributors>
-
-SPDX-License-Identifier: MIT
--->
-
 # Generating Code
 
 Use `mix ash.gen.*` tasks as a basis for code generation when possible. Check the task docs with `mix help <task>`.
@@ -1359,12 +1134,6 @@ Be sure to use `--yes` to bypass confirmation prompts. Use `--yes --dry-run` to 
 <!-- ash:generating_code-end -->
 <!-- ash:migrations-start -->
 ## ash:migrations usage
-<!--
-SPDX-FileCopyrightText: 2019 ash contributors <https://github.com/ash-project/ash/graphs/contributors>
-
-SPDX-License-Identifier: MIT
--->
-
 # Migrations and Schema Changes
 
 After creating or modifying Ash code, run `mix ash.codegen <short_name_describing_changes>` to ensure any required additional changes are made (like migrations are generated). The name of the migration should be lower_snake_case. In a longer running dev session it's usually better to use `mix ash.codegen --dev` as you go and at the end run the final codegen with a sensible name describing all the changes made in the session.
@@ -1373,12 +1142,6 @@ After creating or modifying Ash code, run `mix ash.codegen <short_name_describin
 <!-- ash:migrations-end -->
 <!-- ash:query_filter-start -->
 ## ash:query_filter usage
-<!--
-SPDX-FileCopyrightText: 2019 ash contributors <https://github.com/ash-project/ash/graphs/contributors>
-
-SPDX-License-Identifier: MIT
--->
-
 # Ash.Query.filter is a macro
 
 **Important**: You must `require Ash.Query` if you want to use `Ash.Query.filter/2`, as it is a macro.
@@ -1412,12 +1175,6 @@ You are very likely missing a `require Ash.Query`
 <!-- ash:query_filter-end -->
 <!-- ash:querying_data-start -->
 ## ash:querying_data usage
-<!--
-SPDX-FileCopyrightText: 2019 ash contributors <https://github.com/ash-project/ash/graphs/contributors>
-
-SPDX-License-Identifier: MIT
--->
-
 # Querying Data
 
 Use `Ash.Query` to build queries for reading data from your resources. The query module provides a declarative way to filter, sort, and load data.
@@ -1426,12 +1183,6 @@ Use `Ash.Query` to build queries for reading data from your resources. The query
 <!-- ash:querying_data-end -->
 <!-- ash:relationships-start -->
 ## ash:relationships usage
-<!--
-SPDX-FileCopyrightText: 2019 ash contributors <https://github.com/ash-project/ash/graphs/contributors>
-
-SPDX-License-Identifier: MIT
--->
-
 # Relationships
 
 Relationships describe connections between resources and are a core component of Ash. Define relationships in the `relationships` block of a resource.
@@ -1605,14 +1356,104 @@ MyDomain.update_post!(post, %{
 
 
 <!-- ash:relationships-end -->
+<!-- ash:temporal-start -->
+## ash:temporal usage
+# Temporal Resources
+
+Temporal resources are experimental. A temporal resource keeps every version of a record, and each version is valid for a half-open period `[from, to)`. Every read and write happens "as of" one instant. Read the "Temporal Resources" guide before working with them.
+
+## Supported Data Layers
+
+- Only `AshPostgres.DataLayer` on PostgreSQL 18+ and `Ash.DataLayer.Ets` support temporal resources. On any other data layer, a resource that declares `temporal` won't compile.
+- Manual actions skip temporal handling entirely. If you write one, you manage periods yourself.
+
+## Defining a Temporal Resource
+
+```elixir
+temporal do
+  strategy :context
+  attribute :valid_at
+  # optional: wall-clock time each version was written
+  recorded_at :recorded_at
+end
+```
+
+- You don't have to declare the period attribute. If you leave it out, `temporal` adds an `Ash.Type.Range` over `:utc_datetime_usec` with `[from, to)` bounds.
+- If you do declare it, it must be an `Ash.Type.Range` over `:utc_datetime_usec`, `:utc_datetime` or `:datetime`, with `allow_nil? false`, an inclusive lower bound and an exclusive upper bound. Ranges over dates, naive datetimes or other types are refused at compile time.
+- **Never put the period attribute in an action's `accept`**, and never set it in a change. Its value always comes from the write's `as_of`.
+- Use `mix ash.codegen` for migrations. It generates the `PRIMARY KEY (id, valid_at WITHOUT OVERLAPS)` and installs `btree_gist`. Don't write these by hand.
+
+## Reading
+
+- To read at a point in time, use `Ash.Query.as_of/2` or pass `as_of:` anywhere `tenant:` is accepted (`Ash.read`, `Ash.get`, code interfaces, `for_read`, and so on).
+- If you leave out `as_of`, the read happens now and returns exactly one row per record. It never returns the full history.
+- Every read is a single instant. A range-valued `as_of` on a read raises `Ash.Error.Query.AsOfNotAnInstant`. Don't try to fetch several versions of a record in one query.
+- `as_of` propagates like `tenant`. Loaded relationships, calculations, aggregates and nested actions all run at the same instant, so you don't need to pass it to them again.
+- In expressions, `now()`, `ago/2` and `from_now/2` mean the query's `as_of`, not the wall clock. Write `expr(expires_at > now())`, not `^DateTime.utc_now()`. Pinning the wall clock breaks time travel.
+
+```elixir
+Ash.get!(MyApp.Subscription, 1, as_of: ~U[2026-01-15 00:00:00Z])
+
+MyApp.Subscription
+|> Ash.Query.filter(plan == "gold")
+|> Ash.Query.as_of(~U[2026-01-15 00:00:00Z])
+|> Ash.read!()
+```
+
+## Writing
+
+- A write makes something true from `as_of` onward. If you don't pass `as_of`, it uses now. One instant is pinned for the whole write, and `&DateTime.utc_now/0` defaults and `set_attribute(..., &DateTime.utc_now/0)` resolve to that same instant. Back-dated writes therefore get back-dated timestamps. Use `recorded_at` if you need the actual time a version was written.
+- **Pass `as_of` as an action option** (`for_create(:create, input, as_of: ...)`, `for_update(...)`, `for_destroy(...)`). `Ash.Changeset.as_of/2` is applied too late for cascading destroys, `manage_relationship`, and identity pre-checks.
+- A **create** opens `[as_of, ∞)`. You can't create a record if any later version of it already exists.
+- An **update** splits the version valid at `as_of`. The new values run from `as_of` to wherever that version ended. To schedule a future change, write an update with a future `as_of`, not a create.
+- A **destroy** closes the version valid at `as_of` down to `[from, as_of)`. It doesn't delete history.
+- An update or destroy with no version valid at `as_of` (because the history ended, the record hasn't started yet, or `as_of` falls in a gap) fails as a stale record. To bring back a record whose history has ended, **create** it again rather than updating it.
+- On Postgres, concurrent writes to the same record are retried automatically, up to 25 conflicts, after which `AshPostgres.Temporal.WriteConflict` is raised. It's safe to retry. Under `REPEATABLE READ`/`SERIALIZABLE` you get a serialization failure instead, and retrying is up to you.
+
+## Changes, Validations and Preparations
+
+- Any change, validation or preparation that runs on a temporal resource must declare `temporal_safe?/1` returning `true`. Otherwise the action raises `Ash.Error.Framework.NotTemporalSafe`. The callback defaults to `false`.
+- Only declare a module temporal safe if it never reads the wall clock (use `now()` in expressions or the subject's `as_of` instead), has no side effects that assume the present, and does all of its reads and nested actions through Ash so `as_of` propagates.
+- The built-in changes, validations and preparations are temporal safe. These aren't, because they wrap arbitrary functions: `before_action`, `after_action`, `before_transaction`, `after_transaction`, and anonymous-function changes, validations and preparations. Move that logic into a module that declares `temporal_safe?/1`.
+- For third-party modules that you've verified are safe but that don't declare the callback, add them to `config :ash, :temporal_safe_modules, [...]`. The list is read at compile time.
+
+```elixir
+defmodule MyApp.Changes.Slugify do
+  use Ash.Resource.Change
+
+  @impl true
+  def temporal_safe?(_opts), do: true
+
+  @impl true
+  def change(changeset, _opts, _context) do
+    # ...
+  end
+end
+```
+
+## Relationships and Identities
+
+- To make a `belongs_to` point at another temporal resource for the matching period, declare `temporal_keys {:valid_at, :valid_at}`. On Postgres this produces a `PERIOD` foreign key.
+- `PERIOD` foreign keys only support `NO ACTION`, so `on_delete`/`on_update` referential actions are rejected at compile time. Cascade in the application instead, for example with `change cascade_destroy(:subscriptions)`.
+- Write identities as usual (`identity :unique_email, [:email]`). On a temporal resource they become "unique at every instant" (`UNIQUE (... WITHOUT OVERLAPS)`). Don't add the period attribute to an identity.
+
+## Authorization
+
+- Data and filter checks are evaluated as of the query's `as_of`. Actor attribute checks (`actor_attribute_equals`, `^actor(:field)`) use the actor struct exactly as you loaded it. Ash does not re-fetch the actor at the query's instant.
+- **Load the actor as of the same instant you query.** Otherwise you're authorizing historical data with the actor's current attributes.
+
+```elixir
+as_of = ~U[2026-01-15 00:00:00Z]
+actor = Ash.get!(MyApp.User, user_id, as_of: as_of)
+
+MyApp.Subscription
+|> Ash.Query.as_of(as_of)
+|> Ash.read!(actor: actor)
+```
+
+<!-- ash:temporal-end -->
 <!-- ash:testing-start -->
 ## ash:testing usage
-<!--
-SPDX-FileCopyrightText: 2019 ash contributors <https://github.com/ash-project/ash/graphs/contributors>
-
-SPDX-License-Identifier: MIT
--->
-
 # Testing
 
 When testing resources:
@@ -1678,12 +1519,6 @@ This applies to ANY field used in identity constraints, not just primary keys. U
 ## ash_authentication usage
 _Authentication extension for the Ash Framework._
 
-<!--
-SPDX-FileCopyrightText: 2022 Alembic Pty Ltd
-
-SPDX-License-Identifier: MIT
--->
-
 # AshAuthentication Usage Rules
 
 ## Core Concepts
@@ -1696,7 +1531,7 @@ SPDX-License-Identifier: MIT
 ## Key Principles
 - Always use secrets management - never hardcode credentials
 - Enable tokens for magic_link, confirmation, OAuth2
-- UserIdentity resource optional for OAuth2 (required for multiple providers per user)
+- UserIdentity resource required for all OAuth2/OIDC strategies (stores the provider's `iss`/`sub` claims; matching users by email is unsafe)
 - API keys require strict policy controls and expiration management
 - Use prefixes for API keys to enable secret scanning compliance
 - Check existing strategies: `AshAuthentication.Info.strategies/1`
@@ -1713,8 +1548,7 @@ SPDX-License-Identifier: MIT
 - Requires: API key resource, relationship to user, sign-in action
 
 **OAuth2** - Social/enterprise login (GitHub, Google, Auth0, Apple, OIDC, Slack)
-- Requires: custom actions, secrets
-- Optional: UserIdentity resource (for multiple providers per user)
+- Requires: custom actions, secrets, UserIdentity resource
 
 ## Password Strategy
 
@@ -1848,9 +1682,15 @@ end
 - Custom `register_with_[provider]` action
 - Secrets management
 - Tokens enabled
+- UserIdentity resource (stores the provider's `iss`/`sub` identity claims - matching users by email or other claims is unsafe)
 
-**Optional for all OAuth2:**
-- UserIdentity resource (for multiple providers per user)
+**How users are matched (sign-in and registration):**
+- Users are resolved by the `(strategy, sub)` identity, never by email. A provider identity belongs to exactly one local user, permanently.
+- A `sub` that has been seen before signs that user in.
+- A new `sub` whose email matches an existing account is only linked automatically when the provider's `email_verified` claim is trusted (`trust_email_verified?`). Otherwise the behaviour depends on `on_untrusted_email_match`.
+- `trust_email_verified?` defaults to `true` for GitHub/Google/Auth0/Slack/Apple and `false` elsewhere. Only enable it for providers that reliably assert email ownership.
+- `on_untrusted_email_match` controls the untrusted-email-matches-existing-account case: `:reject` (the default) refuses the sign-in (the user must sign in with their existing method to link the provider); `:confirm` issues a confirmation to the existing account's email and links the provider only once the recipient proves ownership by confirming. `:confirm` requires a `confirmation` add-on (enforced at compile time).
+- **Security note for `:confirm`**: confirming binds whatever provider identity initiated the flow, so the confirmation email must make clear *which* provider is being linked and that confirming grants it access — otherwise a user can be social-engineered into linking an attacker's provider account. The generated confirmation sender branches on `opts[:confirmation_type] == :identity_link` to produce this copy.
 
 ### OAuth2 Configuration Pattern
 ```elixir
@@ -1873,13 +1713,13 @@ end
 actions do
   create :register_with_github do
     argument :user_info, :map, allow_nil?: false
-    argument :oauth_tokens, :map, allow_nil?: false
+    argument :oauth_tokens, :map, allow_nil?: false, sensitive?: true
     upsert? true
     upsert_identity :unique_email
 
     change AshAuthentication.GenerateTokenChange
-    
-    # If UserIdentity resource is being used
+
+    # Required: persists the provider's `iss`/`sub` identity claims
     change AshAuthentication.Strategy.OAuth2.IdentityChange
 
     change fn changeset, _ctx ->
@@ -1995,11 +1835,13 @@ When new users can register via OAuth2:
 actions do
   create :register_with_github do
     argument :user_info, :map, allow_nil?: false
-    argument :oauth_tokens, :map, allow_nil?: false
+    argument :oauth_tokens, :map, allow_nil?: false, sensitive?: true
     upsert? true
     upsert_identity :email
 
     change AshAuthentication.GenerateTokenChange
+    # Required: persists the provider's `iss`/`sub` identity claims
+    change AshAuthentication.Strategy.OAuth2.IdentityChange
     change fn changeset, _ctx ->
       user_info = Ash.Changeset.get_argument(changeset, :user_info)
 
@@ -2057,4 +1899,355 @@ end
 
 For more guidance, see the "Customizing Authentication Actions" section in the getting started guide.
 <!-- ash_authentication-end -->
+<!-- igniter-start -->
+## igniter usage
+_A code generation and project patching framework_
+
+# Rules for working with Igniter
+
+## Understanding Igniter
+
+Igniter is a code generation and project patching framework that enables semantic manipulation of Elixir codebases. It provides tools for creating intelligent generators that can both create new files and modify existing ones safely. Igniter works with AST (Abstract Syntax Trees) through Sourceror.Zipper to make precise, context-aware changes to your code.
+
+## Available Modules
+
+### Project-Level Modules (`Igniter.Project.*`)
+
+- **`Igniter.Project.Application`** - Working with Application modules and application configuration
+- **`Igniter.Project.Config`** - Modifying Elixir config files (config.exs, runtime.exs, etc.)
+- **`Igniter.Project.Deps`** - Managing dependencies declared in mix.exs
+- **`Igniter.Project.Formatter`** - Interacting with .formatter.exs files
+- **`Igniter.Project.IgniterConfig`** - Managing .igniter.exs configuration files
+- **`Igniter.Project.MixProject`** - Updating project configuration in mix.exs
+- **`Igniter.Project.Module`** - Creating and managing modules with proper file placement
+- **`Igniter.Project.TaskAliases`** - Managing task aliases in mix.exs
+- **`Igniter.Project.Test`** - Working with test and test support files
+
+### Code-Level Modules (`Igniter.Code.*`)
+
+- **`Igniter.Code.Common`** - General purpose utilities for working with Sourceror.Zipper
+- **`Igniter.Code.Function`** - Working with function definitions and calls
+- **`Igniter.Code.Keyword`** - Manipulating keyword lists
+- **`Igniter.Code.List`** - Working with lists in AST
+- **`Igniter.Code.Map`** - Manipulating maps
+- **`Igniter.Code.Module`** - Working with module definitions and usage
+- **`Igniter.Code.String`** - Utilities for string literals
+- **`Igniter.Code.Tuple`** - Working with tuples
+
+<!-- igniter-end -->
+<!-- usage_rules-start -->
+## usage_rules usage
+_A config-driven dev tool for Elixir projects to manage AGENTS.md files and agent skills from dependencies_
+
+## Using Usage Rules
+
+Many packages have usage rules, which you should *thoroughly* consult before taking any
+action. These usage rules contain guidelines and rules *directly from the package authors*.
+They are your best source of knowledge for making decisions.
+
+## Modules & functions in the current app and dependencies
+
+When looking for docs for modules & functions that are dependencies of the current project,
+or for Elixir itself, use `mix usage_rules.docs`
+
+```
+# Search a whole module
+mix usage_rules.docs Enum
+
+# Search a specific function
+mix usage_rules.docs Enum.zip
+
+# Search a specific function & arity
+mix usage_rules.docs Enum.zip/1
+```
+
+
+## Searching Documentation
+
+You should also consult the documentation of any tools you are using, early and often. The best 
+way to accomplish this is to use the `usage_rules.search_docs` mix task. Once you have
+found what you are looking for, use the links in the search results to get more detail. For example:
+
+```
+# Search docs for all packages in the current application, including Elixir
+mix usage_rules.search_docs Enum.zip
+
+# Search docs for specific packages
+mix usage_rules.search_docs Req.get -p req
+
+# Search docs for multi-word queries
+mix usage_rules.search_docs "making requests" -p req
+
+# Search only in titles (useful for finding specific functions/modules)
+mix usage_rules.search_docs "Enum.zip" --query-by title
+```
+
+
+<!-- usage_rules-end -->
+<!-- usage_rules:elixir-start -->
+## usage_rules:elixir usage
+# Elixir Core Usage Rules
+
+## Pattern Matching
+- Use pattern matching over conditional logic when possible
+- Prefer to match on function heads instead of using `if`/`else` or `case` in function bodies
+- `%{}` matches ANY map, not just empty maps. Use `map_size(map) == 0` guard to check for truly empty maps
+
+## Error Handling
+- Use `{:ok, result}` and `{:error, reason}` tuples for operations that can fail
+- Avoid raising exceptions for control flow
+- Use `with` for chaining operations that return `{:ok, _}` or `{:error, _}`
+
+## Common Mistakes to Avoid
+- Elixir has no `return` statement, nor early returns. The last expression in a block is always returned.
+- Don't use `Enum` functions on large collections when `Stream` is more appropriate
+- Avoid nested `case` statements - refactor to a single `case`, `with` or separate functions
+- Don't use `String.to_atom/1` on user input (memory leak risk)
+- Lists and enumerables cannot be indexed with brackets. Use pattern matching or `Enum` functions
+- Prefer `Enum` functions like `Enum.reduce` over recursion
+- When recursion is necessary, prefer to use pattern matching in function heads for base case detection
+- Using the process dictionary is typically a sign of unidiomatic code
+- Only use macros if explicitly requested
+- There are many useful standard library functions, prefer to use them where possible
+
+## Function Design
+- Use guard clauses: `when is_binary(name) and byte_size(name) > 0`
+- Prefer multiple function clauses over complex conditional logic
+- Name functions descriptively: `calculate_total_price/2` not `calc/2`
+- Predicate function names should not start with `is` and should end in a question mark.
+- Names like `is_thing` should be reserved for guards
+
+## Data Structures
+- Use structs over maps when the shape is known: `defstruct [:name, :age]`
+- Prefer keyword lists for options: `[timeout: 5000, retries: 3]`
+- Use maps for dynamic key-value data
+- Prefer to prepend to lists `[new | list]` not `list ++ [new]`
+
+## Mix Tasks
+
+- Use `mix help` to list available mix tasks
+- Use `mix help task_name` to get docs for an individual task
+- Read the docs and options fully before using tasks
+
+## Testing
+- Run tests in a specific file with `mix test test/my_test.exs` and a specific test with the line number `mix test path/to/test.exs:123`
+- Limit the number of failed tests with `mix test --max-failures n`
+- Use `@tag` to tag specific tests, and `mix test --only tag` to run only those tests
+- Use `assert_raise` for testing expected exceptions: `assert_raise ArgumentError, fn -> invalid_function() end`
+- Use `mix help test` to for full documentation on running tests
+
+## Debugging
+
+- Use `dbg/1` to print values while debugging. This will display the formatted value and other relevant information in the console.
+
+<!-- usage_rules:elixir-end -->
+<!-- usage_rules:otp-start -->
+## usage_rules:otp usage
+# OTP Usage Rules
+
+## GenServer Best Practices
+- Keep state simple and serializable
+- Handle all expected messages explicitly
+- Use `handle_continue/2` for post-init work
+- Implement proper cleanup in `terminate/2` when necessary
+
+## Process Communication
+- Use `GenServer.call/3` for synchronous requests expecting replies
+- Use `GenServer.cast/2` for fire-and-forget messages.
+- When in doubt, use `call` over `cast`, to ensure back-pressure
+- Set appropriate timeouts for `call/3` operations
+
+## Fault Tolerance
+- Set up processes such that they can handle crashing and being restarted by supervisors
+- Use `:max_restarts` and `:max_seconds` to prevent restart loops
+
+## Task and Async
+- Use `Task.Supervisor` for better fault tolerance
+- Handle task failures with `Task.yield/2` or `Task.shutdown/2`
+- Set appropriate task timeouts
+- Use `Task.async_stream/3` for concurrent enumeration with back-pressure
+
+<!-- usage_rules:otp-end -->
+<!-- usage_rules-start -->
+## usage_rules usage
+_A config-driven dev tool for Elixir projects to manage AGENTS.md files and agent skills from dependencies_
+
+## Using Usage Rules
+
+Many packages have usage rules, which you should *thoroughly* consult before taking any
+action. These usage rules contain guidelines and rules *directly from the package authors*.
+They are your best source of knowledge for making decisions.
+
+## Modules & functions in the current app and dependencies
+
+When looking for docs for modules & functions that are dependencies of the current project,
+or for Elixir itself, use `mix usage_rules.docs`
+
+```
+# Search a whole module
+mix usage_rules.docs Enum
+
+# Search a specific function
+mix usage_rules.docs Enum.zip
+
+# Search a specific function & arity
+mix usage_rules.docs Enum.zip/1
+```
+
+
+## Searching Documentation
+
+You should also consult the documentation of any tools you are using, early and often. The best 
+way to accomplish this is to use the `usage_rules.search_docs` mix task. Once you have
+found what you are looking for, use the links in the search results to get more detail. For example:
+
+```
+# Search docs for all packages in the current application, including Elixir
+mix usage_rules.search_docs Enum.zip
+
+# Search docs for specific packages
+mix usage_rules.search_docs Req.get -p req
+
+# Search docs for multi-word queries
+mix usage_rules.search_docs "making requests" -p req
+
+# Search only in titles (useful for finding specific functions/modules)
+mix usage_rules.search_docs "Enum.zip" --query-by title
+```
+
+
+<!-- usage_rules-end -->
+<!-- usage_rules:elixir-start -->
+## usage_rules:elixir usage
+# Elixir Core Usage Rules
+
+## Pattern Matching
+- Use pattern matching over conditional logic when possible
+- Prefer to match on function heads instead of using `if`/`else` or `case` in function bodies
+- `%{}` matches ANY map, not just empty maps. Use `map_size(map) == 0` guard to check for truly empty maps
+
+## Error Handling
+- Use `{:ok, result}` and `{:error, reason}` tuples for operations that can fail
+- Avoid raising exceptions for control flow
+- Use `with` for chaining operations that return `{:ok, _}` or `{:error, _}`
+
+## Common Mistakes to Avoid
+- Elixir has no `return` statement, nor early returns. The last expression in a block is always returned.
+- Don't use `Enum` functions on large collections when `Stream` is more appropriate
+- Avoid nested `case` statements - refactor to a single `case`, `with` or separate functions
+- Don't use `String.to_atom/1` on user input (memory leak risk)
+- Lists and enumerables cannot be indexed with brackets. Use pattern matching or `Enum` functions
+- Prefer `Enum` functions like `Enum.reduce` over recursion
+- When recursion is necessary, prefer to use pattern matching in function heads for base case detection
+- Using the process dictionary is typically a sign of unidiomatic code
+- Only use macros if explicitly requested
+- There are many useful standard library functions, prefer to use them where possible
+
+## Function Design
+- Use guard clauses: `when is_binary(name) and byte_size(name) > 0`
+- Prefer multiple function clauses over complex conditional logic
+- Name functions descriptively: `calculate_total_price/2` not `calc/2`
+- Predicate function names should not start with `is` and should end in a question mark.
+- Names like `is_thing` should be reserved for guards
+
+## Data Structures
+- Use structs over maps when the shape is known: `defstruct [:name, :age]`
+- Prefer keyword lists for options: `[timeout: 5000, retries: 3]`
+- Use maps for dynamic key-value data
+- Prefer to prepend to lists `[new | list]` not `list ++ [new]`
+
+## Mix Tasks
+
+- Use `mix help` to list available mix tasks
+- Use `mix help task_name` to get docs for an individual task
+- Read the docs and options fully before using tasks
+
+## Testing
+- Run tests in a specific file with `mix test test/my_test.exs` and a specific test with the line number `mix test path/to/test.exs:123`
+- Limit the number of failed tests with `mix test --max-failures n`
+- Use `@tag` to tag specific tests, and `mix test --only tag` to run only those tests
+- Use `assert_raise` for testing expected exceptions: `assert_raise ArgumentError, fn -> invalid_function() end`
+- Use `mix help test` to for full documentation on running tests
+
+## Debugging
+
+- Use `dbg/1` to print values while debugging. This will display the formatted value and other relevant information in the console.
+
+<!-- usage_rules:elixir-end -->
+<!-- usage_rules-start -->
+## usage_rules usage
+_A config-driven dev tool for Elixir projects to manage AGENTS.md files and agent skills from dependencies_
+
+## Using Usage Rules
+
+Many packages have usage rules, which you should *thoroughly* consult before taking any
+action. These usage rules contain guidelines and rules *directly from the package authors*.
+They are your best source of knowledge for making decisions.
+
+## Modules & functions in the current app and dependencies
+
+When looking for docs for modules & functions that are dependencies of the current project,
+or for Elixir itself, use `mix usage_rules.docs`
+
+```
+# Search a whole module
+mix usage_rules.docs Enum
+
+# Search a specific function
+mix usage_rules.docs Enum.zip
+
+# Search a specific function & arity
+mix usage_rules.docs Enum.zip/1
+```
+
+
+## Searching Documentation
+
+You should also consult the documentation of any tools you are using, early and often. The best 
+way to accomplish this is to use the `usage_rules.search_docs` mix task. Once you have
+found what you are looking for, use the links in the search results to get more detail. For example:
+
+```
+# Search docs for all packages in the current application, including Elixir
+mix usage_rules.search_docs Enum.zip
+
+# Search docs for specific packages
+mix usage_rules.search_docs Req.get -p req
+
+# Search docs for multi-word queries
+mix usage_rules.search_docs "making requests" -p req
+
+# Search only in titles (useful for finding specific functions/modules)
+mix usage_rules.search_docs "Enum.zip" --query-by title
+```
+
+
+<!-- usage_rules-end -->
+<!-- usage_rules:otp-start -->
+## usage_rules:otp usage
+# OTP Usage Rules
+
+## GenServer Best Practices
+- Keep state simple and serializable
+- Handle all expected messages explicitly
+- Use `handle_continue/2` for post-init work
+- Implement proper cleanup in `terminate/2` when necessary
+
+## Process Communication
+- Use `GenServer.call/3` for synchronous requests expecting replies
+- Use `GenServer.cast/2` for fire-and-forget messages.
+- When in doubt, use `call` over `cast`, to ensure back-pressure
+- Set appropriate timeouts for `call/3` operations
+
+## Fault Tolerance
+- Set up processes such that they can handle crashing and being restarted by supervisors
+- Use `:max_restarts` and `:max_seconds` to prevent restart loops
+
+## Task and Async
+- Use `Task.Supervisor` for better fault tolerance
+- Handle task failures with `Task.yield/2` or `Task.shutdown/2`
+- Set appropriate task timeouts
+- Use `Task.async_stream/3` for concurrent enumeration with back-pressure
+
+<!-- usage_rules:otp-end -->
 <!-- usage-rules-end -->

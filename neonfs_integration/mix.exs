@@ -47,20 +47,17 @@ defmodule NeonFS.Integration.MixProject do
     ]
   end
 
-  # cowlib is transitive (`grpc_server` -> `cowboy` -> `cowlib`) and the newest
-  # published release carries these, so there is nothing to upgrade to. Each
-  # names a cowlib function this project never reaches: cookie building,
-  # structured-header escaping, and `Link` headers — the cowboy here serves
-  # gRPC and nothing else. Remove an entry when a fixed cowlib ships; an
-  # ignore list nobody revisits is how a real exposure gets inherited.
+  # cowlib is transitive (`grpc_server` -> `cowboy` -> `cowlib`) and its newest
+  # release still carries this, so there is nothing to upgrade to. It names a
+  # cowlib function this project never reaches — structured-header escaping,
+  # where non-VCHAR bytes survive and a header can carry a response split — and
+  # the cowboy here serves gRPC and nothing else. Remove the entry when a fixed
+  # cowlib ships; an ignore list nobody revisits is how a real exposure gets
+  # inherited.
   defp ignored_advisories do
     [
-      # Cookie Request Header Injection in cow_cookie:cookie/1
-      "EEF-CVE-2026-43969",
       # HTTP Response Splitting in cow_http_struct_hd:escape_string/2
-      "EEF-CVE-2026-43966",
-      # Link Header Directive Smuggling in cow_link:link/1
-      "EEF-CVE-2026-43971"
+      "EEF-CVE-2026-43966"
     ]
   end
 
@@ -82,8 +79,8 @@ defmodule NeonFS.Integration.MixProject do
       {:stream_data, "~> 1.0"},
       {:credo, "~> 1.6", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
-      {:ex_check, "~> 0.16", only: [:dev, :test], runtime: false},
-      {:ex_doc, "~> 0.30", only: [:dev, :test], runtime: false},
+      {:ex_check, "~> 0.17", only: [:dev, :test], runtime: false},
+      {:ex_doc, "~> 0.40", only: [:dev, :test], runtime: false},
       {:git_ops, "~> 2.4", only: [:dev, :test], runtime: false},
       {:igniter, "~> 0.8", only: [:dev, :test]},
       {:mix_audit, "~> 2.0", only: [:dev, :test], runtime: false}
