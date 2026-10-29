@@ -510,10 +510,15 @@ jobs:
         # creates no job at all, and `canary`'s `needs` on it then can never
         # be satisfied. Keep `--partitions` below in step with its length.
         partition: [1, 2]
-    # A shard is roughly half of a ~34-minute suite plus ~5 minutes of setup.
-    # Headroom over that, not an open-ended limit: a genuinely wedged shard
-    # must still fail rather than sit for an hour.
-    timeout-minutes: 45
+    # Headroom over a shard's real cost, not an open-ended limit: a genuinely
+    # wedged shard must still fail rather than sit indefinitely. The suite has
+    # outgrown the arithmetic this used to carry — shards are not halves of a
+    # ~34-minute whole any more; the slower one alone runs ~40 minutes plus
+    # setup, and at 45 it was cut mid-test three runs out of four, with no
+    # test having failed. Mix distributes test *files*, so the split is
+    # approximate and the slower shard absorbs most of the growth. Revisit
+    # when a shard's own runtime, not the gap to this number, is the problem.
+    timeout-minutes: 60
     container:
       image: ${{ needs.setup.outputs.elixir_rust_image }}
       options: --privileged

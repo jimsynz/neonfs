@@ -47,7 +47,7 @@ esac
 if [ "${_NEONFS_IN_DOCKER:-}" != "1" ] && { [ "$ARCH" != "$host_arch" ] || [ "${USE_DOCKER:-}" = "1" ]; }; then
     BUILDER_IMAGE="neonfs-deb-builder:${ARCH}"
 
-    ELIXIR_VERSION=$(awk '/^elixir/ {print $2}' "${REPO_ROOT}/.tool-versions")
+    ELIXIR_VERSION=$(awk '/^elixir/ {sub(/-otp-[0-9]+$/, "", $2); print $2}' "${REPO_ROOT}/.tool-versions")
     ERLANG_VERSION=$(awk '/^erlang/ {print $2}' "${REPO_ROOT}/.tool-versions")
     RUST_VERSION=$(awk '/^rust/ {print $2}' "${REPO_ROOT}/.tool-versions")
 

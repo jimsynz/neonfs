@@ -32,20 +32,22 @@ defmodule NeonFS.Containerd.MixProject do
     ]
   end
 
-  # cowlib is transitive (`grpc_server` -> `cowboy` -> `cowlib`) and the newest
-  # published release carries these, so there is nothing to upgrade to. Each
-  # names a cowlib function this project never reaches: cookie building,
-  # structured-header escaping, and `Link` headers — the cowboy here serves
-  # gRPC and nothing else. Remove an entry when a fixed cowlib ships; an
-  # ignore list nobody revisits is how a real exposure gets inherited.
+  # Both entries are CVE-2026-43966, filed once against cowlib and once against
+  # gun: non-VCHAR bytes survive `cow_http_struct_hd:escape_string/2`, so a
+  # structured header can carry a response split. Neither has a release to move
+  # to — cowlib arrives transitively (`grpc_server` -> `cowboy` -> `cowlib`) and
+  # its newest release still carries it, and `grpc_core` pins gun to 2.4.x while
+  # the advisory names a fixed gun 2.16.0 that was never published. Structured
+  # headers are a path this project never reaches: the cowboy here serves gRPC
+  # and nothing else, and gun only drives tests. Remove an entry when a fixed
+  # release ships; an ignore list nobody revisits is how a real exposure gets
+  # inherited.
   defp ignored_advisories do
     [
-      # Cookie Request Header Injection in cow_cookie:cookie/1
-      "EEF-CVE-2026-43969",
       # HTTP Response Splitting in cow_http_struct_hd:escape_string/2
       "EEF-CVE-2026-43966",
-      # Link Header Directive Smuggling in cow_link:link/1
-      "EEF-CVE-2026-43971"
+      # The same defect, filed against gun
+      "GHSA-w4f7-4cxr-rv3c"
     ]
   end
 
@@ -89,7 +91,7 @@ defmodule NeonFS.Containerd.MixProject do
       {:credo, "~> 1.6", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
       {:doctor, "~> 0.22", only: [:dev, :test], runtime: false},
-      {:ex_check, "~> 0.16", only: [:dev, :test], runtime: false},
+      {:ex_check, "~> 0.17", only: [:dev, :test], runtime: false},
       {:ex_doc, "~> 0.40", only: [:dev, :test], runtime: false},
       {:git_ops, "~> 2.4", only: [:dev, :test], runtime: false},
       {:gun, "~> 2.4", only: [:test]},

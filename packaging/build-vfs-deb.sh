@@ -43,7 +43,7 @@ run_in_build_container() {
     exit 2
   }
 
-  elixir_version="$(awk '/^elixir/ {print $2}' "${REPO_ROOT}/.tool-versions")"
+  elixir_version="$(awk '/^elixir/ {sub(/-otp-[0-9]+$/, "", $2); print $2}' "${REPO_ROOT}/.tool-versions")"
   erlang_version="$(awk '/^erlang/ {print $2}' "${REPO_ROOT}/.tool-versions")"
   rust_version="$(awk '/^rust/ {print $2}' "${REPO_ROOT}/.tool-versions")"
   image="harton.dev/james/workflows/elixir-rust:${elixir_version}-erlang-${erlang_version}-rust-${rust_version}"

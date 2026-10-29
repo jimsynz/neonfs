@@ -16,7 +16,7 @@ if [ ! -f "$TOOL_VERSIONS" ]; then
   exit 1
 fi
 
-export ELIXIR_VERSION=$(awk '/^elixir/ {print $2}' "$TOOL_VERSIONS")
+export ELIXIR_VERSION=$(awk '/^elixir/ {sub(/-otp-[0-9]+$/, "", $2); print $2}' "$TOOL_VERSIONS")
 export ERLANG_VERSION=$(awk '/^erlang/ {print $2}' "$TOOL_VERSIONS")
 export RUST_VERSION=$(awk '/^rust/ {print $2}' "$TOOL_VERSIONS")
 
