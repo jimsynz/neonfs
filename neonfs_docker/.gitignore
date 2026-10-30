@@ -1,9 +1,0 @@
-_build/
-cover/
-deps/
-doc/
-tmp/
-erl_crash.dump
-*.ez
-neonfs_docker-*.tar
-.elixir_ls

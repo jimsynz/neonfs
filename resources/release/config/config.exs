@@ -2,11 +2,8 @@ import Config
 
 repo_root = Path.expand("../../..", __DIR__)
 
-cargo_version_replace = fn version ->
-  version = String.trim_leading(version, "v")
-  "version = \"#{version}\"\n"
-end
-
+# The product repo's own version: what `neonfs-common` and this repo's
+# releases carry. The NeonFS packages version themselves in their own repos.
 config :git_ops,
   mix_project: Mix.Project.get!(),
   changelog_file: Path.join(repo_root, "CHANGELOG.md"),
@@ -16,21 +13,4 @@ config :git_ops,
   # create a second, empty repository here rather than reinitialising ours.
   repository_path: repo_root,
   version_tag_prefix: "v",
-  managed_files:
-    repo_root
-    |> Path.join("**/{mix.exs,README.md,Cargo.toml}")
-    |> Path.wildcard()
-    |> Enum.reject(&String.contains?(&1, ["/deps/", "/_build/", "/target/"]))
-    |> Enum.uniq()
-    |> Enum.map(fn path ->
-      cond do
-        String.ends_with?(path, "mix.exs") ->
-          {path, :mix}
-
-        String.ends_with?(path, "Cargo.toml") ->
-          {path, cargo_version_replace, cargo_version_replace}
-
-        true ->
-          {path, :string}
-      end
-    end)
+  manage_mix_version?: true

@@ -9,16 +9,22 @@ end
 # already started by the time config.exs runs.
 Application.put_env(:kernel, :prevent_overlapping_partitions, false)
 
-# Build CLI (cargo skips if unchanged) — `cli_test.exs` exercises the
-# Rust binary against a peer cluster.
-cli_dir = Path.expand("../../neonfs-cli", __DIR__)
+# Build CLI (cargo skips if unchanged) — the CLI tests exercise the Rust
+# binary against a peer cluster. Its source is the `neonfs_cli` dependency, so
+# the binary is the version mix.exs pins (or the sibling checkout under
+# NEONFS_DEPS=local). The tests read its path from the application env.
+cli_dir = Mix.Project.deps_paths() |> Map.fetch!(:neonfs_cli)
 
 case System.cmd("cargo", ["build", "--release"],
        cd: cli_dir,
        stderr_to_stdout: true
      ) do
   {_output, 0} ->
-    :ok
+    Application.put_env(
+      :neonfs_integration,
+      :cli_path,
+      Path.join(cli_dir, "target/release/neonfs-cli")
+    )
 
   {output, code} ->
     IO.puts("\n❌ Failed to build CLI (exit code #{code}):")

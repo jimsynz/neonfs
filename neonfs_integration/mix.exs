@@ -67,13 +67,57 @@ defmodule NeonFS.Integration.MixProject do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
-      # Path dependencies for testing (runtime: false since only used in tests)
-      {:neonfs_cifs, path: "../neonfs_cifs", runtime: false},
-      {:neonfs_containerd, path: "../neonfs_containerd", runtime: false},
-      {:neonfs_core, path: "../neonfs_core", runtime: false},
-      {:neonfs_csi, path: "../neonfs_csi", runtime: false},
-      {:neonfs_test_support, path: "../neonfs_test_support", runtime: false},
+      # Siblings run on peer nodes rather than here, so none is started
+      # (runtime: false). Each is pinned with override: Mix does no version
+      # resolution for git deps, so these pins are the combination under test.
+      {:neonfs_cifs,
+       git: "https://harton.dev/project-neon/neonfs_cifs.git",
+       tag: "v0.6.1",
+       override: true,
+       runtime: false},
+      # Fetched for its source only: test_helper.exs builds the CLI binary the
+      # CLI tests drive, so the binary is the one pinned here.
+      {:neonfs_cli,
+       git: "https://harton.dev/project-neon/neonfs_cli.git",
+       tag: "v0.6.1",
+       override: true,
+       compile: false,
+       app: false},
+      {:neonfs_client,
+       git: "https://harton.dev/project-neon/neonfs_client.git",
+       tag: "v0.6.1",
+       override: true,
+       runtime: false},
+      {:neonfs_containerd,
+       git: "https://harton.dev/project-neon/neonfs_containerd.git",
+       tag: "v0.6.1",
+       override: true,
+       runtime: false},
+      {:neonfs_core,
+       git: "https://harton.dev/project-neon/neonfs_core.git",
+       tag: "v0.6.1",
+       override: true,
+       runtime: false},
+      {:neonfs_csi,
+       git: "https://harton.dev/project-neon/neonfs_csi.git",
+       tag: "v0.6.1",
+       override: true,
+       runtime: false},
+      {:neonfs_fuse,
+       git: "https://harton.dev/project-neon/neonfs_fuse.git",
+       tag: "v0.6.1",
+       override: true,
+       runtime: false},
+      {:neonfs_test_support,
+       git: "https://harton.dev/project-neon/neonfs_test_support.git",
+       tag: "v0.6.1",
+       override: true,
+       runtime: false},
       {:jason, "~> 1.0"},
+      # Declared for the alerts test, which reads it directly. No `:only`:
+      # `reactor` (through core) depends on it in every environment, and a
+      # narrower one fails Mix's consistency check.
+      {:yaml_elixir, "~> 2.11"},
 
       # dev/test
       {:stream_data, "~> 1.0"},
@@ -85,5 +129,19 @@ defmodule NeonFS.Integration.MixProject do
       {:igniter, "~> 0.8", only: [:dev, :test]},
       {:mix_audit, "~> 2.0", only: [:dev, :test], runtime: false}
     ]
+    |> use_local_siblings()
   end
+
+  # NeonFS siblings are git deps pinned by tag; `NEONFS_DEPS=local` swaps them
+  # for the checkouts in the workspace. This project sits one level down in
+  # the `neonfs` repo, so its siblings are two levels up. The tuples above stay
+  # literal so Renovate can find and bump them.
+  defp use_local_siblings(deps), do: use_local_siblings(deps, System.get_env("NEONFS_DEPS"))
+  defp use_local_siblings(deps, "local"), do: Enum.map(deps, &local_sibling/1)
+  defp use_local_siblings(deps, _), do: deps
+
+  defp local_sibling({name, [{:git, "https://harton.dev/project-neon/" <> _}, {:tag, _} | opts]}),
+    do: {name, [path: "../../#{name}"] ++ opts}
+
+  defp local_sibling(dep), do: dep
 end

@@ -21,7 +21,7 @@ defmodule NeonFS.Integration.CLITLSTest do
   @moduletag timeout: 180_000
   @moduletag :integration
 
-  @cli_path Path.expand("../../../neonfs-cli/target/release/neonfs-cli", __DIR__)
+  @cli_path Application.compile_env!(:neonfs_integration, :cli_path)
 
   setup do
     unless File.exists?(@cli_path) do
