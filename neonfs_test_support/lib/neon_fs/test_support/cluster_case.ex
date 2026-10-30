@@ -84,6 +84,12 @@ defmodule NeonFS.TestSupport.ClusterCase do
           count -> Keyword.put(cluster_opts, :drives, hot_drives_fn(count))
         end
 
+      cluster_opts =
+        case Map.get(tags, :dist) do
+          nil -> cluster_opts
+          dist -> Keyword.put(cluster_opts, :dist, dist)
+        end
+
       ensure_clean_node_state()
 
       cluster = PeerCluster.start_cluster!(node_count, cluster_opts)
@@ -126,6 +132,12 @@ defmodule NeonFS.TestSupport.ClusterCase do
         case Map.get(tags, :drives) do
           nil -> cluster_opts
           count -> Keyword.put(cluster_opts, :drives, hot_drives_fn(count))
+        end
+
+      cluster_opts =
+        case Map.get(tags, :dist) do
+          nil -> cluster_opts
+          dist -> Keyword.put(cluster_opts, :dist, dist)
         end
 
       cluster = PeerCluster.start_cluster!(node_count, cluster_opts)
@@ -590,6 +602,7 @@ defmodule NeonFS.TestSupport.ClusterCase do
     volumes = Keyword.get(opts, :volumes, [])
 
     :ok = cluster_init_idempotent(cluster, :node1, cluster_name)
+    :ok = settle_bootstrap_node(cluster)
 
     {:ok, %{"token" => token}} =
       PeerCluster.rpc_until_ready(cluster, :node1, NeonFS.CLI.Handler, :create_invite, [3600])
@@ -598,11 +611,14 @@ defmodule NeonFS.TestSupport.ClusterCase do
     node_names = cluster.nodes |> Enum.map(& &1.name) |> Enum.reject(&(&1 == :node1))
 
     for node_name <- node_names do
+      :ok = prepare_join(cluster, node_name)
+
       # Use the direct RPC join flow (not HTTP) since test nodes don't run
       # the metrics HTTP server. This calls accept_join on node1 directly.
       :ok = join_cluster_idempotent(cluster, node_name, [token, node1_atom])
 
       :ok = wait_for_cluster_stable(cluster)
+      :ok = activate_cluster_credentials(cluster, node_name)
     end
 
     wait_for_full_mesh(cluster)
@@ -617,6 +633,40 @@ defmodule NeonFS.TestSupport.ClusterCase do
 
     :ok
   end
+
+  # The three steps below are what a TLS cluster needs and a plain one does
+  # not. Each is a no-op on `dist: :plain`, so every existing caller of
+  # `init_multi_node_cluster/2` is unaffected.
+
+  # `cluster init` on a TLS node ends in `:init.restart()`, so the bootstrap
+  # node is briefly a bare BEAM. Nothing after this can run until it is back.
+  defp settle_bootstrap_node(%{dist: :tls} = cluster) do
+    PeerCluster.await_init_restart!(cluster, :node1)
+  end
+
+  defp settle_bootstrap_node(_cluster), do: :ok
+
+  # The RPC join dials the via node before it has redeemed anything, and an
+  # initialised node presents its cluster-signed certificate alone — so the
+  # joiner needs the cluster CA first or the dial is refused at the transport.
+  defp prepare_join(%{dist: :tls} = cluster, node_name) do
+    PeerCluster.trust_cluster_ca_on!(cluster, :node1, node_name)
+  end
+
+  defp prepare_join(_cluster, _node_name), do: :ok
+
+  # `join_cluster_rpc/3` writes the cluster credentials to disk but, unlike the
+  # HTTP flow it stands in for, never brings them into effect — no
+  # `regenerate/1`, no distribution restart. A cluster left that way has peers
+  # still presenting the identity the harness minted, which is a shape no real
+  # cluster is in: anything asserting against the *cluster's* certificates
+  # would be asserting against the harness's instead, and would keep passing
+  # after a rotation had broken them.
+  defp activate_cluster_credentials(%{dist: :tls} = cluster, node_name) do
+    PeerCluster.activate_cluster_credentials!(cluster, node_name)
+  end
+
+  defp activate_cluster_credentials(_cluster, _node_name), do: :ok
 
   @doc false
   # `Cluster.Join.join_cluster_rpc/3` returns once the synchronous
@@ -1255,6 +1305,20 @@ defmodule NeonFS.TestSupport.ClusterCase do
   (including MetadataStore) have started.
   """
   @spec wait_for_full_mesh(map()) :: :ok
+  def wait_for_full_mesh(%{dist: :tls} = cluster) do
+    peer_nodes = MapSet.new(cluster.nodes, & &1.node)
+
+    :ok =
+      wait_until(
+        fn ->
+          Enum.all?(cluster.nodes, fn node_info ->
+            MapSet.subset?(peer_nodes, ready_nodes_seen_by(node_info.peer))
+          end)
+        end,
+        timeout: 60_000
+      )
+  end
+
   def wait_for_full_mesh(cluster) do
     peer_nodes =
       MapSet.new(cluster.nodes, fn ni -> PeerCluster.get_node!(cluster, ni.name).node end)
@@ -1374,6 +1438,21 @@ defmodule NeonFS.TestSupport.ClusterCase do
       {:ok, _pid} -> :ok
       {:error, {:already_started, _pid}} -> :ok
     end
+  end
+
+  # The plain path monitors `:pg` from the controller, which a TLS cluster's
+  # controller cannot do — it never joins the peers' distribution, so it never
+  # sees their scope. Asking each peer which ready nodes *it* can see is the
+  # same question from a vantage point that can answer it, and it covers the
+  # mesh at the same time: a node only appears in another's group once the two
+  # are connected.
+  defp ready_nodes_seen_by(peer) do
+    case :peer.call(peer, :pg, :get_members, [:neonfs_events, {:node, :ready}]) do
+      pids when is_list(pids) -> MapSet.new(pids, &node/1)
+      _ -> MapSet.new()
+    end
+  catch
+    _kind, _reason -> MapSet.new()
   end
 
   defp await_pg_ready(ref, expected, ready, deadline) do

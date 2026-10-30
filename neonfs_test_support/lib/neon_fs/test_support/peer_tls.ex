@@ -106,9 +106,21 @@ defmodule NeonFS.TestSupport.PeerTLS do
   end
 
   @doc """
-  Adds a node's cluster CA to the CLI's trust store, once the cluster has one.
+  Copies an initialised node's cluster CA into another TLS directory.
 
-  Needed because a node stops presenting the certificate it booted with.
+  Two callers, one reason. The **CLI** needs it because a node stops
+  presenting the certificate it booted with. A **peer about to join** needs
+  it because the RPC join flow (`NeonFS.Cluster.Join.join_cluster_rpc/3`)
+  reaches the via node over distribution before it holds any cluster material
+  — a trust problem the HTTP flow does not have, since there the joining node
+  redeems its invite over HTTP and so has the cluster CA before it ever
+  handshakes. Seeding it as `ca.crt` is what that redemption would have left,
+  and it is where `NeonFS.TLSDistConfig.regenerate_ca_bundle/1` looks, so the
+  join's own regeneration stays consistent with it. Rebuilding the target's
+  bundle and clearing its PEM cache is the caller's job — both have to happen
+  on the node that owns the directory.
+
+  The CLI case in detail:
   `NeonFS.TLSDistConfig.regenerate_config/1` rewrites `ssl_dist.conf` after
   `cluster init` to present the cluster-signed `node.crt` *alone* — the local
   certificate is deliberately not kept as a fallback, because OTP's TLS 1.3
@@ -131,11 +143,11 @@ defmodule NeonFS.TestSupport.PeerTLS do
   the cause.
   """
   @spec add_cluster_ca(String.t(), String.t()) :: :ok | {:error, :no_cluster_ca}
-  def add_cluster_ca(node_tls_dir, cli_tls_dir) do
+  def add_cluster_ca(node_tls_dir, target_tls_dir) do
     source = Path.join(node_tls_dir, "ca.crt")
 
     if File.exists?(source) do
-      File.cp!(source, Path.join(cli_tls_dir, "ca.crt"))
+      File.cp!(source, Path.join(target_tls_dir, "ca.crt"))
       :ok
     else
       {:error, :no_cluster_ca}
