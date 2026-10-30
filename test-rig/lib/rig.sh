@@ -4,6 +4,9 @@
 
 RIG_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REPO_ROOT="$(cd "${RIG_ROOT}/.." && pwd)"
+# The rig builds and installs packages from their own repos, which sit beside
+# this one in a neonfs_workspace checkout (`bin/neonfs-sync` clones them).
+WORKSPACE="$(cd "${REPO_ROOT}/.." && pwd)"
 
 CACHE_DIR="${RIG_ROOT}/.cache"
 IMAGE_DIR="${CACHE_DIR}/images"
@@ -64,7 +67,7 @@ DOCKER_STORAGE_VOL="${DOCKER_STORAGE_VOL:-rig_docker_shared}"
 # layer blobs, which a synthetic blob ingest does not.
 DOCKER_STORAGE_IMAGE="${DOCKER_STORAGE_IMAGE:-docker.io/library/busybox:latest}"
 
-VERSION="$(grep -m1 '@version "' "${REPO_ROOT}/neonfs_omnibus/mix.exs" | sed -E 's/.*"([^"]+)".*/\1/')"
+VERSION="$(grep -m1 '@version "' "${WORKSPACE}/neonfs_omnibus/mix.exs" 2>/dev/null | sed -E 's/.*"([^"]+)".*/\1/')"
 
 # --- logging ---------------------------------------------------------------
 
@@ -158,7 +161,7 @@ ensure_debs() {
   local deb newer
   deb="$(ls -t "${DEB_DIR}"/neonfs-omnibus_*.deb 2>/dev/null | head -1 || true)"
   if [ -n "${deb}" ]; then
-    newer="$(find "${REPO_ROOT}" -type f \
+    newer="$(find "${WORKSPACE}" -type f \
       \( -name '*.ex' -o -name '*.exs' -o -name '*.rs' -o -name '*.toml' \
          -o -name '*.service' -o -name '*.yaml' -o -name '*.sh' \) \
       -not -path '*/_build/*' -not -path '*/deps/*' -not -path '*/target/*' \
@@ -539,7 +542,7 @@ k3s_assert_ready() {
 
 HELM_VERSION="${HELM_VERSION:-v3.16.4}"
 CSI_RELEASE="${CSI_RELEASE:-neonfs-csi}"
-# The name `containers/bake.hcl` gives the image, so the chart names what was
+# The name neonfs_csi publishes the image under, so the chart names what was
 # actually loaded. The tag is rig-specific so a side-loaded HEAD build can
 # never be confused with a pulled `latest`.
 CSI_IMAGE_REPO="${CSI_IMAGE_REPO:-ghcr.io/jimsynz/neonfs/csi}"
@@ -589,6 +592,19 @@ k3s_join_cluster() {
   die "the k3s node joined but no TLS material appeared under /var/lib/neonfs/tls"
 }
 
+# Builds the CSI image from the workspace's neonfs_csi checkout, with the
+# toolchain its `.tool-versions` names — the same build CI publishes.
+build_csi_image() {
+  local image="$1" dir="${WORKSPACE}/neonfs_csi"
+  [ -f "${dir}/Containerfile" ] || die "${dir} not found — run bin/neonfs-sync in the workspace first"
+
+  docker buildx build \
+    --build-arg "ELIXIR_VERSION=$(awk '/^elixir/ {sub(/-otp-[0-9]+$/, "", $2); print $2}' "${dir}/.tool-versions")" \
+    --build-arg "ERLANG_VERSION=$(awk '/^erlang/ {print $2}' "${dir}/.tool-versions")" \
+    --build-arg "RUST_VERSION=$(awk '/^rust/ {print $2}' "${dir}/.tool-versions")" \
+    --platform linux/amd64 --load -t "${image}" -f "${dir}/Containerfile" "${dir}"
+}
+
 # HEAD, not the published image: pulling `ghcr.io/jimsynz/neonfs/csi` would
 # make the nightly test the last *release*, so a CSI regression merged today
 # would stay invisible until the next one.
@@ -596,7 +612,7 @@ k3s_sideload_csi_image() {
   local i="${K3S_INDEX}" image="${CSI_IMAGE_REPO}:${CSI_IMAGE_TAG}"
 
   log "building the CSI image from HEAD (${image})"
-  ( cd "${REPO_ROOT}" && PLATFORMS='linux/amd64' TAG="${CSI_IMAGE_TAG}" containers/bake.sh --load csi )
+  build_csi_image "${image}"
 
   log "side-loading the image into k3s"
   local tarball="${RUN_DIR}/neonfs-csi.tar"
@@ -637,7 +653,7 @@ k3s_install_chart() {
   }
 
   node_ssh "$i" "rm -rf /tmp/neonfs-csi-chart && mkdir -p /tmp/neonfs-csi-chart"
-  node_scp_dir "$i" "${REPO_ROOT}/deploy/charts/neonfs-csi" "rig@127.0.0.1:/tmp/neonfs-csi-chart/"
+  node_scp_dir "$i" "${WORKSPACE}/neonfs_csi/deploy/charts/neonfs-csi" "rig@127.0.0.1:/tmp/neonfs-csi-chart/"
 
   # Divergences from the chart defaults, each forced by the rig's shape and
   # none of them what an operator would install:
