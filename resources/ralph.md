@@ -4,14 +4,14 @@ You are an autonomous coding agent working on NeonFS. Each iteration picks one i
 
 ## Your Task
 
-1. Add `resources/scripts` to `$PATH` so the `fj-*` helpers are available: `export PATH="$PWD/resources/scripts:$PATH"`.
+1. Add the workspace's `bin/` to `$PATH` so the `fj-*` helpers are available — this repo sits inside a `neonfs_workspace` checkout: `export PATH="$(git rev-parse --show-toplevel)/../bin:$PATH"`.
 2. Read the [Codebase Patterns wiki page](https://harton.dev/project-neon/neonfs/wiki/Codebase-Patterns) — this is institutional memory. Skim the whole thing; apply what's relevant.
 3. Rebase any of your own still-open PRs that have fallen behind `main`: `fj-pr-rebase-stale "$(fj-whoami)"`. The script handles clean rebases automatically; PRs that hit conflicts are reported as `CONFLICT<TAB><pr#><TAB><branch>` lines on stdout — for each, attempt manual resolution per "Resolving rebase conflicts" below before moving on.
 4. List open issues: `fj issue search --state open`.
 5. Pick **one** issue to work on (see selection rules below).
 6. Self-assign the issue and create a feature branch from `main`.
 7. Implement the issue. One issue per iteration — don't scope-creep into adjacent work.
-8. Run quality checks on the packages your change affects: `neonfs-check-affected`. Every one it selects must pass.
+8. Run `mix check --no-retry` in every repo your change touches. Every one must pass.
 9. If you discovered a reusable pattern, update the Codebase Patterns wiki page (see below).
 10. Commit, push, and open a pull request that closes the issue.
 11. **Drive the PR to merge in this iteration** — wait for CI, fix failures inline, squash-merge when green. Don't move on to the next iteration with a non-merged PR. See "Driving the PR to Merge" below.
@@ -75,7 +75,7 @@ Already-decided issues — concrete acceptance criteria, named modules, named fu
 Add the helper scripts to `$PATH` once at the top of every iteration — they replace every `curl` against the Forgejo API in this prompt:
 
 ```bash
-export PATH="$PWD/resources/scripts:$PATH"
+export PATH="$(git rev-parse --show-toplevel)/../bin:$PATH"
 ```
 
 Then pick issue `#N`:
@@ -222,9 +222,9 @@ Rules:
 
 ## Quality Requirements
 
-- **Before pushing**, run `resources/scripts/neonfs-check-affected`. It selects the packages your change can affect — using the same path-to-package mapping CI uses, so shared-code changes (`neonfs_client` types, state machine versions, new supervisor children) still fan out to every downstream package — and runs `mix check --no-retry` in each. All of them MUST pass.
-- **Do not run `neonfs-each mix check` for a routine change.** The full fan-out takes 45+ minutes, and CI runs it against your PR anyway; paying for it twice per iteration is the single largest waste in the loop. Reach for `neonfs-each` only when you've changed something `ci-affected` classifies as inert and you have reason to doubt that classification.
-- The integration, cli, wire and vfs suites are **CI's job, not yours** — `neonfs-check-affected` reports which of them your change selected but does not run them. The integration suite is sharded across two runners in CI and would not be here. If one of them fails, fix it on the same branch per "Driving the PR to Merge".
+- **Before pushing**, run `mix check --no-retry` in every repo your change touches. All of them MUST pass. A change to a shared shape (`neonfs_client` types, state machine versions, RPC signatures) reaches the repos that use it only once released and bumped — see "Working Across Repos" in the workspace `AGENTS.md`.
+- **Do not run `neonfs-check` across the whole workspace for a routine change.** CI runs each repo's checks against its PR; paying for every repo per iteration is the single largest waste in the loop.
+- The integration suite (in this repo) is **CI's job, not yours** — it is sharded across two runners in CI and would not be here. If it fails, fix it on the same branch per "Driving the PR to Merge".
 - Do NOT commit broken code.
 - Keep changes focused and minimal.
 - Follow existing code patterns — look at recent PRs in the same area.
@@ -329,7 +329,7 @@ For each conflicted file `git status` reports:
 Once the rebase finishes:
 
 ```bash
-neonfs-check-affected     # verify the resolution actually compiles + tests pass
+mix check --no-retry      # verify the resolution actually compiles + tests pass
 git push --force-with-lease
 ```
 
@@ -339,7 +339,7 @@ When to stop and ask for help instead of resolving:
 
 - The conflict spans more than ~3 files OR more than ~50 lines per file. That's not "two sibling PRs touched the same place" — it's a structural collision and a human should look at it.
 - Both sides changed the same logic in semantically incompatible ways (e.g. one renamed the function, the other changed the signature) and you can't tell which intent should win.
-- After resolving, `neonfs-check-affected` fails in a way the diff doesn't explain. Don't push a "fix" you don't understand.
+- After resolving, `mix check` fails in a way the diff doesn't explain. Don't push a "fix" you don't understand.
 - The conflict is in `mix.lock`, `Cargo.lock`, or other generated files — regenerate them by running `mix deps.get` / `cargo update` rather than hand-editing.
 
 In any of those cases: `git rebase --abort`, post a PR comment describing what you tried, and leave the PR for human attention. That's still a useful outcome — you've narrowed the problem, even if you didn't solve it.

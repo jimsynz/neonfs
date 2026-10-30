@@ -8,38 +8,50 @@ For day-to-day pattern lookups, the [Codebase Patterns](https://harton.dev/proje
 
 ## Repository layout
 
-NeonFS is a multi-package umbrella project. Each package is a separate Mix project under the repo root, plus one Rust CLI crate. There is no parent Mix umbrella — the top-level `mix.exs` uses `ex_check` to run per-package checks from the root.
+Every NeonFS package is its own repository under
+[`project-neon`](https://harton.dev/project-neon), with its own CI, releases,
+container image and Debian package. They are developed side by side in a
+[`neonfs_workspace`](https://harton.dev/project-neon/neonfs_workspace)
+checkout: clone it, run `bin/neonfs-sync`, and every repository lands beside
+the others.
 
 ```
-neonfs/
+neonfs_workspace/
+├── bin/                    # neonfs-sync, neonfs-check, neonfs-each, fj-* Forgejo helpers
+├── ci/                     # Scripts the shared CI workflow runs
 ├── neonfs_client/          # Shared types, service discovery, transport pool, ChunkReader
 ├── neonfs_core/            # Storage engine, metadata, Ra consensus, cluster CA, policy
+├── neonfs_test_support/    # Peer-cluster test scaffolding
 ├── neonfs_iam/             # Identity, groups, policies (in progress)
 ├── neonfs_fuse/            # FUSE filesystem daemon
 ├── neonfs_nfs/             # NFSv3 + NLM v4 server
 ├── neonfs_s3/              # S3-compatible HTTP gateway
 ├── neonfs_webdav/          # WebDAV server
 ├── neonfs_docker/          # Docker VolumeDriver plugin
+├── neonfs_containerd/      # containerd content-store plugin
+├── neonfs_csi/             # Kubernetes CSI driver and Helm chart
+├── neonfs_cifs/            # Samba VFS backend and module
+├── neonfs_block/           # NBD block device target
 ├── neonfs_omnibus/         # All-in-one bundle (core + interfaces)
-├── neonfs_integration/     # Peer-based multi-node integration tests
-├── neonfs-cli/             # Rust CLI (`neonfs` binary)
-├── packaging/              # nfpm configs, systemd units, postinst scripts
-├── containers/             # Dockerfiles and bake.hcl
-└── docs/                   # Guides (this file, user/operator, deployment, orchestration, etc.)
+├── neonfs_cli/             # Rust CLI (`neonfs` binary)
+└── neonfs/                 # Integration suite, neonfs-common, docs, test rig
 ```
+
+Siblings depend on each other by git tag. `NEONFS_DEPS=local` swaps those for
+the checkouts beside them, which is how a change spanning repositories is
+developed before it is released — see the workspace `AGENTS.md`.
 
 ### Dependency graph
 
 ```
 neonfs_client  ← neonfs_core
-neonfs_client  ← neonfs_iam
-neonfs_client  ← neonfs_fuse
-neonfs_client  ← neonfs_nfs
-neonfs_client  ← neonfs_s3
-neonfs_client  ← neonfs_webdav
-neonfs_client  ← neonfs_docker
-neonfs_core, neonfs_fuse, neonfs_nfs, neonfs_s3, neonfs_webdav, neonfs_docker  ← neonfs_omnibus
-all of the above                                                               ← neonfs_integration
+neonfs_client  ← every interface package (fuse, nfs, s3, webdav, docker,
+                 containerd, csi, cifs, block, iam)
+neonfs_core    ← neonfs_test_support
+neonfs_test_support (test-only) ← packages with peer-cluster tests
+neonfs_fuse    ← neonfs_csi
+neonfs_core + the interfaces    ← neonfs_omnibus
+all of the above                ← neonfs_integration (in `neonfs`)
 ```
 
 Interface packages depend **only** on `neonfs_client`, not on `neonfs_core`. All communication with core flows through `NeonFS.Client.Router` over Erlang distribution (metadata) and a dedicated TLS data plane (chunks). This is a hard rule — breaking it means an interface package can't deploy on a node separate from core.
@@ -148,10 +160,11 @@ NeonFS runs tests at four layers, from cheapest to most expensive:
 3. **NIF boundary tests** — Elixir calling Rust NIFs, verifying Rustler encoding round-trips.
 4. **Integration tests** — `neonfs_integration/` spawns real BEAM peers via `:peer.start_link`, exercising multi-node scenarios.
 
-Run everything from the repo root (there is no root Mix project — the script fans out to each subproject):
+Run every repository's checks from the workspace root:
 
 ```bash
-resources/scripts/neonfs-each mix check --no-retry   # all checks across all subprojects
+bin/neonfs-check                 # mix check --no-retry in every repository
+bin/neonfs-check test            # or any other mix task
 ```
 
 Run just one package's tests:
@@ -280,16 +293,17 @@ CI (Forgejo Actions, `.forgejo/workflows/ci.yml`) re-runs the same checks per-pa
 
 ## Adding a new interface package
 
-Copy the shape from the most recently landed interface package (currently `neonfs_docker`). The minimum deliverable:
+A new interface package is a new repository. Copy the shape from the most recently landed interface package (currently `neonfs_docker`). The minimum deliverable:
 
-1. **Scaffold**: `lib/neon_fs/<name>/{application.ex, supervisor.ex, health_check.ex, plug.ex | handler.ex}`.
-2. **Supervisor**: service-local state (VolumeStore / MountTracker / cache) → `NeonFS.Client.Registrar` (type `:<name>`) → protocol listener. Strategy `:one_for_one`.
-3. **Application**: `start_link()` first, then `HealthCheck.register_checks()`, then (if not omnibus) `NeonFS.Systemd.notify_ready()`. The `unless Application.spec(:neonfs_omnibus)` guard is critical — omnibus coordinates sd_notify itself.
-4. **Release**: `rel/vm.args.eex` + `rel/env.sh.eex` following the `neonfs_nfs` template (custom EPMD, constant cookie, optional TLS-distribution config).
-5. **Container**: `containers/Containerfile.<name>` (three-stage Debian trixie, mirror `Containerfile.nfs`), add `contexts = { client, src, base, cli }` entry in `bake.hcl`.
-6. **Debian packaging**: `packaging/nfpm/neonfs-<name>.yaml` + `packaging/systemd/neonfs-<name>.{service,-daemon}`. Append the new name to every relevant list: `build-debs.sh` build loop + nfpm package loop, `post-install.sh`, `pre-remove.sh`, `release.yml` amd64 + arm64 matrix.
-7. **Omnibus integration**: add as optional dep in `neonfs_omnibus/mix.exs`, start via `neonfs_omnibus/lib/neon_fs/omnibus/application.ex`.
-8. **Docs**: add to `README.md` packages table, add operator fragment to `docs/operator-guide.md`, document the protocol in `docs/user-guide.md`.
+1. **Repository**: create `project-neon/neonfs_<name>` with issues and wiki disabled (issues live on `neonfs`), and copy `neonfs_workspace`'s `templates/` (`ci.yml`, `renovate.json`) plus `.tool-versions`. Siblings are literal git-tag deps with `override: true` piped through `use_local_siblings/1` — copy the block from any package's `mix.exs`.
+2. **Scaffold**: `lib/neon_fs/<name>/{application.ex, supervisor.ex, health_check.ex, plug.ex | handler.ex}`.
+3. **Supervisor**: service-local state (VolumeStore / MountTracker / cache) → `NeonFS.Client.Registrar` (type `:<name>`) → protocol listener. Strategy `:one_for_one`.
+4. **Application**: `start_link()` first, then `HealthCheck.register_checks()`, then (if not omnibus) `NeonFS.Systemd.notify_ready()`. The `unless Application.spec(:neonfs_omnibus)` guard is critical — omnibus coordinates sd_notify itself.
+5. **Release**: `rel/vm.args.eex` + `rel/env.sh.eex` following the `neonfs_nfs` template (custom EPMD, constant cookie, optional TLS-distribution config).
+6. **Container**: a `Containerfile` at the repo root, copied from `neonfs_nfs` — keep its `cli` stage byte-for-byte identical, since CI shares that stage's cache across every repo — and `image: <name>` in `ci.yml`.
+7. **Debian packaging**: `packaging/nfpm/neonfs-<name>.yaml` + `packaging/systemd/neonfs-<name>.{service,-daemon}`, with `debs: true` in `ci.yml`. Maintainer scripts come from the workspace's `packaging/scripts/` (`${COMMON}`); add the service to the lists in `post-install.sh` and `pre-remove.sh` there.
+8. **Omnibus integration**: add as a dep in `neonfs_omnibus/mix.exs`, start via `neonfs_omnibus/lib/neon_fs/omnibus/application.ex`.
+9. **Docs**: add to `README.md` packages table, add operator fragment to `docs/operator-guide.md`, document the protocol in `docs/user-guide.md`.
 
 See `neonfs_docker` (issues #243, #310, #311) for a worked example from scaffold to release pipeline.
 

@@ -1,8 +1,14 @@
 # NeonFS QEMU test rig
 
 Spin up one or more throwaway VMs, attach raw disk images as NeonFS drives,
-install `neonfs_omnibus` from `.deb` packages built out of this repository, and
-form a cluster — end to end, with one command.
+install `neonfs_omnibus` from `.deb` packages built out of the package
+repositories, and form a cluster — end to end, with one command.
+
+The rig builds those packages from their own checkouts, so run it from this
+repository inside a [`neonfs_workspace`](https://harton.dev/project-neon/neonfs_workspace)
+checkout, with every package repository beside it (`bin/neonfs-sync` clones
+them). With `NEONFS_DEPS=local` exported, each package builds against its
+sibling checkouts — your local changes — rather than the tags it pins.
 
 This exercises the **real install path** an operator follows on bare metal: a
 base OS, the `.deb` packages, the `neonfs-omnibus` systemd unit, and the
@@ -69,8 +75,8 @@ within a bounded wait, not the installer exiting 0.
 
 `csi-deploy` gives the k3s VM a cluster identity (`neonfs-nfs` installed purely
 as the join vehicle — `cluster join` redeems through a *local* daemon, and there
-is no `neonfs-csi` deb), builds the CSI image from HEAD with
-`containers/bake.sh --load csi`, imports it with `k3s ctr images import`, then
+is no `neonfs-csi` deb), builds the CSI image from the workspace's
+`neonfs_csi` checkout, imports it with `k3s ctr images import`, then
 validates the chart with `helm install --dry-run=server` before installing it.
 The pods mount the VM's `/var/lib/neonfs/tls` and share its identity, which is
 why they run `hostNetwork` on distinct distribution ports.
@@ -216,7 +222,8 @@ exceeds the number of core nodes).
    `.cache/images/`. Each node gets a copy-on-write overlay backed by it, grown
    to `ROOT_SIZE` (cloud-init `growpart` expands the root filesystem on boot).
 2. **Packages** — `packaging/build-debs.sh` builds `neonfs-common`, `neonfs-cli`
-   and `neonfs-omnibus` (plus the other service packages) into `.cache/debs/`.
+   and `neonfs-omnibus` (plus the other service packages) from the workspace's
+   checkouts into `.cache/debs/`, packaging each with its own repo's nfpm config.
 3. **Disks** — `DRIVES_PER_NODE` raw images per node, attached as virtio block
    devices (`/dev/vdb`, `/dev/vdc`, …). cloud-init formats them `ext4` and mounts
    them at `/mnt/neonfs/drive1`, `/mnt/neonfs/drive2`, … cloud-init also installs

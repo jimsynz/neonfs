@@ -10,7 +10,7 @@ The suite is scoped (#582) to cross-node cluster correctness scenarios
 that genuinely need a peer cluster spanning multiple core nodes.
 Per-interface integration tests (FUSE, NFS, S3, WebDAV, Docker, CSI,
 ...) live with their owning packages and pull peer-cluster scaffolding
-in via [`neonfs_test_support`](../neonfs_test_support/).
+in via [`neonfs_test_support`](https://harton.dev/project-neon/neonfs_test_support).
 
 ## What it tests
 
@@ -57,7 +57,7 @@ The peer-cluster scaffolding (`PeerCluster`, `ClusterCase`,
 `EventCollector`, `LoopbackDevice`, `TelemetryForwarder`,
 `AppProfiler`, `SupervisorStartTimer`, `MetadataBench`,
 `PeerClusterTelemetry`) lives
-in [`neonfs_test_support`](../neonfs_test_support/) so it can be
+in [`neonfs_test_support`](https://harton.dev/project-neon/neonfs_test_support) so it can be
 reused by every interface package. Reach for `alias
 NeonFS.TestSupport.PeerCluster` (and friends) at the top of any new
 test that needs a peer cluster.

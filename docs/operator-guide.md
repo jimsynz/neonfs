@@ -66,13 +66,7 @@ Systemd unit names follow the package name: `neonfs-core.service`, `neonfs-fuse.
 
 ### Container images
 
-OCI images are published for each release at `harton.dev/project-neon/neonfs/<name>`. For local testing build them yourself:
-
-```bash
-PLATFORMS='linux/amd64' docker buildx bake -f bake.hcl --load core fuse nfs s3 webdav docker cli
-```
-
-The `--load` flag places images into the local Docker daemon. Multi-arch manifest lists use the release pipeline (`.forgejo/workflows/release.yml`).
+Each package publishes a multi-arch OCI image on every release, at `ghcr.io/jimsynz/neonfs/<name>`. To build one locally, see [deployment.md](deployment.md#building-images).
 
 See [`deployment.md`](deployment.md) for Docker Compose recipes and [`orchestration.md`](orchestration.md) for Docker Swarm / Kubernetes.
 

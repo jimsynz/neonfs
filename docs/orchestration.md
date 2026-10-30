@@ -45,13 +45,7 @@ This sets `NEONFS_AUTO_BOOTSTRAP=true` internally. The environment variables for
 
 - Docker Engine 24+ with Buildx (for image builds)
 - Docker Swarm mode (for Swarm deployments) or a Kubernetes cluster (for K8s deployments)
-- Images built and available:
-
-```bash
-PLATFORMS='linux/amd64' docker buildx bake -f bake.hcl --load core fuse cli
-```
-
-See [deployment.md](deployment.md) for full image build instructions.
+- The `core`, `fuse` and `cli` images — published at `ghcr.io/jimsynz/neonfs/<name>`, or built locally per [deployment.md](deployment.md#building-images).
 
 ## Docker Swarm
 

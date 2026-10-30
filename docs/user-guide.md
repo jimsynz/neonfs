@@ -47,7 +47,7 @@ Pick by workload, not preference:
 | Legacy NFS clients, cross-host shared home directories, simple Linux sharing | **NFSv3** | Widely supported, works through normal mount tooling (`mount -t nfs`), NLM provides advisory locking. |
 | Applications that already speak S3 (backups, data-science, Spark, Kafka connect) | **S3** | No mount. Signed HTTP. Plays well with IAM-style credentials and lifecycle rules. |
 | Cross-platform editing (macOS Finder, Windows Explorer, Linux file managers) | **WebDAV** | Mount-and-forget over HTTPS. Handles collection locks and dead properties for desktop clients. |
-| Docker volumes for containerised apps | **FUSE** or **Docker plugin** | The [`neonfs_docker`](../neonfs_docker/) VolumeDriver plugin manages FUSE mounts per container. |
+| Docker volumes for containerised apps | **FUSE** or **Docker plugin** | The [`neonfs_docker`](https://harton.dev/project-neon/neonfs_docker) VolumeDriver plugin manages FUSE mounts per container. |
 
 You can mix freely. A common pattern: applications write via S3, ops staff read via FUSE for debugging.
 
