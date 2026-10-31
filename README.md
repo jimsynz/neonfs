@@ -91,28 +91,36 @@ for the high-churn chunk, file, and stripe indexes.
 
 ### Packages
 
+Each package lives in its own repository, with its own releases, container
+image and Debian package. This repository holds what spans them: the
+integration suite, the shared `neonfs-common` package, deployment assets,
+documentation and the test rig.
+
 | Package | Description |
 |---------|-------------|
-| [`neonfs_core`](neonfs_core/) | Storage engine, metadata, Ra consensus, cluster CA, policy |
-| [`neonfs_client`](neonfs_client/) | Shared types, service discovery, RPC routing, chunk streaming |
-| [`neonfs_fuse`](neonfs_fuse/) | FUSE filesystem interface |
-| [`neonfs_nfs`](neonfs_nfs/) | NFSv3 server with NLM v4 advisory locking |
-| [`neonfs_s3`](neonfs_s3/) | S3-compatible HTTP server |
-| [`neonfs_webdav`](neonfs_webdav/) | WebDAV server with collection locking and dead properties |
-| [`neonfs_docker`](neonfs_docker/) | Docker / Podman VolumeDriver plugin |
-| [`neonfs_containerd`](neonfs_containerd/) | containerd content-store gRPC plugin |
-| [`neonfs_csi`](neonfs_csi/) | Kubernetes CSI driver (with [Helm chart](deploy/charts/neonfs-csi/)) |
-| [`neonfs_cifs`](neonfs_cifs/) | Samba VFS module backend — `vfs_neonfs.so` C shim + Elixir bridge (packaging and end-to-end test in progress) |
-| [`neonfs_iam`](neonfs_iam/) | Identity and access management domain (scaffold — resources land incrementally) |
-| [`neonfs_omnibus`](neonfs_omnibus/) | All-in-one bundle: core + every interface in a single release |
-| [`neonfs-cli`](neonfs-cli/) | Rust command-line interface for cluster administration |
-| [`neonfs_test_support`](neonfs_test_support/) | Shared peer-cluster test scaffolding |
+| [`neonfs_core`](https://harton.dev/project-neon/neonfs_core) | Storage engine, metadata, Ra consensus, cluster CA, policy |
+| [`neonfs_client`](https://harton.dev/project-neon/neonfs_client) | Shared types, service discovery, RPC routing, chunk streaming |
+| [`neonfs_fuse`](https://harton.dev/project-neon/neonfs_fuse) | FUSE filesystem interface |
+| [`neonfs_nfs`](https://harton.dev/project-neon/neonfs_nfs) | NFSv3 server with NLM v4 advisory locking |
+| [`neonfs_s3`](https://harton.dev/project-neon/neonfs_s3) | S3-compatible HTTP server |
+| [`neonfs_webdav`](https://harton.dev/project-neon/neonfs_webdav) | WebDAV server with collection locking and dead properties |
+| [`neonfs_docker`](https://harton.dev/project-neon/neonfs_docker) | Docker / Podman VolumeDriver plugin |
+| [`neonfs_containerd`](https://harton.dev/project-neon/neonfs_containerd) | containerd content-store gRPC plugin |
+| [`neonfs_csi`](https://harton.dev/project-neon/neonfs_csi) | Kubernetes CSI driver (with [Helm chart](https://harton.dev/project-neon/neonfs_csi/src/branch/main/deploy/charts/neonfs-csi)) |
+| [`neonfs_cifs`](https://harton.dev/project-neon/neonfs_cifs) | Samba VFS module backend — `vfs_neonfs.so` C shim + Elixir bridge (Samba VFS deb built alongside) |
+| [`neonfs_iam`](https://harton.dev/project-neon/neonfs_iam) | Identity and access management domain (scaffold — resources land incrementally) |
+| [`neonfs_omnibus`](https://harton.dev/project-neon/neonfs_omnibus) | All-in-one bundle: core + every interface in a single release |
+| [`neonfs_cli`](https://harton.dev/project-neon/neonfs_cli) | Rust command-line interface for cluster administration |
+| [`neonfs_test_support`](https://harton.dev/project-neon/neonfs_test_support) | Shared peer-cluster test scaffolding |
 | [`neonfs_integration`](neonfs_integration/) | Multi-node cluster-correctness test suite |
 
 ## Try it
 
 The [QEMU test rig](test-rig/) brings up a real cluster — base OS, `.deb`
-packages, systemd units, the works — with one command:
+packages, systemd units, the works — with one command. It builds those
+packages from the package repositories, so run it from this repository
+inside a [workspace](https://harton.dev/project-neon/neonfs_workspace)
+checkout (`bin/neonfs-sync` clones everything):
 
 ```bash
 cd test-rig
@@ -142,7 +150,7 @@ sudo apt install neonfs-core neonfs-fuse neonfs-nfs neonfs-s3   # split services
 **Container images** are published per interface under
 `ghcr.io/jimsynz/neonfs/` (`core`, `fuse`, `nfs`, `s3`, `webdav`,
 `docker`, `containerd`, `csi`, `omnibus`, `cli`). The CSI driver
-installs into Kubernetes via the [Helm chart](deploy/charts/neonfs-csi/).
+installs into Kubernetes via the [Helm chart](https://harton.dev/project-neon/neonfs_csi/src/branch/main/deploy/charts/neonfs-csi).
 
 See [`packaging/README.md`](packaging/README.md) for deployment
 topologies and [`docs/deployment.md`](docs/deployment.md) for Docker
@@ -193,11 +201,10 @@ copy of your data.
 
 - **Bugs and feature requests** — [open an issue](https://harton.dev/project-neon/neonfs/issues).
 - **Contributing** — start with the [developer guide](docs/developer-guide.md),
-  then build with `resources/scripts/neonfs-each mix deps.get` and run the
-  full check suite with `resources/scripts/neonfs-each mix check --no-retry`
-  (needs Elixir 1.19 / OTP 28 and
-  Rust 1.93 — all pinned in `.tool-versions`, so `asdf install` or
-  `mise install` fetches them).
+  then clone the [workspace](https://harton.dev/project-neon/neonfs_workspace),
+  run `bin/neonfs-sync` to clone every repository into it, and
+  `bin/neonfs-check` to run each one's checks. The toolchain is pinned in
+  `.tool-versions`, so `asdf install` or `mise install` fetches it.
 - **Release notes** — [CHANGELOG.md](CHANGELOG.md), generated from
   conventional commits.
 

@@ -215,11 +215,13 @@ bench_teardown_containers() {
 # printed summary. Interfaces it can't set up are logged and skipped. Requires a
 # cluster from `up` first.
 cmd_bench() {
-  # `--rev <sha>`: check out, build, and boot a specific revision before
-  # benchmarking, so each manual `git bisect` step over an auto-raised
-  # regression's range is a single command. The original ref is
-  # restored on exit. Auto-bisecting full-VM benchmarks is too slow, so bisect
-  # stays manual — this just makes each step one command.
+  # `--rev <sha>`: check out, build, and boot a specific revision of
+  # neonfs_omnibus before benchmarking, so each manual `git bisect` step over
+  # an auto-raised regression's range is a single command. An omnibus revision
+  # is the unit to compare: its mix.exs pins the version of every package it
+  # bundles. The original ref is restored on exit. Auto-bisecting full-VM
+  # benchmarks is too slow, so bisect stays manual — this just makes each step
+  # one command.
   local rev=""
   if [ "${1:-}" = "--rev" ]; then
     rev="${2:-}"
@@ -230,12 +232,12 @@ cmd_bench() {
   command -v mix >/dev/null 2>&1 || die "mix (Elixir) not found on the rig host — needed to run the benchee harness"
 
   if [ -n "${rev}" ]; then
-    local orig
-    orig="$(git -C "${REPO_ROOT}" symbolic-ref --quiet --short HEAD || git -C "${REPO_ROOT}" rev-parse HEAD)"
+    local orig omnibus="${WORKSPACE}/neonfs_omnibus"
+    orig="$(git -C "${omnibus}" symbolic-ref --quiet --short HEAD || git -C "${omnibus}" rev-parse HEAD)"
     # shellcheck disable=SC2064
-    trap "git -C '${REPO_ROOT}' checkout --quiet '${orig}'" EXIT
-    log "bench --rev: checking out '${rev}' (was '${orig}')"
-    git -C "${REPO_ROOT}" checkout --quiet "${rev}" \
+    trap "git -C '${omnibus}' checkout --quiet '${orig}'" EXIT
+    log "bench --rev: checking out neonfs_omnibus '${rev}' (was '${orig}')"
+    git -C "${omnibus}" checkout --quiet "${rev}" \
       || die "checkout '${rev}' failed (a clean working tree is required)"
     log "rebooting the rig on '${rev}' (fresh build)"
     cmd_clean
@@ -261,7 +263,7 @@ cmd_bench() {
   log "staging ${big_mib}MiB source file on node 1"
   node_ssh 1 "dd if=/dev/zero of=/tmp/${BENCH_BIG_FILE} bs=1M count=${big_mib} 2>/dev/null"
 
-  local sha; sha="$(cd "${REPO_ROOT}" && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+  local sha; sha="$(git -C "${WORKSPACE}/neonfs_omnibus" rev-parse --short HEAD 2>/dev/null || echo unknown)"
   local -a e=(
     "BENCH_RIG=${RIG_ROOT}/neonfs-rig" "BENCH_NODE=1" "BENCH_VOLUME=${ACCEPT_VOL}"
     "BENCH_BIG_SIZE=$((big_mib * 1048576))" "BENCH_SHA=${sha}"
@@ -333,7 +335,7 @@ cmd_bench_write_window() {
     || die "fio unavailable and not installable on the guest"
 
   local sha
-  sha="$(git -C "${REPO_ROOT}" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+  sha="$(git -C "${WORKSPACE}/neonfs_omnibus" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 
   cd "${RIG_ROOT}/bench"
   mix deps.get --quiet

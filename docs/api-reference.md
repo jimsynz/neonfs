@@ -15,7 +15,7 @@ The CLI is documented separately in [`cli-reference.md`](cli-reference.md) — a
 
 ## S3
 
-Package: [`neonfs_s3`](../neonfs_s3/) (HTTP server), built on `firkin` (the S3 protocol framework). Endpoint: the S3 gateway binds to `NEONFS_S3_BIND:NEONFS_S3_PORT` (default `0.0.0.0:8080`).
+Package: [`neonfs_s3`](https://harton.dev/project-neon/neonfs_s3) (HTTP server), built on `firkin` (the S3 protocol framework). Endpoint: the S3 gateway binds to `NEONFS_S3_BIND:NEONFS_S3_PORT` (default `0.0.0.0:8080`).
 
 ### Authentication
 
@@ -78,7 +78,7 @@ RFC 7232. On GET/HEAD/PUT/DELETE:
 
 ## WebDAV
 
-Package: [`neonfs_webdav`](../neonfs_webdav/), built on `davy`. Endpoint configured per deployment.
+Package: [`neonfs_webdav`](https://harton.dev/project-neon/neonfs_webdav), built on `davy`. Endpoint configured per deployment.
 
 ### Authentication
 
@@ -123,7 +123,7 @@ Stored per-resource in a sidecar ETS-backed store per interface node (`NeonFS.We
 
 ## NFSv3 + NLM v4
 
-Package: [`neonfs_nfs`](../neonfs_nfs/). Native-BEAM NFSv3 stack — pure Elixir, no out-of-tree Rust. The cutover from the legacy `nfs3_server` NIF landed under the #113 epic.
+Package: [`neonfs_nfs`](https://harton.dev/project-neon/neonfs_nfs). Native-BEAM NFSv3 stack — pure Elixir, no out-of-tree Rust. The cutover from the legacy `nfs3_server` NIF landed under the #113 epic.
 
 ### Protocol
 
@@ -157,7 +157,7 @@ Filehandles are stable across server restarts for the lifetime of the file. A fi
 
 ## FUSE
 
-Package: [`neonfs_fuse`](../neonfs_fuse/). Driven by `neonfs fuse mount <volume> <mountpoint>` on the same host as the `neonfs_fuse` daemon.
+Package: [`neonfs_fuse`](https://harton.dev/project-neon/neonfs_fuse). Driven by `neonfs fuse mount <volume> <mountpoint>` on the same host as the `neonfs_fuse` daemon.
 
 ### Mount options
 
@@ -193,7 +193,7 @@ Mount happens via `fusermount3`. Standard FUSE options apply; NeonFS-specific be
 
 ## Docker VolumeDriver
 
-Package: [`neonfs_docker`](../neonfs_docker/). HTTP over a Unix socket (`/run/neonfs/docker.sock` by default; dockerd discovers it via `/etc/docker/plugins/neonfs.spec`) speaking the Docker Volume Plugin protocol v1.
+Package: [`neonfs_docker`](https://harton.dev/project-neon/neonfs_docker). HTTP over a Unix socket (`/run/neonfs/docker.sock` by default; dockerd discovers it via `/etc/docker/plugins/neonfs.spec`) speaking the Docker Volume Plugin protocol v1.
 
 ### Endpoints (Docker side calls these)
 

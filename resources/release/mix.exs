@@ -2,9 +2,9 @@ defmodule NeonFS.Release.MixProject do
   use Mix.Project
   @moduledoc false
 
-  # Hosts git_ops for cutting workspace releases — run via
-  # `resources/scripts/neonfs-release`. Every package's version is kept in
-  # lockstep with this one by the managed_files glob in config/config.exs.
+  # Hosts git_ops for this repo's releases: from here,
+  # `MIX_ENV=dev mix git_ops.release`, then `git push --follow-tags`. The
+  # NeonFS packages are versioned and released in their own repos.
   @version "0.6.1"
 
   def project,

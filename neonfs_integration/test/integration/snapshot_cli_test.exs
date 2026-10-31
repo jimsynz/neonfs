@@ -12,7 +12,7 @@ defmodule NeonFS.Integration.SnapshotCLITest do
   @moduletag nodes: 1
   @moduletag cluster_mode: :shared
 
-  @cli_path Path.expand("../../../neonfs-cli/target/release/neonfs-cli", __DIR__)
+  @cli_path Application.compile_env!(:neonfs_integration, :cli_path)
 
   setup_all %{cluster: cluster} do
     :ok = cluster_init_idempotent(cluster, :node1, "snap-cli")

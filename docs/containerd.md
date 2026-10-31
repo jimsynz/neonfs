@@ -10,7 +10,7 @@ POSIX xattrs prefixed with `containerd.io/`.
 
 This page is the operator-side wiring guide. Architecture and the
 full RPC reference live in the [package
-README](../neonfs_containerd/README.md).
+README](https://harton.dev/project-neon/neonfs_containerd/src/branch/main/README.md).
 
 ## Wiring containerd
 
@@ -88,11 +88,14 @@ docker run -d --name neonfs-containerd \
   ghcr.io/jimsynz/neonfs/containerd:latest
 ```
 
-Build a single-arch image locally:
+Build a single-arch image locally, from a
+[`neonfs_containerd`](https://harton.dev/project-neon/neonfs_containerd) checkout:
 
 ```console
-PLATFORMS='linux/amd64' docker buildx bake \
-  -f containers/bake.hcl --load containerd
+docker buildx build --platform linux/amd64 --load \
+  --build-arg ELIXIR_VERSION=1.20.4 --build-arg ERLANG_VERSION=29.1.1 \
+  --build-arg RUST_VERSION=1.99.0 \
+  -t neonfs-containerd -f Containerfile .
 ```
 
 ### Debian package

@@ -1,9 +1,17 @@
 name: CI
 
+# The NeonFS packages each run their own CI from their own repos. This one runs
+# the cross-node integration suite against the sibling versions
+# `neonfs_integration/mix.exs` pins — the combination that ships — plus the
+# static checks every NeonFS repo runs.
+
 on:
   push:
     branches: [main]
   pull_request:
+  # Forgejo has no rerun API; a dispatch is how a script re-runs CI without
+  # pushing a commit.
+  workflow_dispatch:
 
 env:
   MIX_ENV: test
@@ -11,446 +19,54 @@ env:
   # enormous RLIMIT_NOFILE (~1e9), which OTP uses to size the port table
   # and allocates ~1.6 GB per VM before user code runs.
   ERL_ZFLAGS: "+Q 65536"
-  # Run `mix check`'s tools one at a time. Runners are concurrency-1, so
-  # nothing else competes for the machine — but `mix check` parallelises
-  # itself, and a peer-cluster ex_unit suite sharing a runner with dialyzer
-  # and cargo is enough to time out post-boot Ra round trips. Those surface
-  # as assertion failures in whichever test was unlucky, on diffs that
-  # cannot have caused them. Read by every `.check.exs`; unset locally, so
-  # developer runs stay parallel.
+  # Run `mix check`'s tools one at a time. Runners are concurrency-1, but
+  # `mix check` parallelises itself, and a peer-cluster ex_unit suite
+  # sharing a runner with dialyzer and cargo is enough to time out post-boot
+  # Ra round trips. Read by every `.check.exs`; unset locally, so developer
+  # runs stay parallel.
   NEONFS_CHECK_PARALLEL: "false"
 
 jobs:
-  # ==========================================================================
-  # Resolve tool versions from .tool-versions (so all jobs use the same
-  # images) and compute which jobs this change needs: the package matrix is
-  # .forgejo/ci-matrix.json filtered by resources/scripts/ci-affected
-  # against the PR's changed files (pushes to main always run everything).
-  #
-  # Matrix entry schema (JSON has no comments, so it's documented here):
-  #   name         package directory, also the job display name
-  #   apt          optional extra apt packages to install first
-  #   dind         optional; true starts a Docker daemon for e2e tests
-  #   csi_sanity   optional; true installs the csi-sanity conformance binary
-  #   helm_chart   optional; path to a Helm chart whose rendered-output
-  #                snapshot (`<chart>/tests/render.sh check`) this job verifies
-  #   cache_paths  newline-separated actions/cache paths (own artefacts plus
-  #                any sibling path-dep artefacts the build compiles)
-  #   lockfiles    space-separated lockfiles hashed into the cache key; every
-  #                listed file must exist (the job fails on a missing one, so
-  #                stale entries can't silently degrade the key)
-  #
-  # Only the package *names* travel through the matrix (keeping job names
-  # readable); each job reads the rest of its entry from the checked-out
-  # table. Container options can't be read in-job, so the two privileged
-  # packages are special-cased on the package job's container.
-  # ==========================================================================
+  # A `container:` key is evaluated before any step in its job, so the image
+  # cannot be computed inside the job that names it.
   setup:
     runs-on: docker
-    timeout-minutes: 60
+    timeout-minutes: 10
     container:
       image: harton.dev/james/workflows/ci-base:latest
     outputs:
       elixir: ${{ steps.parse.outputs.elixir }}
-      erlang: ${{ steps.parse.outputs.erlang }}
       rust: ${{ steps.parse.outputs.rust }}
-      elixir_image: ${{ steps.parse.outputs.elixir_image }}
       elixir_rust_image: ${{ steps.parse.outputs.elixir_rust_image }}
-      rust_image: ${{ steps.parse.outputs.rust_image }}
-      packages: ${{ steps.affected.outputs.packages }}
-      package_matrix: ${{ steps.affected.outputs.package_matrix }}
-      run_integration: ${{ steps.affected.outputs.run_integration }}
-      run_cli: ${{ steps.affected.outputs.run_cli }}
-      run_wire: ${{ steps.affected.outputs.run_wire }}
-      run_vfs: ${{ steps.affected.outputs.run_vfs }}
     steps:
       - uses: actions/checkout@v7
-        with:
-          # ci-affected diffs against the PR base, which needs history.
-          fetch-depth: 0
+      # Cloned rather than checked out: actions/checkout authenticates with
+      # this repo's job token, which cannot see another repo.
+      - name: Fetch the workspace's CI scripts
+        run: git clone --quiet --depth 1 https://harton.dev/project-neon/neonfs_workspace.git .neonfs_workspace
       - id: parse
-        run: |
-          resources/scripts/ci-toolchain-image >> "$GITHUB_OUTPUT"
-      - id: affected
-        run: |
-          # Outside the checkout, so nothing downstream sees a stray file.
-          AFFECTED="$(mktemp)"
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            BASE="${{ github.event.pull_request.base.sha }}"
-            git diff --name-only "${BASE}...HEAD" \
-              | tee /dev/stderr \
-              | resources/scripts/ci-affected > "$AFFECTED"
-          else
-            resources/scripts/ci-affected --all > "$AFFECTED"
-          fi
-          cat "$AFFECTED" >> "$GITHUB_OUTPUT"
+        run: .neonfs_workspace/ci/toolchain-image >> "$GITHUB_OUTPUT"
 
-          # The `package` matrix must never expand to zero instances.
-          # Forgejo instantiates a job with a false `if` (see vfs_neonfs)
-          # and that skipped job satisfies `needs`, but a matrix over an
-          # empty list creates *no job at all* — so `needs: package`
-          # becomes unsatisfiable and `canary` sits at "Blocked by
-          # required conditions" forever, which is exactly what a
-          # `neonfs-cli`-only or docs-only change hit (#1641).
-          #
-          # Feed the matrix a single placeholder in that case. `package`
-          # keeps its own `if` on the real `packages` output, so the
-          # placeholder job is created and immediately skipped; it never
-          # builds anything.
-          PACKAGES=$(sed -n 's/^packages=//p' "$AFFECTED")
-          if [ "$PACKAGES" = "[]" ]; then
-            echo 'package_matrix=["none"]' >> "$GITHUB_OUTPUT"
-          else
-            echo "package_matrix=${PACKAGES}" >> "$GITHUB_OUTPUT"
-          fi
-
-  # =========================================================================
-  # static-checks - repo-wide greps for shapes that compile but are wrong.
-  # Cheap enough to share one job rather than pay container startup each.
-  #   - whole-file buffering regressions (#254)
-  #   - Logger formatter misconfiguration (#1670)
-  # =========================================================================
+  # Greps for shapes that compile but are wrong: whole-file buffering, and
+  # Logger formatter misconfiguration.
   static-checks:
     runs-on: docker
-    timeout-minutes: 60
+    timeout-minutes: 10
     container:
       image: harton.dev/james/workflows/ci-base:latest
     steps:
       - uses: actions/checkout@v7
+      - name: Fetch the workspace's CI scripts
+        run: git clone --quiet --depth 1 https://harton.dev/project-neon/neonfs_workspace.git .neonfs_workspace
       - name: Check for whole-file buffering patterns
-        run: bash scripts/check_buffering.sh
+        run: bash .neonfs_workspace/ci/check-buffering
       - name: Check Logger formatter configuration
-        run: bash scripts/check_logger_formatter.sh
+        run: bash .neonfs_workspace/ci/check-logger-formatter
 
-  # =========================================================================
-  # package - one job per entry in .forgejo/ci-matrix.json. The standard
-  # shape is cache → build → mix check; the optional steps (apt packages,
-  # dind, csi-sanity) are switched on per-entry by matrix fields.
-  # =========================================================================
-  package:
-    needs: setup
-    if: needs.setup.outputs.packages != '[]'
-    runs-on: docker
-    timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      matrix:
-        # Never `packages` directly — an empty matrix creates no job and
-        # deadlocks `canary` (#1641). `package_matrix` is the same list
-        # with a placeholder substituted when it would be empty, and the
-        # `if` above skips the job in exactly that case.
-        pkg: ${{ fromJSON(needs.setup.outputs.package_matrix) }}
-    container:
-      image: ${{ needs.setup.outputs.elixir_rust_image }}
-      # Container options can't be loaded from the table in-job, so the
-      # privileged packages are special-cased here: neonfs_fuse mounts
-      # /dev/fuse for real mounts, neonfs_docker runs dind.
-      options: ${{ matrix.pkg == 'neonfs_fuse' && '--privileged --device /dev/fuse' || (matrix.pkg == 'neonfs_docker' && '--privileged') || '' }}
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Load ci-matrix.json entry
-        id: meta
-        run: |
-          entry=$(jq -c --arg name "${{ matrix.pkg }}" '.[] | select(.name == $name)' .forgejo/ci-matrix.json)
-          if [ -z "$entry" ]; then
-            echo "no ci-matrix.json entry for ${{ matrix.pkg }}" >&2
-            exit 1
-          fi
-          {
-            echo "apt=$(jq -r '.apt // ""' <<<"$entry")"
-            echo "dind=$(jq -r '.dind // false' <<<"$entry")"
-            echo "csi_sanity=$(jq -r '.csi_sanity // false' <<<"$entry")"
-            echo "helm_chart=$(jq -r '.helm_chart // \"\"' <<<"$entry")"
-            echo "lockfiles=$(jq -r '.lockfiles' <<<"$entry")"
-            echo 'cache_paths<<NEONFS_CACHE_PATHS'
-            jq -r '.cache_paths' <<<"$entry"
-            echo 'NEONFS_CACHE_PATHS'
-          } >> "$GITHUB_OUTPUT"
-
-      # Package-specific system deps, e.g. libfuse3 for the FUSE NIF
-      # (wick), build-essential for neonfs_cifs's wire_probe (#1400), the
-      # Docker daemon for the VolumeDriver e2e (#312 — note Debian Trixie
-      # ships the CLI in a separate `docker-cli` package, which
-      # --no-install-recommends won't pull in implicitly).
-      - name: Install extra system packages
-        if: steps.meta.outputs.apt != ''
-        run: apt-get update && apt-get install -y --no-install-recommends ${{ steps.meta.outputs.apt }} && rm -rf /var/lib/apt/lists/*
-
-      - name: Hash lockfiles
-        id: lockhash
-        run: |
-          for f in ${{ steps.meta.outputs.lockfiles }}; do
-            if [ ! -f "$f" ]; then
-              echo "ci-matrix.json lists a lockfile that does not exist: $f" >&2
-              exit 1
-            fi
-          done
-          echo "hash=$(cat ${{ steps.meta.outputs.lockfiles }} | sha256sum | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
-
-      - name: Restore build cache
-        uses: actions/cache@v6
-        with:
-          path: ${{ steps.meta.outputs.cache_paths }}
-          key: v6-build-${{ matrix.pkg }}-${{ runner.arch }}-${{ needs.setup.outputs.elixir }}-${{ needs.setup.outputs.rust }}-${{ steps.lockhash.outputs.hash }}
-          restore-keys: v6-build-${{ matrix.pkg }}-${{ runner.arch }}-
-
-      - name: Build
-        working-directory: ${{ matrix.pkg }}
-        run: |
-          bash ../resources/scripts/ci-scrub-path-deps
-          mix local.hex --force && mix local.rebar --force
-          # A transient hex registry timeout shouldn't fail the job.
-          for attempt in 1 2 3; do
-            mix deps.get && break
-            [ "$attempt" = 3 ] && exit 1
-            echo "mix deps.get failed (attempt ${attempt}); retrying in $((attempt * 10))s"
-            sleep $((attempt * 10))
-          done
-          mix deps.compile
-          if grep -qs dialyxir mix.exs; then mix dialyzer --plt --force-check; fi
-
-      # csi-sanity is the upstream CSI conformance suite (built from
-      # source with Go). When it's on PATH the neonfs_csi test suite
-      # picks up the `:requires_csi_sanity` conformance test; otherwise
-      # that test is excluded. Cache the built binary across runs.
-      #
-      # The version lives in `ci-install-k8s-tools` and is read back out for
-      # the cache key, so the pin and the key cannot drift apart.
-      - name: Resolve csi-sanity version
-        if: steps.meta.outputs.csi_sanity == 'true'
-        id: csi-sanity-version
-        run: |
-          version=$(resources/scripts/ci-install-k8s-tools --print-version csi-sanity)
-          echo "version=${version}" >> "$GITHUB_OUTPUT"
-
-      - name: Cache csi-sanity
-        if: steps.meta.outputs.csi_sanity == 'true'
-        id: cache-csi-sanity
-        uses: actions/cache@v6
-        with:
-          path: /usr/local/bin/csi-sanity
-          key: csi-sanity-v${{ steps.csi-sanity-version.outputs.version }}-${{ runner.arch }}
-
-      - name: Build csi-sanity
-        if: steps.meta.outputs.csi_sanity == 'true' && steps.cache-csi-sanity.outputs.cache-hit != 'true'
-        run: resources/scripts/ci-install-k8s-tools csi-sanity
-
-      # The chart's snapshot is only a test if something runs it. Nothing did:
-      # `deploy/charts/*` was classified inert, so a chart change selected no
-      # job at all, and the snapshot drifted two sidecars behind the chart
-      # before anyone noticed.
-      - name: Check the Helm chart's rendered snapshot
-        if: steps.meta.outputs.helm_chart != ''
-        run: |
-          resources/scripts/ci-install-k8s-tools helm
-          "${{ steps.meta.outputs.helm_chart }}/tests/render.sh" check
-
-      - name: Start Docker daemon (dind for the VolumeDriver e2e test, #312)
-        if: steps.meta.outputs.dind == 'true'
-        env:
-          DOCKER_HOST: unix:///var/run/docker.sock
-        run: |
-          # Start containerd ourselves rather than letting dockerd manage
-          # it. dockerd's wait for a managed containerd is a fixed internal
-          # timeout, and on a loaded runner containerd's own boot has taken
-          # over 14s — past it. dockerd then exits with "failed to start
-          # containerd: timeout waiting for containerd to start" *after*
-          # containerd logged a successful boot, and the job burns its full
-          # poll window waiting for a daemon that is already gone. Waiting
-          # for the socket here puts that budget under our control.
-          containerd >/tmp/containerd.log 2>&1 &
-          for i in $(seq 1 120); do
-            [ -S /run/containerd/containerd.sock ] && break
-            sleep 1
-          done
-          if [ ! -S /run/containerd/containerd.sock ]; then
-            echo "containerd failed to start. Tail of log:"
-            tail -100 /tmp/containerd.log
-            exit 1
-          fi
-          echo "containerd ready after ${i}s"
-
-          dockerd --host=unix:///var/run/docker.sock \
-            --containerd=/run/containerd/containerd.sock \
-            --storage-driver=vfs \
-            --iptables=false --ip-masq=false --bridge=none \
-            >/tmp/dockerd.log 2>&1 &
-          # Poll the daemon's HTTP `/_ping` endpoint directly via curl
-          # over the unix socket. `docker info` was intermittently
-          # unreliable here — it inherits ambient DOCKER_HOST / config
-          # state and can hang for its full API timeout. `/_ping` is
-          # the cheapest health check and gives an immediate answer.
-          for i in $(seq 1 60); do
-            if [ -S /var/run/docker.sock ] && \
-               curl -fsS --max-time 2 --unix-socket /var/run/docker.sock \
-                    http://localhost/_ping >/dev/null 2>&1; then
-              echo "Docker daemon ready after ${i}s"
-              docker version
-              exit 0
-            fi
-            sleep 1
-          done
-          echo "Docker daemon failed to start. Tail of log:"
-          tail -100 /tmp/dockerd.log
-          echo ""
-          echo "Tail of containerd log:"
-          tail -50 /tmp/containerd.log
-          echo ""
-          echo "Last docker info attempt output:"
-          docker info 2>&1 || true
-          exit 1
-
-      - name: Pre-pull e2e test images
-        if: steps.meta.outputs.dind == 'true'
-        env:
-          DOCKER_HOST: unix:///var/run/docker.sock
-        run: |
-          # The VolumeDriver e2e test runs `docker run … alpine …`, which
-          # pulls `alpine:latest` from Docker Hub on demand. A transient
-          # registry network error there surfaced as a confusing test
-          # failure on unrelated PRs (#1128). Pull the image up front with
-          # backoff so any Docker Hub hiccup is retried — and reported here
-          # as an environmental step failure — rather than flaking the test.
-          # The test then finds the image locally and does not pull at runtime.
-          for i in $(seq 1 5); do
-            if docker pull alpine:latest; then
-              echo "Pulled alpine:latest"
-              exit 0
-            fi
-            echo "alpine:latest pull attempt ${i} failed; retrying in $((i * 5))s"
-            sleep $((i * 5))
-          done
-          echo "Failed to pull alpine:latest after 5 attempts"
-          exit 1
-
-      - name: Check
-        working-directory: ${{ matrix.pkg }}
-        run: mix check
-
-  # =========================================================================
-  # vfs_neonfs_wire - C client of the neonfs_cifs ETF protocol (#1169). Builds
-  # the wire client + mock-responder harness; needs only a C toolchain and the
-  # erl_interface (ei) headers from the Erlang install, not Samba.
-  # =========================================================================
-  vfs_neonfs_wire:
-    needs: setup
-    if: needs.setup.outputs.run_wire == 'true'
-    runs-on: docker
-    timeout-minutes: 60
-    container:
-      image: ${{ needs.setup.outputs.elixir_rust_image }}
-    steps:
-      - name: Install C toolchain
-        run: apt-get update && apt-get install -y --no-install-recommends build-essential && rm -rf /var/lib/apt/lists/*
-      - uses: actions/checkout@v7
-      - name: Build + run wire harness
-        run: make -C neonfs_cifs/native/vfs_neonfs test
-
-  # =========================================================================
-  # vfs_neonfs - Samba VFS module (#1170). Builds the samba-vfs-neonfs .deb from
-  # the distro's own samba source (VFS modules can't be built out-of-tree and
-  # must ABI + symbol-version match the host smbd — #1548). The samba source +
-  # build tree is cached, so only the first run pays the full Samba build; later
-  # runs relink just the module and repackage. Kept a separate job so that cost
-  # doesn't ride on every other suite. (Load/round-trip testing is #386.)
-  # The vfs-cache-warm workflow rebuilds the cache on a schedule after
-  # eviction; the raised timeout covers the cold-build case so it finishes
-  # instead of flaking (#1565).
-  # =========================================================================
-  vfs_neonfs:
-    needs: setup
-    if: needs.setup.outputs.run_vfs == 'true'
-    runs-on: docker
-    timeout-minutes: 120
-    container:
-      image: ${{ needs.setup.outputs.elixir_rust_image }}
-    steps:
-      - uses: actions/checkout@v7
-      # The cache holds a Samba *source tree*, and `build-vfs-deb.sh` refuses
-      # to build against one that no longer matches the archive — so the key
-      # has to move with the archive. A static key cannot: `actions/cache`
-      # will not overwrite an existing entry, so the first point release after
-      # it was written poisons it permanently and every later run restores
-      # half a gigabyte it must then throw away.
-      - name: Resolve the distro samba version
-        id: samba
-        run: |
-          apt-get update -qq
-          version=$(apt-cache policy samba | awk '/Candidate:/ {print $2}')
-          if [ -z "$version" ] || [ "$version" = "(none)" ]; then
-            echo "no samba candidate in this image's archive" >&2
-            exit 1
-          fi
-          echo "version=$(printf '%s' "$version" | sed 's/[^A-Za-z0-9._-]/-/g')" >> "$GITHUB_OUTPUT"
-
-      - name: Restore Samba build cache
-        uses: actions/cache@v6
-        with:
-          path: .samba-build
-          # No cross-arch restore-keys fallback: the build tree is
-          # architecture-specific (restoring an x64 tree onto arm64 fails
-          # linking with "incompatible architecture"). Match the exact,
-          # arch-qualified key only.
-          key: v5-vfs_neonfs-samba-deb-${{ runner.arch }}-${{ steps.samba.outputs.version }}
-      - name: Build samba-vfs-neonfs.deb
-        run: OUT_DIR="$(mktemp -d)" bash packaging/build-vfs-deb.sh
-
-  # =========================================================================
-  # neonfs-cli - Rust CLI
-  # =========================================================================
-  neonfs-cli:
-    needs: setup
-    if: needs.setup.outputs.run_cli == 'true'
-    runs-on: docker
-    timeout-minutes: 60
-    container:
-      image: ${{ needs.setup.outputs.rust_image }}
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Restore build cache
-        uses: actions/cache@v6
-        with:
-          path: |
-            neonfs-cli/target
-          key: v3-build-neonfs-cli-${{ runner.arch }}-${{ needs.setup.outputs.rust }}-${{ hashFiles('neonfs-cli/Cargo.lock') }}
-          restore-keys: v3-build-neonfs-cli-${{ runner.arch }}-
-
-      - name: Build
-        working-directory: neonfs-cli
-        run: |
-          cargo fetch
-          cargo test --no-run --release
-
-      - name: Test
-        working-directory: neonfs-cli
-        run: cargo test --jobs 1 --release
-
-      - name: Clippy
-        working-directory: neonfs-cli
-        run: cargo clippy --all-targets --all-features -- -D warnings
-
-      # `docs/cli-reference.md` is generated from clap's own `--help`, so it
-      # goes stale exactly when this crate changes — which makes this the job
-      # that should notice. It also already has the release binary and a warm
-      # target cache, so the check costs one `--help` per command rather than
-      # a build. Living in `static-checks` instead would mean building the CLI
-      # in a container that has no Rust.
-      - name: Check the CLI reference is up to date
-        run: bash scripts/regen-cli-reference.sh --check
-
-  # =========================================================================
-  # neonfs_integration - Integration tests. Stays outside the package matrix:
-  # it needs the amd64 runner pool, a registry service sidecar (which is
-  # job-level and can't be switched per matrix entry), loop devices, and
-  # containerd.
-  # =========================================================================
   # The suite's static tools do not need the privileged container, the loop
   # devices or the registry sidecar, and they must not run once per shard.
   neonfs_integration_checks:
     needs: setup
-    if: needs.setup.outputs.run_integration == 'true'
     runs-on: amd64
     timeout-minutes: 30
     container:
@@ -458,27 +74,22 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # Every sibling — its NIF build output and the CLI's included — lives
+      # under deps/ and is pinned in mix.lock, so the lockfile alone keys it.
       - name: Restore build cache
         uses: actions/cache@v6
         with:
           path: |
-            neonfs_client/deps
-            neonfs_client/_build
-            neonfs_client/native/neonfs_chunker/target
-            neonfs_client/priv/native
             neonfs_integration/deps
             neonfs_integration/_build
-            neonfs_core/target
-            neonfs_core/priv/native
-          key: v6-build-neonfs_integration-${{ runner.arch }}-${{ needs.setup.outputs.elixir }}-${{ needs.setup.outputs.rust }}-${{ hashFiles('neonfs_integration/mix.lock', 'neonfs_core/Cargo.lock', 'neonfs_client/native/neonfs_chunker/Cargo.lock') }}
-          restore-keys: v6-build-neonfs_integration-${{ runner.arch }}-
+          key: v8-integration-checks-${{ runner.arch }}-${{ needs.setup.outputs.elixir }}-${{ needs.setup.outputs.rust }}-${{ hashFiles('neonfs_integration/mix.lock') }}
+          restore-keys: v8-integration-checks-${{ runner.arch }}-${{ needs.setup.outputs.elixir }}-${{ needs.setup.outputs.rust }}-
 
       - name: Build
         working-directory: neonfs_integration
         run: |
-          bash ../resources/scripts/ci-scrub-path-deps
           mix local.hex --force && mix local.rebar --force
-          # A transient hex registry timeout shouldn't fail the job.
+          # A transient registry or git timeout shouldn't fail the job.
           for attempt in 1 2 3; do
             mix deps.get && break
             [ "$attempt" = 3 ] && exit 1
@@ -487,7 +98,7 @@ jobs:
           done
           mix deps.compile
           mix compile
-          if grep -qs dialyxir mix.exs; then mix dialyzer --plt --force-check; fi
+          mix dialyzer --plt --force-check
 
       - name: Check
         working-directory: neonfs_integration
@@ -495,7 +106,6 @@ jobs:
 
   neonfs_integration:
     needs: setup
-    if: needs.setup.outputs.run_integration == 'true'
     runs-on: amd64
     strategy:
       fail-fast: false
@@ -504,37 +114,24 @@ jobs:
         # add parallelism — the scheduler just puts two shards on one host,
         # where they share its disk and ephemeral port range while each boots
         # multi-node peer clusters. Four shards did exactly that and exhausted
-        # both. Raise this only alongside the runner count.
-        #
-        # A literal list, never a computed one: a matrix over an empty list
-        # creates no job at all, and `canary`'s `needs` on it then can never
-        # be satisfied. Keep `--partitions` below in step with its length.
+        # both. Raise this only alongside the runner count, and keep
+        # `--partitions` below in step with its length.
         partition: [1, 2]
     # Headroom over a shard's real cost, not an open-ended limit: a genuinely
-    # wedged shard must still fail rather than sit indefinitely. The suite has
-    # outgrown the arithmetic this used to carry — shards are not halves of a
-    # ~34-minute whole any more; the slower one alone runs ~40 minutes plus
-    # setup, and at 45 it was cut mid-test three runs out of four, with no
-    # test having failed. Mix distributes test *files*, so the split is
-    # approximate and the slower shard absorbs most of the growth. Revisit
-    # when a shard's own runtime, not the gap to this number, is the problem.
+    # wedged shard must still fail rather than sit indefinitely. The slower
+    # shard runs ~40 minutes plus setup; Mix distributes test *files*, so the
+    # split is approximate and the slower shard absorbs most of the growth.
     timeout-minutes: 60
     container:
       image: ${{ needs.setup.outputs.elixir_rust_image }}
       options: --privileged
     services:
-      # Local registry for `containerd_image_pull_test.exs`. Pre-seeded by
-      # the "Pre-seed registry sidecar" step below via `skopeo`, so the test
-      # never reaches docker.io. The test and the pre-seed step both reach
-      # this sidecar at `registry:5000` over the workflow's service network
-      # — the host port is never used, so we don't map it. Mapping
-      # `5000:5000` collides with anything else holding the host port (stuck
-      # containers from previous jobs, a docker daemon registry mirror) and
-      # breaks the whole job.
-      #
-      # Every shard gets one: `mix test --partitions` distributes files
-      # round-robin over their sorted names, so the containerd tests can
-      # land in either shard.
+      # Local registry for `containerd_image_pull_test.exs`, pre-seeded below
+      # via `skopeo` so the test never reaches docker.io. Reached at
+      # `registry:5000` over the service network; the host port is never used,
+      # so it is not mapped — mapping it collides with anything else holding
+      # the host port and breaks the whole job. Every shard gets one, because
+      # the containerd tests can land in either.
       registry:
         image: registry:3
     steps:
@@ -551,24 +148,16 @@ jobs:
         uses: actions/cache@v6
         with:
           path: |
-            neonfs_client/deps
-            neonfs_client/_build
-            neonfs_client/native/neonfs_chunker/target
-            neonfs_client/priv/native
             neonfs_integration/deps
             neonfs_integration/_build
-            neonfs_core/target
-            neonfs_core/priv/native
-            neonfs-cli/target
-          key: v7-build-neonfs_integration-${{ runner.arch }}-${{ needs.setup.outputs.elixir }}-${{ needs.setup.outputs.rust }}-${{ hashFiles('neonfs_integration/mix.lock', 'neonfs_core/Cargo.lock', 'neonfs_client/native/neonfs_chunker/Cargo.lock', 'neonfs-cli/Cargo.lock') }}
-          restore-keys: v7-build-neonfs_integration-${{ runner.arch }}-
+          key: v8-integration-${{ runner.arch }}-${{ needs.setup.outputs.elixir }}-${{ needs.setup.outputs.rust }}-${{ hashFiles('neonfs_integration/mix.lock') }}
+          restore-keys: v8-integration-${{ runner.arch }}-${{ needs.setup.outputs.elixir }}-${{ needs.setup.outputs.rust }}-
 
       - name: Build
         working-directory: neonfs_integration
         run: |
-          bash ../resources/scripts/ci-scrub-path-deps
           mix local.hex --force && mix local.rebar --force
-          # A transient hex registry timeout shouldn't fail the job.
+          # A transient registry or git timeout shouldn't fail the job.
           for attempt in 1 2 3; do
             mix deps.get && break
             [ "$attempt" = 3 ] && exit 1
@@ -593,11 +182,8 @@ jobs:
       - name: Pre-seed registry sidecar
         working-directory: neonfs_integration
         run: |
-          # Push the committed OCI fixture into the `registry:3`
-          # sidecar so `containerd_image_pull_test.exs` can pull
-          # via the service network without reaching docker.io.
-          # `--dest-tls-verify=false` because the sidecar speaks
-          # plain HTTP on the service network.
+          # `--dest-tls-verify=false` because the sidecar speaks plain HTTP on
+          # the service network.
           skopeo copy \
             --dest-tls-verify=false \
             oci-archive:test/fixtures/test-image.tar \
@@ -608,30 +194,3 @@ jobs:
         env:
           MIX_TEST_PARTITION: ${{ matrix.partition }}
         run: mix test --partitions 2
-
-  canary:
-    needs:
-      - setup
-      - static-checks
-      - package
-      - vfs_neonfs_wire
-      - vfs_neonfs
-      - neonfs-cli
-      - neonfs_integration
-      - neonfs_integration_checks
-    if: always()
-    runs-on: docker
-    timeout-minutes: 10
-    container:
-      image: harton.dev/james/workflows/ci-base:latest
-    steps:
-      - name: Check all required jobs passed
-        env:
-          NEEDS: ${{ toJSON(needs) }}
-        run: |
-          echo "$NEEDS"
-          if echo "$NEEDS" | grep -qE '"result": *"(failure|cancelled)"'; then
-            echo "One or more required jobs failed or were cancelled."
-            exit 1
-          fi
-          echo "All required jobs succeeded (or were skipped)."

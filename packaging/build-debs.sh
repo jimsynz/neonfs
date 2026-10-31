@@ -1,5 +1,12 @@
 #!/bin/bash
-# Build Debian packages for NeonFS
+# Build NeonFS Debian packages from a workspace checkout.
+#
+# This repo sits inside a neonfs_workspace checkout alongside every NeonFS
+# package repo (`bin/neonfs-sync` clones them). Each package is built in its
+# own checkout and packaged with its own `packaging/nfpm/` configs; the shared
+# maintainer scripts come from the workspace, and `neonfs-common` from here.
+# CI publishes these same packages from each repo's tags — this script exists
+# for building them locally, as the test rig does.
 #
 # Usage:
 #   VERSION=0.1.0 ./packaging/build-debs.sh            # native build
@@ -7,15 +14,20 @@
 #   VERSION=0.1.0 USE_DOCKER=1 ./packaging/build-debs.sh # force Docker for native arch
 #
 # Environment variables:
-#   VERSION    - Package version (required)
-#   ARCH       - Target architecture: amd64, arm64 (default: auto-detect)
-#   OUT_DIR    - Output directory for .deb files (default: ./dist)
-#   USE_DOCKER - Set to 1 to force Docker even for native architecture
+#   VERSION          - Package version (required)
+#   ARCH             - Target architecture: amd64, arm64 (default: auto-detect)
+#   OUT_DIR          - Output directory for .deb files (default: ./dist)
+#   USE_DOCKER       - Set to 1 to force Docker even for native architecture
+#   COMPONENTS       - Service repos to build (default: every daemon)
+#   NEONFS_BUILD_CIFS - Also build neonfs_cifs and the samba-vfs-neonfs deb
+#   NEONFS_DEPS      - `local` builds every package against its sibling
+#                      checkouts rather than the tags each pins
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+WORKSPACE="$(cd "${REPO_ROOT}/.." && pwd)"
 
 if [ -z "${VERSION:-}" ]; then
     echo "Error: VERSION is required"
@@ -35,6 +47,21 @@ if [ -z "${ARCH:-}" ]; then
 fi
 
 OUT_DIR="${OUT_DIR:-${REPO_ROOT}/dist}"
+COMPONENTS="${COMPONENTS:-neonfs_core neonfs_fuse neonfs_nfs neonfs_s3 neonfs_webdav neonfs_docker neonfs_containerd neonfs_block neonfs_omnibus}"
+[ -n "${NEONFS_BUILD_CIFS:-}" ] && COMPONENTS="${COMPONENTS} neonfs_cifs"
+
+for repo in neonfs_workspace neonfs_cli ${COMPONENTS}; do
+    dir="${WORKSPACE}/${repo}"
+    [ "${repo}" = neonfs_workspace ] && dir="${WORKSPACE}"
+    [ -d "${dir}" ] || {
+        echo "Error: ${dir} not found — run bin/neonfs-sync in the workspace first"
+        exit 1
+    }
+done
+[ -d "${WORKSPACE}/packaging/scripts" ] || {
+    echo "Error: ${WORKSPACE} is not a neonfs_workspace checkout (no packaging/scripts)"
+    exit 1
+}
 
 # --- Docker-based cross-compilation ---
 
@@ -46,7 +73,6 @@ esac
 
 if [ "${_NEONFS_IN_DOCKER:-}" != "1" ] && { [ "$ARCH" != "$host_arch" ] || [ "${USE_DOCKER:-}" = "1" ]; }; then
     BUILDER_IMAGE="neonfs-deb-builder:${ARCH}"
-
     ELIXIR_VERSION=$(awk '/^elixir/ {sub(/-otp-[0-9]+$/, "", $2); print $2}' "${REPO_ROOT}/.tool-versions")
     ERLANG_VERSION=$(awk '/^erlang/ {print $2}' "${REPO_ROOT}/.tool-versions")
     RUST_VERSION=$(awk '/^rust/ {print $2}' "${REPO_ROOT}/.tool-versions")
@@ -61,106 +87,83 @@ if [ "${_NEONFS_IN_DOCKER:-}" != "1" ] && { [ "$ARCH" != "$host_arch" ] || [ "${
         --build-arg "RUST_VERSION=${RUST_VERSION}" \
         -t "${BUILDER_IMAGE}" \
         -f "${REPO_ROOT}/containers/Containerfile.deb-builder" \
-        "${REPO_ROOT}"
+        "${REPO_ROOT}/containers"
 
     mkdir -p "${OUT_DIR}"
-
     echo "==> Running build inside Docker..."
     docker run --rm \
         --platform "linux/${ARCH}" \
-        -v "${REPO_ROOT}:/src:ro" \
+        -v "${WORKSPACE}:/src:ro" \
         -v "${OUT_DIR}:/out" \
         -e VERSION="${VERSION}" \
         -e ARCH="${ARCH}" \
         -e OUT_DIR=/out \
+        -e COMPONENTS="${COMPONENTS}" \
+        -e NEONFS_DEPS="${NEONFS_DEPS:-}" \
         -e _NEONFS_IN_DOCKER=1 \
         "${BUILDER_IMAGE}" \
-        /src/packaging/build-debs.sh
+        "/src/$(basename "${REPO_ROOT}")/packaging/build-debs.sh"
 
     echo "==> Done. Packages in ${OUT_DIR}:"
     ls -lh "${OUT_DIR}"/*.deb
     exit 0
 fi
 
-# --- If running inside Docker, copy source to a writable location ---
+# --- Native build (or running inside Docker) ---
 
 if [ "${_NEONFS_IN_DOCKER:-}" = "1" ]; then
-    echo "==> Copying source to build directory..."
+    echo "==> Copying the workspace to a build directory..."
     cp -a /src /build
-    REPO_ROOT=/build
-    SCRIPT_DIR=/build/packaging
+    WORKSPACE=/build
+    REPO_ROOT="/build/$(basename "${REPO_ROOT}")"
 fi
 
-# --- Native build (or inside Docker container) ---
-
 mkdir -p "${OUT_DIR}"
-export VERSION ARCH BUILD_DIR="${REPO_ROOT}"
+export VERSION ARCH
+export COMMON="${WORKSPACE}/packaging"
+
+# nfpm resolves `${BUILD_DIR}` paths in each config; every repo's configs are
+# written relative to that repo's root.
+package_repo() {
+    local dir="$1" config generated
+    for config in "${dir}"/packaging/nfpm/*.yaml; do
+        echo "    $(basename "${config}" .yaml)..."
+        generated="$(mktemp --suffix=.yaml -p "${dir}/packaging/nfpm")"
+        BUILD_DIR="${dir}" envsubst < "${config}" > "${generated}"
+        nfpm package --config "${generated}" --packager deb --target "${OUT_DIR}/"
+        rm -f "${generated}"
+    done
+}
 
 echo "==> Building NeonFS ${VERSION} for ${ARCH}"
 
-# Step 1: Build CLI
-echo "==> Building CLI..."
-cd "${REPO_ROOT}/neonfs-cli"
-cargo build --release
+echo "==> Building and packaging the CLI..."
+( cd "${WORKSPACE}/neonfs_cli" && cargo build --release )
+package_repo "${WORKSPACE}/neonfs_cli"
 
-# Step 2: Build Elixir releases
-#
-# `mix release --overwrite` only overwrites individual files; it does NOT
-# delete pre-existing app-version subdirectories under
-# `_build/prod/rel/<release>/lib/`. When the release tree is reused across
-# version bumps (e.g. via a CI cache), old `lib/<app>-<old_vsn>/` directories
-# accumulate alongside the new ones, and in some cases the new
-# `lib/<app>-<new_vsn>/priv/` is left empty because `priv/` was already
-# materialised under the old vsn. That's how `neonfs_blob.so` ended up
-# missing from `neonfs_core-0.2.3/priv/native/` in the omnibus deb.
-# Wipe `_build/prod/rel/` before every release so each build starts clean.
-# neonfs_cifs is opt-in (NEONFS_BUILD_CIFS=1): its Samba VFS module needs a
-# heavy, root/apt-requiring in-tree Samba build, which callers like the
-# test-rig's `ensure_debs` neither need nor can run unprivileged. The release
-# pipeline builds it via its own path.
-for component in neonfs_core neonfs_fuse neonfs_nfs neonfs_s3 neonfs_webdav neonfs_docker neonfs_containerd neonfs_block neonfs_omnibus ${NEONFS_BUILD_CIFS:+neonfs_cifs}; do
-    echo "==> Building ${component} release..."
-    cd "${REPO_ROOT}/${component}"
-    MIX_ENV=prod mix deps.get --only prod
-    # Wipe the release tree (see above) AND the compiled local path-dep
-    # artifacts. `mix release` reassembles from `_build/prod/lib` and does not
-    # reliably recompile sibling path deps (neonfs_*) after their
-    # sources change, so an edited interface package can be packaged with a
-    # stale beam. Hex deps stay cached.
-    rm -rf _build/prod/rel _build/prod/lib/neonfs_*
-    MIX_ENV=prod mix release --overwrite
+echo "==> Packaging neonfs-common..."
+package_repo "${REPO_ROOT}"
+
+# `mix release --overwrite` does not delete a previous build's
+# `lib/<app>-<old_vsn>/` directories, and a stale one has shipped an empty
+# `priv/` that way, so release builds start clean.
+for component in ${COMPONENTS}; do
+    echo "==> Building and packaging ${component}..."
+    dir="${WORKSPACE}/${component}"
+    (
+        cd "${dir}"
+        MIX_ENV=prod mix deps.get --only prod
+        rm -rf _build/prod/rel _build/prod/lib/neonfs_*
+        MIX_ENV=prod mix release --overwrite
+    )
+    package_repo "${dir}"
 done
 
-# Step 2b: Build the samba-vfs-neonfs Debian package — the Samba VFS module,
-# built from the distro's own samba source so it loads in the host smbd (a
-# bespoke build links against the wrong private-lib symbol versions).
-# neonfs-cifs / neonfs-omnibus `Depends: samba-vfs-neonfs`. Opt-in — see the
-# NEONFS_BUILD_CIFS note above.
 if [ -n "${NEONFS_BUILD_CIFS:-}" ]; then
     echo "==> Building samba-vfs-neonfs.deb..."
-    OUT_DIR="${OUT_DIR}" VERSION="${VERSION}" bash "${REPO_ROOT}/packaging/build-vfs-deb.sh" >/dev/null
+    OUT_DIR="${OUT_DIR}" VERSION="${VERSION}" \
+        bash "${WORKSPACE}/neonfs_cifs/packaging/build-vfs-deb.sh" >/dev/null
 fi
-
-# Step 3: Package with nfpm
-# nfpm resolves relative paths (../systemd/, ../scripts/) from CWD,
-# so we must cd into the nfpm config directory first.
-echo "==> Packaging .deb files..."
-
-cd "${SCRIPT_DIR}/nfpm"
-
-cleanup_generated_configs() {
-    rm -f "${SCRIPT_DIR}"/nfpm/.generated-*.yaml
-}
-trap cleanup_generated_configs EXIT
-
-for config in neonfs-cli neonfs-common neonfs-core neonfs-fuse neonfs-nfs neonfs-s3 neonfs-webdav neonfs-docker neonfs-containerd neonfs-block neonfs-omnibus ${NEONFS_BUILD_CIFS:+neonfs-cifs}; do
-    echo "    ${config}..."
-    envsubst < "${config}.yaml" > ".generated-${config}.yaml"
-    nfpm package \
-        --config ".generated-${config}.yaml" \
-        --packager deb \
-        --target "${OUT_DIR}/"
-done
 
 echo "==> Done. Packages in ${OUT_DIR}:"
 ls -lh "${OUT_DIR}"/*.deb

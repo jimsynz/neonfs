@@ -8,13 +8,21 @@ on:
     - cron: "0 3 * * 1"
   workflow_dispatch:
 
+# The rig builds every package from its own repo, so the job assembles a
+# workspace — this repo beside every package repo at its default branch — and
+# builds against those checkouts: the week's work on main, not the last
+# releases.
+env:
+  NEONFS_WS: /tmp/neonfs-workspace
+  NEONFS_DEPS: local
+
 jobs:
   # The versioned toolchain image, resolved from `.tool-versions`. It has to
   # be its own job because a `container:` key is evaluated before any step in
   # that job runs, so the image cannot be computed inside the job that uses
   # it. The job is per-workflow; the parsing behind it is not — every
-  # workflow's `setup` runs the same `ci-toolchain-image`, so the naming
-  # scheme lives in one place and cannot drift between them.
+  # workflow's `setup` runs the workspace's `ci/toolchain-image`, so the
+  # naming scheme lives in one place and cannot drift between them.
   setup:
     runs-on: docker
     timeout-minutes: 10
@@ -24,9 +32,12 @@ jobs:
       elixir_rust_image: ${{ steps.parse.outputs.elixir_rust_image }}
     steps:
       - uses: actions/checkout@v7
+      # Cloned rather than checked out: actions/checkout authenticates with
+      # this repo's job token, which cannot see another repo.
+      - name: Fetch the workspace's CI scripts
+        run: git clone --quiet --depth 1 https://harton.dev/project-neon/neonfs_workspace.git .neonfs_workspace
       - id: parse
-        run: |
-          resources/scripts/ci-toolchain-image >> "$GITHUB_OUTPUT"
+        run: .neonfs_workspace/ci/toolchain-image >> "$GITHUB_OUTPUT"
 
   bench:
     needs: setup
@@ -66,6 +77,11 @@ jobs:
             tar -C /usr/local/bin -xzf /tmp/nfpm.tgz nfpm
           fi
 
+      - name: Assemble the workspace
+        run: |
+          git clone --quiet --depth 1 https://harton.dev/project-neon/neonfs_workspace.git "$NEONFS_WS"
+          "$NEONFS_WS/ci/assemble-workspace" "$NEONFS_WS"
+
       # The image carries Elixir and Rust, so nothing installs a toolchain
       # here — but hex and rebar are per-user and the bench harness runs
       # `mix deps.get` on the host side.
@@ -76,8 +92,7 @@ jobs:
 
       - name: Run benchmark matrix
         run: |
-          export PATH="$PWD/resources/scripts:$PATH"
-          cd test-rig
+          cd "$NEONFS_WS/neonfs/test-rig"
           ./neonfs-rig bench-matrix
 
       # Regression gate (#1524): compare this run against the rolling window of
@@ -99,9 +114,9 @@ jobs:
 
       - name: Regression gate
         run: |
-          cd test-rig/bench
+          cd "$NEONFS_WS/neonfs/test-rig/bench"
           mix deps.get --quiet
-          BENCH_CURRENT_DIR="$GITHUB_WORKSPACE/test-rig/bench/results" \
+          BENCH_CURRENT_DIR="$NEONFS_WS/neonfs/test-rig/bench/results" \
           BENCH_WINDOW_DIRS="$GITHUB_WORKSPACE/window" \
           BENCH_REGRESSION_REPORT="$GITHUB_WORKSPACE/regression.md" \
             mix run -e "NeonFS.Bench.Regression.main()"
@@ -120,7 +135,7 @@ jobs:
       - name: Tear down rig state
         if: always()
         run: |
-          cd test-rig
+          cd "$NEONFS_WS/neonfs/test-rig"
           ./neonfs-rig clean || true
 
       - name: Upload SHA-stamped benchmark artifacts
@@ -128,7 +143,7 @@ jobs:
         uses: actions/upload-artifact@v5
         with:
           name: bench-${{ github.sha }}
-          path: test-rig/bench/results/**
+          path: /tmp/neonfs-workspace/neonfs/test-rig/bench/results/**
           # Must exceed the regression-gate comparison window (#1524: weekly ×
           # ~4-run rolling window ≈ 5 weeks). 90 days is comfortably over.
           retention-days: 90

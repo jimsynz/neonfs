@@ -14,16 +14,16 @@ depends:
   - hostname
 
 contents:
-  - src: ../systemd/neonfs.conf
+  - src: ${BUILD_DIR}/packaging/systemd/neonfs.conf
     dst: /etc/neonfs/neonfs.conf
     type: config|noreplace
 
-  - src: ../systemd/neonfs-tls-common.sh
+  - src: ${BUILD_DIR}/packaging/systemd/neonfs-tls-common.sh
     dst: /usr/lib/neonfs/neonfs-tls-common.sh
     file_info:
       mode: 0755
 
 scripts:
-  preinstall: ../scripts/pre-install.sh
-  postinstall: ../scripts/post-install.sh
-  postremove: ../scripts/post-remove.sh
+  preinstall: ${COMMON}/scripts/pre-install.sh
+  postinstall: ${COMMON}/scripts/post-install.sh
+  postremove: ${COMMON}/scripts/post-remove.sh

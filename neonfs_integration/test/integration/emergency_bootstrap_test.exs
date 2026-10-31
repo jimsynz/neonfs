@@ -37,10 +37,7 @@ defmodule NeonFS.Integration.EmergencyBootstrapTest do
   alias NeonFS.TestSupport.PeerCluster
   alias NeonFS.Transport.TLS
 
-  @cli_path Path.expand(
-              "../../../neonfs-cli/target/release/neonfs-cli",
-              __DIR__
-            )
+  @cli_path Application.compile_env!(:neonfs_integration, :cli_path)
 
   @moduletag timeout: 300_000
   @moduletag nodes: 3

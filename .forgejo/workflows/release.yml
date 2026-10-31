@@ -1,525 +1,131 @@
 name: Release
 
+# A `v*` tag — cut with `MIX_ENV=dev mix git_ops.release` in resources/release
+# and pushed with `git push --follow-tags` — publishes `neonfs-common`: the
+# shared configuration, TLS helper and system user every NeonFS service package
+# depends on. The packages themselves publish from their own repos.
+
 on:
   push:
     tags: ["v*"]
+  # Re-runs a tag's publishing without moving the tag: dispatch on the tag ref.
   workflow_dispatch:
 
 jobs:
-  # =========================================================================
-  # Resolve tool and release versions once so every artifact uses the same
-  # package version and workflows CI images.
-  # =========================================================================
-  resolve-versions:
-    runs-on: docker
-    timeout-minutes: 60
-    container:
-      image: harton.dev/james/workflows/ci-base:latest
-    outputs:
-      elixir: ${{ steps.parse.outputs.elixir }}
-      erlang: ${{ steps.parse.outputs.erlang }}
-      rust: ${{ steps.parse.outputs.rust }}
-      elixir_rust_image: ${{ steps.parse.outputs.elixir_rust_image }}
-      image_version: ${{ steps.parse.outputs.image_version }}
-      package_version: ${{ steps.parse.outputs.package_version }}
-      prerelease: ${{ steps.parse.outputs.prerelease }}
-      release_tag: ${{ steps.parse.outputs.release_tag }}
-      release_version: ${{ steps.parse.outputs.release_version }}
-      tagged: ${{ steps.parse.outputs.tagged }}
-    steps:
-      - uses: actions/checkout@v7
-      - id: parse
-        run: |
-          RELEASE_VERSION=$(awk -F'"' '/@version/ {print $2; exit}' resources/release/mix.exs)
-
-          if [ -z "$RELEASE_VERSION" ]; then
-            echo "could not resolve the release version" >&2
-            exit 1
-          fi
-
-          case "$GITHUB_REF" in
-            refs/tags/v*)
-              REF_VERSION=${GITHUB_REF_NAME#v}
-              if [ "$REF_VERSION" != "$RELEASE_VERSION" ]; then
-                echo "tag version ${REF_VERSION} does not match package version ${RELEASE_VERSION}" >&2
-                exit 1
-              fi
-              IMAGE_VERSION=$RELEASE_VERSION
-              PACKAGE_VERSION=$RELEASE_VERSION
-              PRERELEASE=false
-              RELEASE_TAG=v${RELEASE_VERSION}
-              TAGGED=true
-              ;;
-            *)
-              SHORT_SHA=$(git rev-parse --short=8 HEAD)
-              IMAGE_VERSION=${RELEASE_VERSION}-git.${SHORT_SHA}
-              PACKAGE_VERSION=${RELEASE_VERSION}+git.${SHORT_SHA}
-              PRERELEASE=true
-              RELEASE_TAG=v${IMAGE_VERSION}
-              TAGGED=false
-              ;;
-          esac
-
-          resources/scripts/ci-toolchain-image >> "$GITHUB_OUTPUT"
-          echo "image_version=${IMAGE_VERSION}" >> "$GITHUB_OUTPUT"
-          echo "package_version=${PACKAGE_VERSION}" >> "$GITHUB_OUTPUT"
-          echo "prerelease=${PRERELEASE}" >> "$GITHUB_OUTPUT"
-          echo "release_tag=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
-          echo "release_version=${RELEASE_VERSION}" >> "$GITHUB_OUTPUT"
-          echo "tagged=${TAGGED}" >> "$GITHUB_OUTPUT"
-
-  containers:
-    needs: resolve-versions
-    runs-on: ${{ matrix.arch }}
-    timeout-minutes: 120
+  debs:
+    if: startsWith(github.ref, 'refs/tags/v')
     strategy:
       fail-fast: false
       matrix:
         arch: [amd64, arm64]
-        target: [base, cli, core, fuse, nfs, s3, webdav, docker, csi, containerd, cifs, block, omnibus]
-    container:
-      image: docker:29-dind
-      options: --privileged
-
-    steps:
-      - name: Install checkout dependencies
-        run: apk add --no-cache nodejs git
-
-      - uses: actions/checkout@v7
-
-      - name: Start Docker daemon
-        run: |
-          dockerd --host=unix:///var/run/docker.sock --insecure-registry=forgejo.dmz &
-          timeout 60 sh -c 'until docker info >/dev/null 2>&1; do sleep 1; done'
-
-      - name: Login to Forgejo Registry
-        run: echo "${{ secrets.REGISTRY_TOKEN }}" | docker login --username=james --password-stdin forgejo.dmz
-
-      - name: Login to GitHub Container Registry
-        run: echo "${{ secrets.GHCR_TOKEN }}" | docker login --username=jimsynz --password-stdin ghcr.io
-
-      - name: Set up Docker Buildx
-        run: |
-          cat > /tmp/buildkitd.toml << 'TOML'
-          [registry."forgejo.dmz"]
-            http = true
-            insecure = true
-          TOML
-          docker buildx create --name builder --config /tmp/buildkitd.toml --driver-opt network=host
-          docker buildx use builder
-
-      - name: Build target
-        run: |
-          TAG=${{ needs.resolve-versions.outputs.image_version }}-${{ matrix.arch }}
-          PLATFORMS=linux/${{ matrix.arch }} TAG=$TAG ./containers/bake.sh --pull --load "${{ matrix.target }}"
-
-      - name: Push target
-        run: |
-          TAG=${{ needs.resolve-versions.outputs.image_version }}-${{ matrix.arch }}
-          if [ "${{ matrix.target }}" != base ]; then
-            docker push "forgejo.dmz/project-neon/neonfs/${{ matrix.target }}:${TAG}"
-            docker push "ghcr.io/jimsynz/neonfs/${{ matrix.target }}:${TAG}"
-          fi
-
-  containers-manifest:
-    runs-on: amd64
-    timeout-minutes: 60
-    needs: [resolve-versions, containers]
-    container:
-      image: docker:29-dind
-      options: --privileged
-
-    steps:
-      - name: Start Docker daemon
-        run: |
-          dockerd --host=unix:///var/run/docker.sock --insecure-registry=forgejo.dmz &
-          timeout 60 sh -c 'until docker info >/dev/null 2>&1; do sleep 1; done'
-
-      - name: Login to Forgejo Registry
-        run: echo "${{ secrets.REGISTRY_TOKEN }}" | docker login --username=james --password-stdin forgejo.dmz
-
-      - name: Login to GitHub Container Registry
-        run: echo "${{ secrets.GHCR_TOKEN }}" | docker login --username=jimsynz --password-stdin ghcr.io
-
-      - name: Set up Docker Buildx
-        run: |
-          cat > /tmp/buildkitd.toml << 'TOML'
-          [registry."forgejo.dmz"]
-            http = true
-            insecure = true
-          TOML
-          docker buildx create --name builder --config /tmp/buildkitd.toml --driver-opt network=host
-          docker buildx use builder
-
-      - name: Create multi-arch manifests
-        run: |
-          VERSION=${{ needs.resolve-versions.outputs.image_version }}
-          IMAGES="core fuse nfs s3 webdav docker csi containerd cifs block omnibus cli"
-
-          for image in $IMAGES; do
-            docker buildx imagetools create \
-              -t forgejo.dmz/project-neon/neonfs/${image}:${VERSION} \
-              forgejo.dmz/project-neon/neonfs/${image}:${VERSION}-amd64 \
-              forgejo.dmz/project-neon/neonfs/${image}:${VERSION}-arm64
-
-            docker buildx imagetools create \
-              -t ghcr.io/jimsynz/neonfs/${image}:${VERSION} \
-              ghcr.io/jimsynz/neonfs/${image}:${VERSION}-amd64 \
-              ghcr.io/jimsynz/neonfs/${image}:${VERSION}-arm64
-
-            if [ "${{ needs.resolve-versions.outputs.tagged }}" = true ]; then
-              docker buildx imagetools create \
-                -t forgejo.dmz/project-neon/neonfs/${image}:latest \
-                forgejo.dmz/project-neon/neonfs/${image}:${VERSION}-amd64 \
-                forgejo.dmz/project-neon/neonfs/${image}:${VERSION}-arm64
-
-              docker buildx imagetools create \
-                -t ghcr.io/jimsynz/neonfs/${image}:latest \
-                ghcr.io/jimsynz/neonfs/${image}:${VERSION}-amd64 \
-                ghcr.io/jimsynz/neonfs/${image}:${VERSION}-arm64
-            fi
-          done
-
-  # =========================================================================
-  # Debian packages - Native multi-arch builds
-  # Build each architecture on its own native runner, then upload to Forgejo.
-  # =========================================================================
-  debs-amd64:
-    needs: resolve-versions
-    runs-on: amd64
-    timeout-minutes: 120
-    container:
-      image: ${{ needs.resolve-versions.outputs.elixir_rust_image }}
-      options: --privileged
-
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Install build dependencies
-        run: |
-          apt-get update
-          apt-get install -y --no-install-recommends \
-            libfuse3-dev gettext-base libclang-dev
-          rm -rf /var/lib/apt/lists/*
-
-      - name: Install nfpm
-        run: |
-          # renovate: datasource=github-releases depName=goreleaser/nfpm
-          NFPM_VERSION=v2.47.0
-          curl -sfL "https://github.com/goreleaser/nfpm/releases/download/${NFPM_VERSION}/nfpm_${NFPM_VERSION#v}_Linux_x86_64.tar.gz" \
-            | tar xz -C /usr/local/bin nfpm
-
-      - name: Restore build cache
-        uses: actions/cache@v6
-        with:
-          # `priv/native/` is where Rustler copies the freshly-built `.so`.
-          # If we cache `_build/` without it, a partial cache restore can
-          # leave the consumer's `_build/prod/lib/<dep>/.mix/compile.*`
-          # marking the dep as compiled while the source `priv/native/.so`
-          # is gone — `mix compile` then skips the rustler step and
-          # `mix release` copies an empty `priv/` into the rel tree (#746).
-          path: |
-            neonfs-cli/target
-            /usr/local/cargo/registry
-            /usr/local/cargo/git
-            neonfs_client/deps
-            neonfs_client/_build
-            neonfs_client/native/neonfs_chunker/target
-            neonfs_client/priv/native
-            neonfs_core/deps
-            neonfs_core/_build
-            neonfs_core/target
-            neonfs_core/priv/native
-            neonfs_fuse/deps
-            neonfs_fuse/_build
-            neonfs_nfs/deps
-            neonfs_nfs/_build
-            neonfs_s3/deps
-            neonfs_s3/_build
-            neonfs_webdav/deps
-            neonfs_webdav/_build
-            neonfs_docker/deps
-            neonfs_docker/_build
-            neonfs_containerd/deps
-            neonfs_containerd/_build
-            neonfs_cifs/deps
-            neonfs_cifs/_build
-            neonfs_omnibus/deps
-            neonfs_omnibus/_build
-            .samba-build
-          key: v2-release-amd64-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('**/mix.lock', '**/Cargo.lock') }}
-          restore-keys: v2-release-amd64-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-
-
-      - name: Build releases
-        run: |
-          mix local.hex --force && mix local.rebar --force
-
-          # Build CLI
-          cd neonfs-cli && cargo build --release && cd ..
-
-          # Build Elixir releases.
-          #
-          # `mix release --overwrite` overwrites individual files but does
-          # NOT delete pre-existing `lib/<app>-<old_vsn>/` directories.
-          # With a restored cache, that means stale app-version dirs
-          # accumulate, and in some cases the new `lib/<app>-<new_vsn>/priv/`
-          # is left empty (which is how `neonfs_blob.so` ended up missing
-          # from `neonfs_core-0.2.3/priv/native/` in the omnibus deb, #746).
-          # Wipe `_build/prod/rel/` before every release.
-          for component in neonfs_core neonfs_fuse neonfs_nfs neonfs_s3 neonfs_webdav neonfs_docker neonfs_containerd neonfs_cifs neonfs_block neonfs_omnibus; do
-            cd "$component"
-            mix deps.get --only prod
-            MIX_ENV=prod mix compile
-            rm -rf _build/prod/rel
-            MIX_ENV=prod mix release --overwrite
-            cd ..
-          done
-
-      - name: Package .deb files
-        run: |
-          VERSION=${{ needs.resolve-versions.outputs.package_version }}
-          export VERSION ARCH=amd64 BUILD_DIR="$FORGEJO_WORKSPACE"
-          mkdir -p dist
-
-          # Build the samba-vfs-neonfs deb — the Samba VFS module, from the
-          # distro's own samba source so it loads in the host smbd (#1548).
-          # neonfs-cifs / neonfs-omnibus depend on it.
-          OUT_DIR="$FORGEJO_WORKSPACE/dist" bash packaging/build-vfs-deb.sh
-
-          cd packaging/nfpm
-          for config in neonfs-cli neonfs-common neonfs-core neonfs-fuse neonfs-nfs neonfs-s3 neonfs-webdav neonfs-docker neonfs-containerd neonfs-cifs neonfs-block neonfs-omnibus; do
-            envsubst < "${config}.yaml" > ".generated-${config}.yaml"
-            nfpm package --config ".generated-${config}.yaml" --packager deb --target "$FORGEJO_WORKSPACE/dist/"
-            rm -f ".generated-${config}.yaml"
-          done
-
-      - name: Upload .deb artifacts
-        uses: actions/upload-artifact@v5
-        with:
-          name: debs-amd64
-          path: dist/*.deb
-
-  debs-arm64:
-    needs: resolve-versions
-    runs-on: arm64
-    timeout-minutes: 120
-    container:
-      image: ${{ needs.resolve-versions.outputs.elixir_rust_image }}
-      options: --privileged
-
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Install build dependencies
-        run: |
-          apt-get update
-          apt-get install -y --no-install-recommends \
-            libfuse3-dev gettext-base libclang-dev
-          rm -rf /var/lib/apt/lists/*
-
-      - name: Install nfpm
-        run: |
-          # renovate: datasource=github-releases depName=goreleaser/nfpm
-          NFPM_VERSION=v2.47.0
-          curl -sfL "https://github.com/goreleaser/nfpm/releases/download/${NFPM_VERSION}/nfpm_${NFPM_VERSION#v}_Linux_arm64.tar.gz" \
-            | tar xz -C /usr/local/bin nfpm
-
-      - name: Restore build cache
-        uses: actions/cache@v6
-        with:
-          # `priv/native/` is where Rustler copies the freshly-built `.so`.
-          # If we cache `_build/` without it, a partial cache restore can
-          # leave the consumer's `_build/prod/lib/<dep>/.mix/compile.*`
-          # marking the dep as compiled while the source `priv/native/.so`
-          # is gone — `mix compile` then skips the rustler step and
-          # `mix release` copies an empty `priv/` into the rel tree (#746).
-          path: |
-            neonfs-cli/target
-            /usr/local/cargo/registry
-            /usr/local/cargo/git
-            neonfs_client/deps
-            neonfs_client/_build
-            neonfs_client/native/neonfs_chunker/target
-            neonfs_client/priv/native
-            neonfs_core/deps
-            neonfs_core/_build
-            neonfs_core/target
-            neonfs_core/priv/native
-            neonfs_fuse/deps
-            neonfs_fuse/_build
-            neonfs_nfs/deps
-            neonfs_nfs/_build
-            neonfs_s3/deps
-            neonfs_s3/_build
-            neonfs_webdav/deps
-            neonfs_webdav/_build
-            neonfs_docker/deps
-            neonfs_docker/_build
-            neonfs_containerd/deps
-            neonfs_containerd/_build
-            neonfs_cifs/deps
-            neonfs_cifs/_build
-            neonfs_omnibus/deps
-            neonfs_omnibus/_build
-            .samba-build
-          key: v2-release-arm64-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('**/mix.lock', '**/Cargo.lock') }}
-          restore-keys: v2-release-arm64-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-
-
-      - name: Build releases
-        run: |
-          mix local.hex --force && mix local.rebar --force
-
-          # Build CLI
-          cd neonfs-cli && cargo build --release && cd ..
-
-          # Build Elixir releases.
-          #
-          # `mix release --overwrite` overwrites individual files but does
-          # NOT delete pre-existing `lib/<app>-<old_vsn>/` directories.
-          # With a restored cache, that means stale app-version dirs
-          # accumulate, and in some cases the new `lib/<app>-<new_vsn>/priv/`
-          # is left empty (which is how `neonfs_blob.so` ended up missing
-          # from `neonfs_core-0.2.3/priv/native/` in the omnibus deb, #746).
-          # Wipe `_build/prod/rel/` before every release.
-          for component in neonfs_core neonfs_fuse neonfs_nfs neonfs_s3 neonfs_webdav neonfs_docker neonfs_containerd neonfs_cifs neonfs_block neonfs_omnibus; do
-            cd "$component"
-            mix deps.get --only prod
-            MIX_ENV=prod mix compile
-            rm -rf _build/prod/rel
-            MIX_ENV=prod mix release --overwrite
-            cd ..
-          done
-
-      - name: Package .deb files
-        run: |
-          VERSION=${{ needs.resolve-versions.outputs.package_version }}
-          export VERSION ARCH=arm64 BUILD_DIR="$FORGEJO_WORKSPACE"
-          mkdir -p dist
-
-          # Build the samba-vfs-neonfs deb — the Samba VFS module, from the
-          # distro's own samba source so it loads in the host smbd (#1548).
-          # neonfs-cifs / neonfs-omnibus depend on it.
-          OUT_DIR="$FORGEJO_WORKSPACE/dist" bash packaging/build-vfs-deb.sh
-
-          cd packaging/nfpm
-          for config in neonfs-cli neonfs-common neonfs-core neonfs-fuse neonfs-nfs neonfs-s3 neonfs-webdav neonfs-docker neonfs-containerd neonfs-cifs neonfs-block neonfs-omnibus; do
-            envsubst < "${config}.yaml" > ".generated-${config}.yaml"
-            nfpm package --config ".generated-${config}.yaml" --packager deb --target "$FORGEJO_WORKSPACE/dist/"
-            rm -f ".generated-${config}.yaml"
-          done
-
-      - name: Upload .deb artifacts
-        uses: actions/upload-artifact@v5
-        with:
-          name: debs-arm64
-          path: dist/*.deb
-
-  debs-upload:
-    runs-on: docker
-    timeout-minutes: 60
-    needs: [resolve-versions, debs-amd64, debs-arm64]
+    runs-on: ${{ matrix.arch }}
+    timeout-minutes: 30
     container:
       image: harton.dev/james/workflows/ci-base:latest
-
     steps:
-      - name: Keep snapshot packages out of the stable repository
-        if: needs.resolve-versions.outputs.tagged != 'true'
-        run: echo "Snapshot packages will be attached to the prerelease only."
+      - uses: actions/checkout@v7
+      # Cloned rather than checked out: actions/checkout authenticates with
+      # this repo's job token, which cannot see another repo.
+      - name: Fetch the workspace's packaging scripts
+        run: git clone --quiet --depth 1 https://harton.dev/project-neon/neonfs_workspace.git .neonfs_workspace
 
-      - name: Download amd64 .deb artifacts
-        if: needs.resolve-versions.outputs.tagged == 'true'
-        uses: actions/download-artifact@v7
-        with:
-          name: debs-amd64
-          path: dist/
+      - name: Install packaging tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends gettext-base
+          rm -rf /var/lib/apt/lists/*
+          # renovate: datasource=github-releases depName=goreleaser/nfpm
+          NFPM_VERSION=v2.47.0
+          case "$(dpkg --print-architecture)" in
+            amd64) nfpm_arch=x86_64 ;;
+            arm64) nfpm_arch=arm64 ;;
+          esac
+          curl -sfL "https://github.com/goreleaser/nfpm/releases/download/${NFPM_VERSION}/nfpm_${NFPM_VERSION#v}_Linux_${nfpm_arch}.tar.gz" \
+            | tar xz -C /usr/local/bin nfpm
 
-      - name: Download arm64 .deb artifacts
-        if: needs.resolve-versions.outputs.tagged == 'true'
-        uses: actions/download-artifact@v7
-        with:
-          name: debs-arm64
-          path: dist/
+      - name: Package
+        run: |
+          export VERSION="${GITHUB_REF_NAME#v}"
+          export ARCH="$(dpkg --print-architecture)"
+          export BUILD_DIR="$PWD"
+          export COMMON="$PWD/.neonfs_workspace/packaging"
+          mkdir -p dist
+          for config in packaging/nfpm/*.yaml; do
+            generated="$(mktemp --suffix=.yaml -p packaging/nfpm)"
+            envsubst < "$config" > "$generated"
+            nfpm package --config "$generated" --packager deb --target dist/
+            rm -f "$generated"
+          done
 
-      - name: Upload to Forgejo Debian repository
-        if: needs.resolve-versions.outputs.tagged == 'true'
+      - name: Upload to the Debian repository
         run: |
           response=$(mktemp)
           for deb in dist/*.deb; do
-            echo "Uploading $(basename "$deb")..."
             status=$(curl -sS -o "$response" -w '%{http_code}' \
               -H "Authorization: token ${{ secrets.REGISTRY_TOKEN }}" \
               --upload-file "$deb" \
-              "https://harton.dev/api/packages/project-neon/debian/pool/trixie/main/upload")
-
+              "${GITHUB_SERVER_URL}/api/packages/project-neon/debian/pool/trixie/main/upload")
             case "$status" in
-              2??) ;;
+              2??) echo "uploaded $(basename "$deb")" ;;
               409)
-                if grep -qx 'package file already exists' "$response"; then
-                  echo "$(basename "$deb") is already published; skipping."
-                else
-                  cat "$response" >&2
-                  exit 1
-                fi
+                grep -qx 'package file already exists' "$response" || { cat "$response" >&2; exit 1; }
+                echo "$(basename "$deb") is already published"
                 ;;
-              *)
-                cat "$response" >&2
-                exit 1
-                ;;
+              *) cat "$response" >&2; exit 1 ;;
             esac
           done
-          rm -f "$response"
 
-  forgejo-release:
+      - uses: actions/upload-artifact@v5
+        with:
+          name: debs-${{ matrix.arch }}
+          path: dist/*.deb
+
+  release:
+    needs: debs
     runs-on: docker
-    timeout-minutes: 60
-    needs: [resolve-versions, containers-manifest, debs-upload]
+    timeout-minutes: 30
     container:
       image: harton.dev/james/workflows/ci-base:latest
-
     steps:
       - uses: actions/checkout@v7
-
-      - name: Download amd64 .deb artifacts
-        uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v7
         with:
-          name: debs-amd64
-          path: dist/
+          path: artifacts/
 
-      - name: Download arm64 .deb artifacts
-        uses: actions/download-artifact@v7
-        with:
-          name: debs-arm64
-          path: dist/
-
-      - name: Extract changelog and create release
+      # The job's own token: REGISTRY_TOKEN is scoped for packages and cannot
+      # create releases.
+      - name: Create or update the Forgejo release
+        env:
+          TOKEN: ${{ github.token }}
         run: |
-          VERSION=${{ needs.resolve-versions.outputs.release_version }}
-          RELEASE_TAG=${{ needs.resolve-versions.outputs.release_tag }}
-          PRERELEASE=${{ needs.resolve-versions.outputs.prerelease }}
+          tag="$GITHUB_REF_NAME"
+          api="${GITHUB_SERVER_URL}/api/v1/repos/${GITHUB_REPOSITORY}/releases"
 
-          CHANGELOG=$(awk '/^## \['"$VERSION"'\]/{found=1; next} /^## \[/{if(found) exit} found{print}' CHANGELOG.md)
+          # git_ops writes `## [v1.2.3](compare-link) (date)` headings.
+          notes=$(awk -v v="$tag" '
+            index($0, "## [" v "]") == 1 { found = 1; next }
+            /^## \[/ { if (found) exit }
+            found { print }' CHANGELOG.md 2>/dev/null || true)
+          [ -n "$(printf '%s' "$notes" | tr -d '[:space:]')" ] || notes="No changelog entries for ${tag}."
 
-          # Create the release
-          RELEASE_ID=$(curl -sf -X POST \
-            "${{ github.server_url }}/api/v1/repos/${{ github.repository }}/releases" \
-            -H "Authorization: token ${{ secrets.FORGEJO_TOKEN }}" \
-            -H "Content-Type: application/json" \
-            -d "$(jq -n \
-              --arg tag "$RELEASE_TAG" \
-              --arg name "$RELEASE_TAG" \
-              --arg body "$CHANGELOG" \
-              --arg target "${{ github.sha }}" \
-              --argjson prerelease "$PRERELEASE" \
-              '{tag_name: $tag, target_commitish: $target, name: $name, body: $body, draft: false, prerelease: $prerelease}'
-            )" | jq -r '.id')
+          # A re-run of the tag must not create a second release.
+          id=$(curl -sf -H "Authorization: token ${TOKEN}" "${api}/tags/${tag}" | jq -r '.id // empty' || true)
+          payload=$(jq -n --arg tag "$tag" --arg body "$notes" '{tag_name: $tag, name: $tag, body: $body}')
+          if [ -n "$id" ]; then
+            curl -sS --fail-with-body -X PATCH -H "Authorization: token ${TOKEN}" -H 'Content-Type: application/json' \
+              -d "$payload" "${api}/${id}" > /dev/null
+          else
+            id=$(curl -sS --fail-with-body -X POST -H "Authorization: token ${TOKEN}" -H 'Content-Type: application/json' \
+              -d "$payload" "${api}" | jq -r '.id')
+          fi
 
-          # Attach .deb files as release assets
-          for deb in dist/*.deb; do
-            echo "Attaching $(basename "$deb") to release..."
-            curl -sf \
-              -H "Authorization: token ${{ secrets.FORGEJO_TOKEN }}" \
-              -X POST \
-              "${{ github.server_url }}/api/v1/repos/${{ github.repository }}/releases/${RELEASE_ID}/assets?name=$(basename "$deb")" \
-              -F "attachment=@${deb}" \
-              > /dev/null
+          existing=$(curl -sS --fail-with-body -H "Authorization: token ${TOKEN}" "${api}/${id}/assets" | jq -r '.[].name')
+          for file in artifacts/*/*.deb; do
+            [ -f "$file" ] || continue
+            name=$(basename "$file")
+            printf '%s\n' "$existing" | grep -qxF "$name" && continue
+            curl -sS --fail-with-body -X POST -H "Authorization: token ${TOKEN}" \
+              "${api}/${id}/assets?name=$(jq -rn --arg n "$name" '$n | @uri')" \
+              -F "attachment=@${file}" > /dev/null
+            echo "attached ${name}"
           done

@@ -36,6 +36,15 @@ on:
     - cron: "0 14 * * *"
   workflow_dispatch:
 
+# Every job here builds NeonFS packages from their own repos, so each assembles
+# a workspace — this repo at the commit under test beside every package repo
+# at its default branch — and builds against those checkouts rather than the
+# tags each pins. A nightly exists to catch what merged today, not what was
+# last released.
+env:
+  NEONFS_WS: /tmp/neonfs-workspace
+  NEONFS_DEPS: local
+
 jobs:
   # The versioned toolchain image the Samba build needs. Same shape as every
   # other workflow's `setup`, and the same `ci-toolchain-image` behind it: a
@@ -55,9 +64,12 @@ jobs:
       rust: ${{ steps.parse.outputs.rust }}
     steps:
       - uses: actions/checkout@v7
+      # Cloned rather than checked out: actions/checkout authenticates with
+      # this repo's job token, which cannot see another repo.
+      - name: Fetch the workspace's CI scripts
+        run: git clone --quiet --depth 1 https://harton.dev/project-neon/neonfs_workspace.git .neonfs_workspace
       - id: parse
-        run: |
-          resources/scripts/ci-toolchain-image >> "$GITHUB_OUTPUT"
+        run: .neonfs_workspace/ci/toolchain-image >> "$GITHUB_OUTPUT"
 
   # =======================================================================
   # The `test-rig` acceptance matrix, in CI for the first time. Everything
@@ -122,6 +134,11 @@ jobs:
             tar -C /usr/local/bin -xzf /tmp/nfpm.tgz nfpm
           fi
 
+      - name: Assemble the workspace
+        run: |
+          git clone --quiet --depth 1 https://harton.dev/project-neon/neonfs_workspace.git "$NEONFS_WS"
+          "$NEONFS_WS/ci/assemble-workspace" "$NEONFS_WS"
+
       # The image carries Elixir and Rust, so nothing installs a toolchain
       # here — but hex and rebar are per-user and `neonfs-rig up` builds the
       # `.deb`s from a mix release.
@@ -134,12 +151,11 @@ jobs:
       # running cluster" by `up`, so start from nothing rather than
       # inheriting whatever is on the host.
       - name: Discard any leftover rig state
-        run: cd test-rig && ./neonfs-rig clean || true
+        run: cd "$NEONFS_WS/neonfs/test-rig" && ./neonfs-rig clean || true
 
       - name: Boot a three-node cluster
         run: |
-          export PATH="$PWD/resources/scripts:$PATH"
-          cd test-rig
+          cd "$NEONFS_WS/neonfs/test-rig"
           NODES=3 ./neonfs-rig up
 
       # `multi` is the fuller matrix: it adds the cross-node replication steps
@@ -158,8 +174,7 @@ jobs:
       # the wrong place.
       - name: Run the acceptance matrix
         run: |
-          export PATH="$PWD/resources/scripts:$PATH"
-          cd test-rig
+          cd "$NEONFS_WS/neonfs/test-rig"
           ./acceptance multi 3
 
       # A nightly failure has to be diagnosable without shell access to
@@ -169,7 +184,7 @@ jobs:
         if: always()
         run: |
           mkdir -p "$GITHUB_WORKSPACE/rig-logs"
-          for log in test-rig/.cache/run/node-*/serial.log; do
+          for log in "$NEONFS_WS"/neonfs/test-rig/.cache/run/node-*/serial.log; do
             [ -f "$log" ] || continue
             node="$(basename "$(dirname "$log")")"
             cp "$log" "$GITHUB_WORKSPACE/rig-logs/${node}-serial.log"
@@ -189,7 +204,7 @@ jobs:
       # with the weekly bench and with the next night's run.
       - name: Tear down the rig
         if: always()
-        run: cd test-rig && ./neonfs-rig clean || true
+        run: cd "$NEONFS_WS/neonfs/test-rig" && ./neonfs-rig clean || true
 
   # =======================================================================
   # The cluster `csi_tooling` cannot boot. k3s runs in a rig VM, the NeonFS
@@ -229,6 +244,11 @@ jobs:
             tar -C /usr/local/bin -xzf /tmp/nfpm.tgz nfpm
           fi
 
+      - name: Assemble the workspace
+        run: |
+          git clone --quiet --depth 1 https://harton.dev/project-neon/neonfs_workspace.git "$NEONFS_WS"
+          "$NEONFS_WS/ci/assemble-workspace" "$NEONFS_WS"
+
       # The CSI image is built here, so this job needs a daemon of its own.
       # containerd is started first and dockerd pointed at it: dockerd's wait
       # for a managed containerd is a fixed internal timeout that a loaded
@@ -265,7 +285,7 @@ jobs:
           mix local.rebar --force
 
       - name: Discard any leftover rig state
-        run: cd test-rig && ./neonfs-rig clean || true
+        run: cd "$NEONFS_WS/neonfs/test-rig" && ./neonfs-rig clean || true
 
       # One core node is enough: what is under test is that the driver
       # reaches a cluster, not the cluster's own replication.
@@ -273,8 +293,7 @@ jobs:
         env:
           DOCKER_HOST: unix:///var/run/docker.sock
         run: |
-          export PATH="$PWD/resources/scripts:$PATH"
-          cd test-rig
+          cd "$NEONFS_WS/neonfs/test-rig"
           NODES=1 ./neonfs-rig up
           ./neonfs-rig k3s
 
@@ -282,8 +301,7 @@ jobs:
         env:
           DOCKER_HOST: unix:///var/run/docker.sock
         run: |
-          export PATH="$PWD/resources/scripts:$PATH"
-          cd test-rig
+          cd "$NEONFS_WS/neonfs/test-rig"
           ./neonfs-rig csi-deploy
 
       # #1594's headline criterion, and the only place it can run: a pod with
@@ -295,15 +313,14 @@ jobs:
         env:
           DOCKER_HOST: unix:///var/run/docker.sock
         run: |
-          export PATH="$PWD/resources/scripts:$PATH"
-          cd test-rig
+          cd "$NEONFS_WS/neonfs/test-rig"
           ./csi-block-acceptance
 
       - name: Collect VM serial logs
         if: always()
         run: |
           mkdir -p "$GITHUB_WORKSPACE/rig-logs"
-          for log in test-rig/.cache/run/node-*/serial.log; do
+          for log in "$NEONFS_WS"/neonfs/test-rig/.cache/run/node-*/serial.log; do
             [ -f "$log" ] || continue
             node="$(basename "$(dirname "$log")")"
             cp "$log" "$GITHUB_WORKSPACE/rig-logs/${node}-serial.log"
@@ -321,7 +338,7 @@ jobs:
 
       - name: Tear down the rig
         if: always()
-        run: cd test-rig && ./neonfs-rig clean || true
+        run: cd "$NEONFS_WS/neonfs/test-rig" && ./neonfs-rig clean || true
 
   csi_tooling:
     runs-on: amd64
@@ -331,10 +348,17 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # The pinned toolchain comes from the workspace and the chart from
+      # neonfs_csi, at its default branch.
+      - name: Assemble the workspace
+        run: |
+          git clone --quiet --depth 1 https://harton.dev/project-neon/neonfs_workspace.git "$NEONFS_WS"
+          "$NEONFS_WS/ci/assemble-workspace" "$NEONFS_WS"
+
       - name: Resolve csi-sanity version
         id: csi-sanity-version
         run: |
-          version=$(resources/scripts/ci-install-k8s-tools --print-version csi-sanity)
+          version=$("$NEONFS_WS/ci/install-k8s-tools" --print-version csi-sanity)
           echo "version=${version}" >> "$GITHUB_OUTPUT"
 
       - name: Cache csi-sanity
@@ -342,16 +366,16 @@ jobs:
         uses: actions/cache@v6
         with:
           path: /usr/local/bin/csi-sanity
-          # Same key as the `neonfs_csi` package job in ci.yml, so whichever
-          # runs first warms the other.
+          # Keyed on the pinned version, so a bump rebuilds it. Caches are
+          # per repo, so this one is warmed only by this job.
           key: csi-sanity-v${{ steps.csi-sanity-version.outputs.version }}-${{ runner.arch }}
 
       - name: Install kind, k3d, kubectl and helm
-        run: resources/scripts/ci-install-k8s-tools kind k3d kubectl helm
+        run: '"$NEONFS_WS/ci/install-k8s-tools" kind k3d kubectl helm'
 
       - name: Build csi-sanity
         if: steps.cache-csi-sanity.outputs.cache-hit != 'true'
-        run: resources/scripts/ci-install-k8s-tools csi-sanity
+        run: '"$NEONFS_WS/ci/install-k8s-tools" csi-sanity'
 
       # No cluster is booted here, and that is a finding rather than an
       # omission: neither kind nor k3d can bring one up inside this job's own
@@ -368,8 +392,9 @@ jobs:
       # and the conformance run wait on a cluster.
       - name: Validate the CSI chart
         run: |
-          helm lint deploy/charts/neonfs-csi
-          helm template neonfs-csi deploy/charts/neonfs-csi \
+          chart="$NEONFS_WS/neonfs_csi/deploy/charts/neonfs-csi"
+          helm lint "$chart"
+          helm template neonfs-csi "$chart" \
             --namespace neonfs-csi \
             --set bootstrap.value=nightly-e2e-token \
             > /tmp/neonfs-csi-rendered.yaml
@@ -408,6 +433,14 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # The module and its packaging come from neonfs_cifs, and the end-to-end
+      # test from this repo's integration suite, built against neonfs_cifs's
+      # default branch rather than the tag the suite pins.
+      - name: Assemble the workspace
+        run: |
+          git clone --quiet --depth 1 https://harton.dev/project-neon/neonfs_workspace.git "$NEONFS_WS"
+          "$NEONFS_WS/ci/assemble-workspace" "$NEONFS_WS"
+
       # The cache holds a Samba *source tree*, and `build-vfs-deb.sh` refuses
       # to build against one that no longer matches the archive — so the key
       # has to move with the archive. A static key cannot: `actions/cache`
@@ -425,47 +458,31 @@ jobs:
           fi
           echo "version=$(printf '%s' "$version" | sed 's/[^A-Za-z0-9._-]/-/g')" >> "$GITHUB_OUTPUT"
 
+      # `build-vfs-deb.sh` keeps its Samba tree under the neonfs_cifs checkout.
+      # Caches are per repo, so this is this job's own copy of the tree
+      # neonfs_cifs's `vfs.yml` keeps warm for itself.
       - name: Restore Samba build cache
         uses: actions/cache@v6
         with:
-          path: .samba-build
-          # The same key the vfs_neonfs job and the cache-warm workflow use,
-          # so this shares their tree instead of building a third copy.
+          path: /tmp/neonfs-workspace/neonfs_cifs/.samba-build
           key: v5-vfs_neonfs-samba-deb-${{ runner.arch }}-${{ steps.samba.outputs.version }}
 
       - name: Build samba-vfs-neonfs.deb
-        run: OUT_DIR="$PWD/dist" bash packaging/build-vfs-deb.sh
+        run: |
+          cd "$NEONFS_WS/neonfs_cifs"
+          OUT_DIR="$PWD/dist" bash packaging/build-vfs-deb.sh
 
       - name: Verify an smbd loads the module
-        run: bash packaging/verify-smbd-sidecar.sh
+        run: bash "$NEONFS_WS/neonfs_cifs/packaging/verify-smbd-sidecar.sh"
 
       # The sidecar check leaves Samba and the module installed together,
       # which is exactly what the end-to-end test's capability gate looks
       # for — so this step needs no Samba setup of its own, only Elixir.
-      - name: Restore build cache
-        uses: actions/cache@v6
-        with:
-          path: |
-            neonfs_client/deps
-            neonfs_client/_build
-            neonfs_client/native/neonfs_chunker/target
-            neonfs_client/priv/native
-            neonfs_integration/deps
-            neonfs_integration/_build
-            neonfs_core/target
-            neonfs_core/priv/native
-            neonfs-cli/target
-          # The same key the `neonfs_integration` job writes, so this
-          # restores that build rather than paying for a third one. The
-          # nightly job only ever reads it — `actions/cache` will not
-          # overwrite an existing entry anyway.
-          key: v7-build-neonfs_integration-${{ runner.arch }}-${{ needs.setup.outputs.elixir }}-${{ needs.setup.outputs.rust }}-${{ hashFiles('neonfs_integration/mix.lock', 'neonfs_core/Cargo.lock', 'neonfs_client/native/neonfs_chunker/Cargo.lock', 'neonfs-cli/Cargo.lock') }}
-          restore-keys: v7-build-neonfs_integration-${{ runner.arch }}-
-
+      # Built against the checkouts (NEONFS_DEPS=local), which is a different
+      # build from ci.yml's tag-pinned one, so its cache would not help.
       - name: Build the integration suite
-        working-directory: neonfs_integration
         run: |
-          bash ../resources/scripts/ci-scrub-path-deps
+          cd "$NEONFS_WS/neonfs/neonfs_integration"
           mix local.hex --force && mix local.rebar --force
           for attempt in 1 2 3; do
             mix deps.get && break
@@ -477,5 +494,6 @@ jobs:
           mix compile
 
       - name: SMB end-to-end round trip
-        working-directory: neonfs_integration
-        run: mix test --include requires_smbd test/integration/cifs_smbd_test.exs
+        run: |
+          cd "$NEONFS_WS/neonfs/neonfs_integration"
+          mix test --include requires_smbd test/integration/cifs_smbd_test.exs

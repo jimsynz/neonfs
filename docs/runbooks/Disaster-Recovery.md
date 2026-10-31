@@ -19,8 +19,8 @@ If any of those is uncertain, **stop**. Reconstruction is destructive when appli
 `Reconstruct-from-disk` is an Elixir function plus a CLI subcommand. It runs locally on one core node and:
 
 1. Reads the configured drive list (`:drives` in app env).
-2. For each drive path, reads `<drive>/.neonfs-drive.json` (the [Drive.Identity](../../neonfs_core/lib/neon_fs/core/drive/identity.ex) file from #778). Drives whose `cluster_id` doesn't match the local cluster are skipped with a warning.
-3. For each accepted drive, walks `<drive>/blobs/<tier>/**/*` and decodes each candidate chunk as an [ETF root segment](../../neonfs_core/lib/neon_fs/core/volume/root_segment.ex) (#780). Non-root chunks fail decode and are silently skipped — most chunks aren't root segments.
+2. For each drive path, reads `<drive>/.neonfs-drive.json` (the [Drive.Identity](https://harton.dev/project-neon/neonfs_core/src/branch/main/lib/neon_fs/core/drive/identity.ex) file from #778). Drives whose `cluster_id` doesn't match the local cluster are skipped with a warning.
+3. For each accepted drive, walks `<drive>/blobs/<tier>/**/*` and decodes each candidate chunk as an [ETF root segment](https://harton.dev/project-neon/neonfs_core/src/branch/main/lib/neon_fs/core/volume/root_segment.ex) (#780). Non-root chunks fail decode and are silently skipped — most chunks aren't root segments.
 4. When the same `volume_id` has multiple root-segment chunks (old + new from a partially-GCd CoW history), the highest HLC wins. Same HLC + same hash on different drives produces a multi-replica `drive_locations` entry.
 5. Submits the resulting `:register_drive` + `:register_volume_root` Ra commands via `RaSupervisor.command/1`. Per-command failures are aggregated and surfaced; the run does not abort on the first failure.
 

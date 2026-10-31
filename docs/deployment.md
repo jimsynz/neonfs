@@ -25,27 +25,26 @@ This guide explains how to deploy NeonFS using Docker Compose, covering both sin
 
 ## Building Images
 
-NeonFS uses a [Docker Bake](https://docs.docker.com/build/bake/) file (`bake.hcl`) to build all container images. The build produces three runtime images:
+Each NeonFS package publishes its own multi-arch image on every release, to `ghcr.io/jimsynz/neonfs/<name>` (and the project's internal registry). The ones this guide uses:
 
-| Target | Image | Description |
-|--------|-------|-------------|
-| `core` | `harton.dev/project-neon/neonfs/core` | Storage and metadata daemon |
-| `fuse` | `harton.dev/project-neon/neonfs/fuse` | FUSE filesystem mount daemon |
-| `cli`  | `harton.dev/project-neon/neonfs/cli`  | CLI client (`neonfs` binary) |
+| Repository | Image | Description |
+|------------|-------|-------------|
+| [`neonfs_core`](https://harton.dev/project-neon/neonfs_core) | `ghcr.io/jimsynz/neonfs/core` | Storage and metadata daemon |
+| [`neonfs_fuse`](https://harton.dev/project-neon/neonfs_fuse) | `ghcr.io/jimsynz/neonfs/fuse` | FUSE filesystem mount daemon |
+| [`neonfs_cli`](https://harton.dev/project-neon/neonfs_cli)   | `ghcr.io/jimsynz/neonfs/cli`  | CLI client (`neonfs` binary) |
 
-Build all three for the local Docker daemon:
+Every service image also carries the CLI, for its healthcheck and for operators exec'ing in.
 
-```bash
-PLATFORMS='linux/amd64' docker buildx bake -f bake.hcl --load core fuse cli
-```
-
-> **Note:** The `--load` flag loads images into the local daemon. Multi-platform builds (the default `linux/amd64,linux/arm64`) don't support `--load`, so override `PLATFORMS` to a single architecture for local use.
-
-You can tag images with a specific version:
+To build one locally instead, run from that package's checkout — the build arguments are the toolchain versions in its `.tool-versions`:
 
 ```bash
-TAG=0.1.0 PLATFORMS='linux/amd64' docker buildx bake -f bake.hcl --load core fuse cli
+docker buildx build --platform linux/amd64 --load \
+  --build-arg ELIXIR_VERSION=1.20.4 --build-arg ERLANG_VERSION=29.1.1 \
+  --build-arg RUST_VERSION=1.99.0 \
+  -t neonfs-core -f Containerfile .
 ```
+
+> **Note:** `--load` loads the image into the local daemon, which a multi-platform build cannot do, so build one architecture at a time for local use.
 
 ## Single-Host Deployment
 

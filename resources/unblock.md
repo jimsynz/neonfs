@@ -6,7 +6,7 @@ This is the counterpart to [`ralph.md`](ralph.md). Ralph defers design calls by 
 
 ## Your Task
 
-1. Add `resources/scripts` to `$PATH`: `export PATH="$PWD/resources/scripts:$PATH"`.
+1. Add the workspace's `bin/` to `$PATH` — this repo sits inside a `neonfs_workspace` checkout: `export PATH="$(git rev-parse --show-toplevel)/../bin:$PATH"`.
 2. Find every blocked issue (see below — the label is not the whole set).
 3. Pick the one blocking the most other work.
 4. Research it against the code until you can state the decision's real trade-offs.
